@@ -59,7 +59,7 @@ def generate_key(key_type: str) -> CertificateIssuerPrivateKeyTypes:
     raise ValueError(f"unsupported key type: {key_type!r}")
 
 
-def _signing_algorithm(
+def signing_algorithm(
     key: CertificateIssuerPrivateKeyTypes,
 ) -> hashes.SHA256 | hashes.SHA384 | None:
     """The hash must match the signing key: Ed25519 signs with
@@ -118,7 +118,7 @@ def create_root(
         .add_extension(_ca_key_usage(), critical=True)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
     )
-    cert = builder.sign(key, algorithm=_signing_algorithm(key))
+    cert = builder.sign(key, algorithm=signing_algorithm(key))
     return cert, key
 
 
@@ -160,7 +160,7 @@ def create_intermediate(
             critical=False,
         )
     )
-    cert = builder.sign(root_key, algorithm=_signing_algorithm(root_key))
+    cert = builder.sign(root_key, algorithm=signing_algorithm(root_key))
     return cert, key
 
 

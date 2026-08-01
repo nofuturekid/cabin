@@ -103,6 +103,15 @@ def require_role(*roles: Role) -> Callable[[User], User]:
     return _dep
 
 
+#: The roles that may change things (viewers may only look). Shared here so
+#: route guards and per-page visibility checks can't drift apart on what
+#: "admin" means -- use ADMIN_ROLES for the latter, never a re-inlined tuple.
+ADMIN_ROLES = (Role.admin, Role.superadmin)
+
+#: The guard for every mutating (and mutation-only) page.
+require_admin = require_role(*ADMIN_ROLES)
+
+
 def verify_csrf(
     request: Request,
     csrf_token: str | None = Form(None),

@@ -28,3 +28,12 @@ All notable changes to cabin are documented here. The format is based on
   BasicConstraints, KeyUsage, expiry, single-level chain), sealed private
   keys in the new `ca_certificates` table (migration 0003), and a `/ca` UI
   with root/chain PEM downloads open to any logged-in user.
+- Spec 0005 (issue-sign): leaf issuance with `server`/`client` profiles
+  (`cabin.ca.leaf` pure crypto, `cabin.ca.certs` storage), either with a
+  server-generated key sealed into the new `certificates` table
+  (migration 0004) or by signing a pasted CSR — which contributes only its
+  public key, CN and SANs, never its extensions. One SAN policy for form
+  and CSR input alike (`dns:`/`ip:`/`email:` prefixes, auto-detection,
+  CN fallback, ASCII/punycode hostnames), validity of
+  1..3650 days clamped to the intermediate, and a `/certs/new` UI plus a
+  `/certs/{id}` result page whose private key block is admin-only.
