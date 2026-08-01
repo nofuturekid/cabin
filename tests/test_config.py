@@ -49,3 +49,24 @@ def test_config_invalid_port_rejected(argv: list[str], env: dict[str, str]) -> N
 def test_config_repr_hides_passphrase() -> None:
     cfg = Config.load(argv=[], env={"CABIN_MASTER_PASSPHRASE": "s3cr3t"})
     assert "s3cr3t" not in repr(cfg)
+
+
+def test_config_cookie_secure_defaults_false() -> None:
+    cfg = Config.load(argv=[], env={})
+    assert cfg.cookie_secure is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+    ],
+)
+def test_config_cookie_secure_env_parsing(value: str, expected: bool) -> None:
+    cfg = Config.load(argv=[], env={"COOKIE_SECURE": value})
+    assert cfg.cookie_secure is expected

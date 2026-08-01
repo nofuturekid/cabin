@@ -30,6 +30,7 @@ class Config:
     data_dir: Path
     db_url: str
     master_passphrase: str | None = field(default=None, repr=False)
+    cookie_secure: bool = False
 
     @classmethod
     def load(
@@ -48,9 +49,14 @@ class Config:
         data_dir = Path(args.data_dir or env.get("DATA_DIR") or DEFAULT_DATA_DIR)
         db_url = env.get("CABIN_DB_URL") or f"sqlite:///{data_dir}/cabin.db"
         master_passphrase = env.get("CABIN_MASTER_PASSPHRASE") or None
+        cookie_secure = (env.get("COOKIE_SECURE") or "").strip().lower() in (
+            "true",
+            "1",
+        )
         return cls(
             port=port,
             data_dir=data_dir,
             db_url=db_url,
             master_passphrase=master_passphrase,
+            cookie_secure=cookie_secure,
         )

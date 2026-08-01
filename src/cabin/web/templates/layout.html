@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}cabin{% endblock %}</title>
+    <link rel="stylesheet" href="/static/cabin.css" />
+    <!-- htmx 2.0.10, vendored locally: no CDN -->
+    <script src="/static/htmx.min.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <span class="brand">cabin</span>
+      {% if user %}
+      <nav>
+        <a href="/">Dashboard</a>
+        <a href="/users">Users</a>
+      </nav>
+      {% endif %}
+      <span class="spacer"></span>
+      {% if user %}
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button type="submit" class="secondary">
+          Logout ({{ user.username }})
+        </button>
+      </form>
+      {% endif %}
+    </header>
+    <main>{% block content %}{% endblock %}</main>
+    <footer>cabin {{ version }}</footer>
+  </body>
+</html>
