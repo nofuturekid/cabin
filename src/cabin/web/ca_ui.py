@@ -16,19 +16,17 @@ from cabin.ca import service as ca_service
 from cabin.ca import x509 as ca_x509
 from cabin.ca.service import CACertificate, CAExistsError
 from cabin.ca.x509 import CAImportError
-from cabin.users import Role, User
+from cabin.users import User
 from cabin.web import templates
 from cabin.web.deps import (
     base_context,
     get_current_user,
     get_db,
-    require_role,
+    require_admin,
     verify_csrf,
 )
 
 router = APIRouter(prefix="/ca")
-
-require_ca_admin = require_role(Role.admin, Role.superadmin)
 
 _MIN_YEARS = 1
 _MAX_YEARS = 50
@@ -87,7 +85,7 @@ def ca_create(
     root_years: int = Form(20),
     intermediate_years: int = Form(10),
     db: Session = Depends(get_db),
-    user: User = Depends(require_ca_admin),
+    user: User = Depends(require_admin),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     form_error = _key_type_error(key_type) or _years_error(root_years, intermediate_years)
@@ -120,7 +118,7 @@ def ca_import(
     key_passphrase: str = Form(""),
     chain_pem: str = Form(...),
     db: Session = Depends(get_db),
-    user: User = Depends(require_ca_admin),
+    user: User = Depends(require_admin),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:

@@ -1,0 +1,43 @@
+{% extends "layout.html" %} {% block title %}{{ cert.subject_cn }} — cabin{%
+endblock %} {% block content %}
+<div class="card card-wide">
+  <h1>{{ cert.subject_cn }}</h1>
+  <table>
+    <tr>
+      <th>Serial</th>
+      <td>{{ cert.serial_hex }}</td>
+    </tr>
+    <tr>
+      <th>Profile</th>
+      <td>{{ cert.profile }}</td>
+    </tr>
+    <tr>
+      <th>SANs</th>
+      <td>{{ cert.sans | join(", ") }}</td>
+    </tr>
+    <tr>
+      <th>Valid from</th>
+      <td>{{ cert.not_before }}</td>
+    </tr>
+    <tr>
+      <th>Valid until</th>
+      <td>{{ cert.not_after }}</td>
+    </tr>
+  </table>
+
+  <h2>Certificate (PEM)</h2>
+  <pre class="pem">{{ cert.cert_pem }}</pre>
+
+  {% if key_error %}
+  <h2>Private key</h2>
+  <div class="error">{{ key_error }}</div>
+  {% endif %} {% if key_pem %}
+  <h2>Private key (PEM)</h2>
+  <p class="note">
+    Shown here; also stored encrypted in cabin's database, so you can come back
+    to this page for it.
+  </p>
+  <pre class="pem">{{ key_pem }}</pre>
+  {% endif %}
+</div>
+{% endblock %}

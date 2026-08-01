@@ -70,8 +70,9 @@ usable SAN")`. CN length/charset validated (<=64, no control chars).
   blocked (a CSR carrying BasicConstraints CA=true or KU certSign yields a
   leaf WITHOUT those — test explicitly), tampered CSR signature → IssueError.
 - AC-3: SAN fallback ladder per FR-3 incl. IP CN; "no usable SAN" error case.
-- AC-4: days=5000 request → cert not_after == min(now+5000d, intermediate
-  not_after); days=0 / 4000 → validation error 1..3650.
+- AC-4: days=3000 request against an intermediate with less than that left →
+  cert not_after == min(now+3000d, intermediate not_after); days=0 / 4000 →
+  validation error 1..3650.
 - AC-5: DB row: serial_hex matches cert serial, sans_json round-trips, sealed
   key unseals to the generated key (server flow), key_sealed NULL (CSR flow).
 - AC-6: UI: both happy paths end on /certs/{id} with correct PEM blocks; key
