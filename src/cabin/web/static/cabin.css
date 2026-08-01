@@ -1,0 +1,172 @@
+/* cabin — base design tokens and layout. No business logic here. */
+
+:root {
+  --color-bg: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-border: #dde1e6;
+  --color-text: #1b1f24;
+  --color-text-muted: #5b6470;
+  --color-accent: #2f6feb;
+  --color-accent-contrast: #ffffff;
+  --color-danger: #c0342c;
+  --color-danger-bg: #fbeae9;
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --radius: 6px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #14171a;
+    --color-surface: #1c2024;
+    --color-border: #333a42;
+    --color-text: #e7e9ec;
+    --color-text-muted: #9aa4af;
+    --color-accent: #6b9bfa;
+    --color-accent-contrast: #0b1220;
+    --color-danger: #f28b82;
+    --color-danger-bg: #3a2020;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.app-header .brand {
+  font-weight: 600;
+}
+
+.app-header nav {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.app-header nav a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.app-header nav a:hover {
+  color: var(--color-text);
+}
+
+.app-header .spacer {
+  flex: 1;
+}
+
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: var(--space-4);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  max-width: 24rem;
+  margin: var(--space-4) auto;
+}
+
+.card-wide {
+  max-width: 48rem;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+label {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+input,
+select {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+}
+
+button {
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+
+button.danger {
+  background: var(--color-danger);
+}
+
+.error {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.875rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.row-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.row-actions form {
+  flex-direction: row;
+  gap: var(--space-1);
+}
+
+footer {
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  padding: var(--space-4);
+}

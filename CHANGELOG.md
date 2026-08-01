@@ -15,3 +15,9 @@ All notable changes to cabin are documented here. The format is based on
   seal/unseal, atomic `secret.key` creation (mode 0600), optional
   `CABIN_MASTER_PASSPHRASE`-derived scrypt KEK wrapping the master key, and
   `app.state.secrets` wired up during app startup.
+- Spec 0003 (auth-users): local users with argon2id password hashing and
+  superadmin/admin/viewer roles (`cabin.users`), DB-backed sliding sessions
+  with sha256-hashed cookie tokens (`cabin.sessions`), CSRF-protected UI
+  forms, a first-run `/setup` flow that creates the superadmin and 404s
+  afterwards, and a server-rendered Jinja2 + htmx base layout with vendored
+  static assets served from `/static`. New `COOKIE_SECURE` config flag.

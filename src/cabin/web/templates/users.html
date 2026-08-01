@@ -1,0 +1,82 @@
+{% extends "layout.html" %} {% block title %}Users — cabin{% endblock %} {%
+block content %}
+<div class="card card-wide">
+  <h1>Users</h1>
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Role</th>
+        <th>Created</th>
+        {% if can_manage %}
+        <th>Actions</th>
+        {% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in users %}
+      <tr>
+        <td>{{ row.username }}</td>
+        <td>{{ row.role }}</td>
+        <td>{{ row.created_at }}</td>
+        {% if can_manage %}
+        <td class="row-actions">
+          <form method="post" action="/users/{{ row.id }}/role">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <select name="role">
+              {% for r in roles %}
+              <option value="{{ r.value }}" {{ "selected" if r.value == row.role else "" }}>{{ r.value }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="secondary">Set role</button>
+          </form>
+          <form method="post" action="/users/{{ row.id }}/password">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input
+              type="password"
+              name="password"
+              minlength="12"
+              placeholder="new password"
+              required
+            />
+            <button type="submit" class="secondary">Reset password</button>
+          </form>
+          <form method="post" action="/users/{{ row.id }}/delete">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit" class="danger">Delete</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if can_manage %}
+  <h2>Add user</h2>
+  <form method="post" action="/users">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label for="new-username">Username</label>
+    <input id="new-username" type="text" name="username" required />
+    <label for="new-password">Password</label>
+    <input
+      id="new-password"
+      type="password"
+      name="password"
+      minlength="12"
+      required
+    />
+    <label for="new-role">Role</label>
+    <select id="new-role" name="role">
+      {% for r in roles %}
+      <option value="{{ r.value }}">{{ r.value }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Create user</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

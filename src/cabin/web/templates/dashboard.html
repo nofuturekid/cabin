@@ -1,0 +1,8 @@
+{% extends "layout.html" %} {% block title %}Dashboard — cabin{% endblock %} {%
+block content %}
+<div class="card">
+  <h1>Dashboard</h1>
+  <p>Logged in as <strong>{{ user.username }}</strong> ({{ user.role }}).</p>
+  <p>cabin version {{ version }}.</p>
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "layout.html" %} {% block title %}Setup — cabin{% endblock %} {%
+block content %}
+<div class="card">
+  <h1>Create the superadmin account</h1>
+  <p>This is a one-time setup. This account can manage all other users.</p>
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/setup">
+    <label for="username">Username</label>
+    <input id="username" type="text" name="username" required autofocus />
+    <label for="password">Password</label>
+    <input
+      id="password"
+      type="password"
+      name="password"
+      minlength="12"
+      required
+    />
+    <button type="submit">Create account</button>
+  </form>
+</div>
+{% endblock %}
