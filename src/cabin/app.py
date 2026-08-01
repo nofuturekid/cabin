@@ -16,7 +16,9 @@ from cabin.web import STATIC_DIR
 from cabin.web.ca_ui import router as ca_router
 from cabin.web.certs_download_ui import router as certs_download_router
 from cabin.web.certs_ui import router as certs_router
+from cabin.web.crl_ui import router as crl_router
 from cabin.web.deps import SESSION_COOKIE, AuthRedirect, set_session_cookie
+from cabin.web.settings_ui import router as settings_router
 from cabin.web.ui import router as ui_router
 
 
@@ -68,6 +70,10 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(ca_router)
     app.include_router(certs_router)
     app.include_router(certs_download_router)
+    app.include_router(settings_router)
+    # Mounted at the root and, unlike every other router, without an auth
+    # dependency: a CRL is public by design (spec 0007 FR-5).
+    app.include_router(crl_router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     return app

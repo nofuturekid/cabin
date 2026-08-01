@@ -59,6 +59,10 @@ class Certificate(Base):
         nullable=False,
         default=lambda: datetime.now(UTC).replace(tzinfo=None),
     )
+    #: NULL until revoked; both columns are written together by
+    #: :func:`cabin.ca.crl.revoke_certificate` (spec 0007 FR-4).
+    revoked_at: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
 
     @property
     def sans(self) -> list[str]:
@@ -71,6 +75,11 @@ class Certificate(Base):
         """``not_after`` as an aware datetime; the column keeps the ISO-8601
         UTC form written by :func:`_store`."""
         return datetime.fromisoformat(self.not_after)
+
+    @property
+    def revoked_at_dt(self) -> datetime | None:
+        """``revoked_at`` as an aware datetime, or None if not revoked."""
+        return datetime.fromisoformat(self.revoked_at) if self.revoked_at else None
 
 
 def _store(
@@ -122,16 +131,28 @@ def issue_and_store(
     sans: Sequence[str],
     days: int = DEFAULT_DAYS,
     key_type: str = "ecdsa-p256",
+    crl_url: str | None = None,
 ) -> Certificate:
     """Issue a leaf with a server-generated key and store it, sealing the
     key before it touches the DB (FR-5).
+
+    ``crl_url`` (spec 0007 FR-6) is passed in rather than read from the
+    settings table here, so this module keeps knowing nothing about where
+    cabin itself is published.
 
     Raises CANotConfiguredError if no CA exists, IssueError for invalid
     input.
     """
     issuer_cert, issuer_key = signing_credentials(db, secrets)
     cert, key = leaf.issue_certificate(
-        issuer_cert, issuer_key, profile, subject_cn, sans, days=days, key_type=key_type
+        issuer_cert,
+        issuer_key,
+        profile,
+        subject_cn,
+        sans,
+        days=days,
+        key_type=key_type,
+        crl_url=crl_url,
     )
     return _store(db, cert, profile, _cert_sans(cert), _sealed_key(secrets, key))
 
@@ -144,6 +165,7 @@ def sign_csr_and_store(
     profile: Profile,
     days: int = DEFAULT_DAYS,
     sans_override: Sequence[str] | None = None,
+    crl_url: str | None = None,
 ) -> Certificate:
     """Sign a pasted CSR and store the result. There is no key to seal --
     cabin never sees the requester's private key (FR-5)."""
@@ -155,6 +177,7 @@ def sign_csr_and_store(
         profile,
         days=days,
         sans_override=sans_override,
+        crl_url=crl_url,
     )
     return _store(db, cert, profile, _cert_sans(cert), None)
 
@@ -177,20 +200,32 @@ class CertStatus(StrEnum):
     valid = "valid"
     expiring = "expiring"
     expired = "expired"
+    #: Spec 0007 FR-7: revocation is a state of its own, not an expiry.
+    revoked = "revoked"
 
 
 #: Accepted ``?status=`` values; "all" means "no status filter" (FR-2).
 STATUS_FILTERS: tuple[str, ...] = ("all", *CertStatus)
 
 
-def certificate_status(not_after: datetime, now: datetime) -> CertStatus:
+def certificate_status(
+    not_after: datetime, now: datetime, revoked_at: datetime | None
+) -> CertStatus:
     """Pure status logic (FR-3), taking the expiry instant rather than a row
     so it can be reasoned about (and tested) without a database.
 
     ``not_after`` is the last instant of validity, so a certificate whose
     not_after is exactly ``now`` is already expired; one ending exactly
     :data:`EXPIRING_WINDOW` from now is already expiring (AC-3).
+
+    Revocation outranks the clock (spec 0007 FR-7): a revoked certificate
+    reads "revoked" whether or not it has also expired, because that is the
+    answer a relying party gets. ``revoked_at`` is required rather than
+    defaulted so that no future caller can forget it and quietly render a
+    revoked certificate as valid.
     """
+    if revoked_at is not None:
+        return CertStatus.revoked
     if not_after <= now:
         return CertStatus.expired
     if not_after <= now + EXPIRING_WINDOW:
@@ -226,6 +261,14 @@ def _filters(q: str, status: str, now: datetime) -> list[sa.ColumnElement[bool]]
                 sa.func.lower(Certificate.serial_hex).like(pattern, escape="\\"),
             )
         )
+    if status == CertStatus.revoked:
+        conditions.append(Certificate.revoked_at.is_not(None))
+        return conditions
+    if status in (CertStatus.expired, CertStatus.expiring, CertStatus.valid):
+        # The four states partition the inventory, so the time-based filters
+        # exclude revoked rows -- otherwise a row selected as "expired" would
+        # be rendered with a "revoked" badge (spec 0007 FR-7).
+        conditions.append(Certificate.revoked_at.is_(None))
     if status == CertStatus.expired:
         conditions.append(Certificate.not_after <= _iso(now))
     elif status == CertStatus.expiring:

@@ -73,6 +73,25 @@ def signing_algorithm(
     return hashes.SHA256()
 
 
+def authority_key_identifier(
+    issuer_cert: x509.Certificate, issuer_key: CertificateIssuerPrivateKeyTypes
+) -> x509.AuthorityKeyIdentifier:
+    """The AKI for anything ``issuer_cert`` signs -- a leaf (spec 0005 FR-1)
+    or a CRL (spec 0007 FR-3).
+
+    It is COPIED from the issuer's SubjectKeyIdentifier, not recomputed from
+    its public key. An imported CA may use an SKI that isn't RFC 5280
+    "method 1" (a SHA-1 of the public key), and OpenSSL will refuse to build
+    the chain unless our AKI matches that SKI byte for byte. Only an issuer
+    that carries no SKI at all leaves us the public key to derive from.
+    """
+    try:
+        issuer_ski = issuer_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    except x509.ExtensionNotFound:
+        return x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key())
+    return x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(issuer_ski)
+
+
 def _ca_key_usage() -> x509.KeyUsage:
     return x509.KeyUsage(
         digital_signature=False,
