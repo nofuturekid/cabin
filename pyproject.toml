@@ -1,0 +1,49 @@
+[project]
+name = "cabin"
+version = "0.1.0"
+description = "All-in-one internal CA: web UI, REST API, ACME server, direct issuance and CSR signing in a single container"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Thomas Kroll", email = "t.kroll@outlook.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.116",
+    "uvicorn[standard]>=0.35",
+    "jinja2>=3.1",
+    "sqlalchemy>=2.0",
+    "alembic>=1.16",
+]
+
+[project.scripts]
+cabin = "cabin.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.12",
+    "mypy>=1.17",
+    "httpx2>=2.9.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["cabin"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
