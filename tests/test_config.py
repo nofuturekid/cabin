@@ -44,3 +44,8 @@ def test_config_db_url_env_wins_over_derived_sqlite_path() -> None:
 def test_config_invalid_port_rejected(argv: list[str], env: dict[str, str]) -> None:
     with pytest.raises(ConfigError):
         Config.load(argv=argv, env=env)
+
+
+def test_config_repr_hides_passphrase() -> None:
+    cfg = Config.load(argv=[], env={"CABIN_MASTER_PASSPHRASE": "s3cr3t"})
+    assert "s3cr3t" not in repr(cfg)
