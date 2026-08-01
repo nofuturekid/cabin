@@ -32,6 +32,16 @@ def set_session_cookie(response: Response, request: Request, token: str) -> None
     )
 
 
+def base_context(request: Request, user: User) -> dict[str, object]:
+    """Context every authenticated page needs: current user and the
+    session's csrf_token (layout.html's logout form needs this on *every*
+    page -- see ui.py's BUG 1 regression test), for use across UI routers.
+    ``version`` is a Jinja global, not per-route context.
+    """
+    session_row: UserSession = request.state.session
+    return {"user": user, "csrf_token": session_row.csrf_token}
+
+
 class AuthRedirect(Exception):
     """Short-circuit a request to a redirect (first-run setup or login)."""
 

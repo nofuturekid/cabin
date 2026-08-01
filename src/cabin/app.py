@@ -13,6 +13,7 @@ from cabin.config import Config
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
 from cabin.web import STATIC_DIR
+from cabin.web.ca_ui import router as ca_router
 from cabin.web.deps import SESSION_COOKIE, AuthRedirect, set_session_cookie
 from cabin.web.ui import router as ui_router
 
@@ -62,6 +63,7 @@ def create_app(config: Config) -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     app.include_router(ui_router)
+    app.include_router(ca_router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     return app
