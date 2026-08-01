@@ -43,3 +43,14 @@ All notable changes to cabin are documented here. The format is based on
   per-certificate downloads — leaf PEM and full chain for any logged-in
   user, private key PEM and password-protected PKCS#12 bundles for admins,
   all served as no-store attachments named after CN and serial.
+- Spec 0007 (revoke-crl): certificate revocation with reason codes
+  (`cabin.ca.revocation` pure CRL building, `cabin.ca.crl` storage and
+  orchestration), a single current CRL with a monotonic CRL number kept in
+  the new `crl_state` table (migration 0005, which also adds `revoked_at`
+  and `revocation_reason` to `certificates`), and public `GET /crl` (DER)
+  and `GET /crl.pem` endpoints that regenerate a stale CRL on access — no
+  scheduler, no login. Newly issued certificates carry a CRL distribution
+  point derived from a new `base_url` setting, configurable by admins at
+  `/settings`; without it they are issued without a CDP. The inventory
+  gains a `revoked` status filter and badge (revocation outranks expiry),
+  and the certificate detail page an admin-only, CSRF-protected revoke form.

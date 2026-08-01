@@ -1,0 +1,32 @@
+{% extends "layout.html" %} {% block title %}Settings — cabin{% endblock %} {%
+block content %}
+<div class="card">
+  <h1>Settings</h1>
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% endif %}
+
+  <h2>Base URL</h2>
+  <p class="note">
+    The public address of this cabin instance, e.g.
+    <code>https://ca.example.org</code> — no trailing slash. Certificates issued
+    from now on point at <code>&lt;base URL&gt;/crl</code> so clients can find
+    the revocation list. Leave it empty to issue without a distribution point.
+  </p>
+  <form method="post" action="/settings">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label for="base_url">Base URL</label>
+    <input
+      id="base_url"
+      type="text"
+      name="base_url"
+      value="{{ base_url }}"
+      placeholder="https://ca.example.org"
+    />
+    <button type="submit">Save</button>
+  </form>
+  {% if base_url %}
+  <p class="note">CRL is served at <code>{{ base_url }}/crl</code>.</p>
+  {% endif %}
+</div>
+{% endblock %}

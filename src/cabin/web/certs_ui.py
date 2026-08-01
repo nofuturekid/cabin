@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import Response
 
 from cabin.ca import certs as certs_service
+from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
 from cabin.ca.certs import (
     MAX_QUERY_LENGTH,
@@ -32,6 +33,7 @@ from cabin.ca.leaf import (
     parse_profile,
     parse_san_lines,
 )
+from cabin.ca.revocation import RevocationReason
 from cabin.ca.service import CANotConfiguredError
 from cabin.ca.x509 import KEY_TYPES
 from cabin.secrets import SecretsError
@@ -49,6 +51,11 @@ from cabin.web.deps import (
 router = APIRouter(prefix="/certs")
 
 _NO_CA = "no CA yet: create or import one under CA before issuing certificates"
+#: Spec 0007 FR-7: the confirm checkbox is the last stop before an
+#: irreversible action, so a post without it is refused rather than assumed.
+_CONFIRM_REVOKE = "tick the confirmation box: revoking a certificate cannot be undone"
+#: The reason ends up in the CRL, so an unknown one is refused, not guessed.
+_UNKNOWN_REASON = "unknown revocation reason: {!r}"
 #: Shared with :mod:`cabin.web.certs_download_ui`: one wording for "this key
 #: cannot be unsealed", whether it is a page or a download that hits it.
 KEY_UNAVAILABLE = (
@@ -87,7 +94,7 @@ def _cert_row(row: Certificate, now: datetime) -> dict[str, object]:
         "profile": row.profile,
         "has_key": row.key_sealed is not None,
         "not_after": row.not_after_dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC"),
-        "status": certificate_status(row.not_after_dt, now).value,
+        "status": certificate_status(row.not_after_dt, now, row.revoked_at_dt).value,
         "sans": sans[:SAN_PREVIEW],
         "sans_more": max(len(sans) - SAN_PREVIEW, 0),
         "serial_short": row.serial_hex[:SERIAL_CHARS],
@@ -133,7 +140,7 @@ def certs_list(
             "total": total,
             # Past the last page there is nothing behind us either, so the
             # back link is clamped to a page that actually has rows.
-            "prev_url": _page_url(term, active, min(page - 1, pages)) if page > 1 else None,
+            "prev_url": (_page_url(term, active, min(page - 1, pages)) if page > 1 else None),
             "next_url": _page_url(term, active, page + 1) if page < pages else None,
             "can_issue": Role(user.role) in ADMIN_ROLES,
         }
@@ -172,6 +179,7 @@ def certs_issue(
             sans=parse_san_lines(sans),
             days=days,
             key_type=key_type,
+            crl_url=crl_service.distribution_url(db),
         )
     except IssueError as exc:
         return _new_page(request, user, str(exc), status_code=400)
@@ -201,6 +209,7 @@ def certs_sign(
             profile=parse_profile(profile),
             days=days,
             sans_override=parse_san_lines(sans_override),
+            crl_url=crl_service.distribution_url(db),
         )
     except IssueError as exc:
         return _new_page(request, user, str(exc), status_code=400)
@@ -209,16 +218,13 @@ def certs_sign(
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
 
 
-@router.get("/{cert_id}")
-def cert_detail(
-    cert_id: int,
+def _detail_page(
     request: Request,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User,
+    row: Certificate,
+    error: str | None = None,
+    status_code: int = 200,
 ) -> Response:
-    row = certs_service.get_certificate(db, cert_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="no such certificate")
     context = base_context(request, user)
     context["cert"] = row
     # FR-6: viewers see the certificate, never the private key.
@@ -237,9 +243,66 @@ def cert_detail(
     # Spec 0006 AC-6: no key/PKCS#12 controls in a viewer's HTML at all, and
     # none for a CSR-signed certificate whose key cabin never had.
     context["can_download_key"] = is_admin and row.key_sealed is not None
-    response = templates.TemplateResponse(request, "cert_detail.html", context)
+    revoked_at = row.revoked_at_dt
+    context["revoked_at"] = (
+        revoked_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC") if revoked_at else None
+    )
+    # Spec 0007 FR-7: the form is for admins, and only while there is
+    # something left to revoke.
+    context["can_revoke"] = is_admin and revoked_at is None
+    context["reasons"] = list(RevocationReason)
+    context["error"] = error
+    response = templates.TemplateResponse(
+        request, "cert_detail.html", context, status_code=status_code
+    )
     # This page can render an unsealed private key -- no cache, anywhere,
     # may keep a copy of it.
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return response
+
+
+def _row(db: Session, cert_id: int) -> Certificate:
+    row = certs_service.get_certificate(db, cert_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such certificate")
+    return row
+
+
+@router.get("/{cert_id}")
+def cert_detail(
+    cert_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    return _detail_page(request, user, _row(db, cert_id))
+
+
+@router.post("/{cert_id}/revoke")
+def cert_revoke(
+    cert_id: int,
+    request: Request,
+    reason: str = Form(str(RevocationReason.unspecified)),
+    confirm: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """Spec 0007 FR-7: revocation cannot be undone, so it takes an explicit
+    confirmation on top of CSRF and the admin role."""
+    row = _row(db, cert_id)
+    if not confirm:
+        return _detail_page(request, user, row, _CONFIRM_REVOKE, status_code=400)
+    try:
+        # A reason cabin does not know is refused rather than quietly
+        # downgraded: the operator would be told the certificate was revoked
+        # for a reason that never reaches the CRL.
+        parsed = RevocationReason(reason)
+    except ValueError:
+        return _detail_page(request, user, row, _UNKNOWN_REASON.format(reason), status_code=400)
+    try:
+        crl_service.revoke_certificate(db, request.app.state.secrets, cert_id, parsed)
+    except CANotConfiguredError:
+        return _detail_page(request, user, row, _NO_CA, status_code=400)
+    return RedirectResponse(f"/certs/{cert_id}", status_code=303)

@@ -190,13 +190,14 @@ def _insert(
     days_left: int = 365,
     created_at: datetime | None = None,
     with_key: bool = True,
+    revoked_at: datetime | None = None,
 ) -> Certificate:
     """A certificate row without going through issuance: the inventory query
     only reads columns, and a 60-row pagination fixture must not cost 60 key
     generations."""
     now = datetime.now(UTC)
     row = Certificate(
-        serial_hex=serial if serial is not None else f"{db.query(Certificate).count() + 1:016x}",
+        serial_hex=(serial if serial is not None else f"{db.query(Certificate).count() + 1:016x}"),
         subject_cn=cn,
         sans_json=json.dumps(sans if sans is not None else [f"DNS:{cn}"]),
         profile="server",
@@ -205,6 +206,8 @@ def _insert(
         cert_pem=_STUB_PEM,
         key_sealed="sealed" if with_key else None,
         created_at=(created_at or now).replace(tzinfo=None),
+        revoked_at=revoked_at.isoformat() if revoked_at else None,
+        revocation_reason="superseded" if revoked_at else None,
     )
     db.add(row)
     db.commit()
@@ -325,13 +328,40 @@ def test_pagination_out_of_range(db: Session) -> None:
     assert list_certificates(db, page=2**63)[1] == 1
 
 
+def test_filter_status_revoked(db: Session) -> None:
+    """Spec 0007 FR-7: revocation is a status of its own, and it outranks the
+    time-based ones -- a revoked certificate must never be listed as valid or
+    expiring just because its notAfter has not passed yet."""
+    now = datetime.now(UTC)
+    _insert(db, cn="gone.lan", revoked_at=now)
+    _insert(db, cn="soon.lan", days_left=10)
+    _insert(db, cn="fine.lan", days_left=365)
+
+    assert _cns(list_certificates(db, status="revoked")[0]) == ["gone.lan"]
+    assert _cns(list_certificates(db, status="valid")[0]) == ["fine.lan"]
+    assert _cns(list_certificates(db, status="expiring")[0]) == ["soon.lan"]
+    # a revoked certificate that has ALSO expired stays under "revoked"
+    _insert(db, cn="both.lan", days_left=-1, revoked_at=now)
+    assert _cns(list_certificates(db, status="expired")[0]) == []
+    assert set(_cns(list_certificates(db, status="revoked")[0])) == {
+        "gone.lan",
+        "both.lan",
+    }
+    assert list_certificates(db, status="all")[1] == 4
+
+
 def test_status_boundaries() -> None:
     now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
-    assert certificate_status(now + timedelta(days=31), now) == CertStatus.valid
+    assert certificate_status(now + timedelta(days=31), now, None) == CertStatus.valid
     # exactly at the window edge the operator should already be warned
-    assert certificate_status(now + timedelta(days=30), now) == CertStatus.expiring
-    assert certificate_status(now + timedelta(seconds=1), now) == CertStatus.expiring
-    assert certificate_status(now - timedelta(seconds=1), now) == CertStatus.expired
+    assert certificate_status(now + timedelta(days=30), now, None) == CertStatus.expiring
+    assert certificate_status(now + timedelta(seconds=1), now, None) == CertStatus.expiring
+    assert certificate_status(now - timedelta(seconds=1), now, None) == CertStatus.expired
     # not_after is the last instant of validity; at exactly now it is over
-    assert certificate_status(now, now) == CertStatus.expired
+    assert certificate_status(now, now, None) == CertStatus.expired
+
+    # spec 0007 FR-7: revocation is final, whatever the clock says
+    revoked_at = now - timedelta(days=1)
+    assert certificate_status(now + timedelta(days=31), now, revoked_at) == CertStatus.revoked
+    assert certificate_status(now - timedelta(days=1), now, revoked_at) == CertStatus.revoked

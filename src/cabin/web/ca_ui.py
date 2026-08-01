@@ -12,6 +12,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
+from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
 from cabin.ca import x509 as ca_x509
 from cabin.ca.service import CACertificate, CAExistsError
@@ -74,6 +75,8 @@ def ca_page(
         context["error"] = None
         return templates.TemplateResponse(request, "ca_setup.html", context)
     context["certs"] = [_cert_info(hierarchy.root), _cert_info(hierarchy.intermediate)]
+    # Spec 0007 FR-6: say where the CRL is -- or that nothing points at it yet.
+    context["crl_url"] = crl_service.distribution_url(db)
     return templates.TemplateResponse(request, "ca_info.html", context)
 
 

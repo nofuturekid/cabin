@@ -23,7 +23,40 @@ endblock %} {% block content %}
       <th>Valid until</th>
       <td>{{ cert.not_after }}</td>
     </tr>
+    {% if revoked_at %}
+    <tr>
+      <th>Revoked</th>
+      <td>
+        {{ revoked_at }}
+        <span class="badge badge-revoked">{{ cert.revocation_reason }}</span>
+      </td>
+    </tr>
+    {% endif %}
   </table>
+
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% endif %} {% if can_revoke %}
+  <h2>Revoke</h2>
+  <p class="note">
+    Revoking publishes this certificate's serial on the CRL. It cannot be undone
+    — issue a replacement instead.
+  </p>
+  <form method="post" action="/certs/{{ cert.id }}/revoke">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label for="reason">Reason</label>
+    <select id="reason" name="reason">
+      {% for option in reasons %}
+      <option value="{{ option }}">{{ option }}</option>
+      {% endfor %}
+    </select>
+    <label class="checkbox">
+      <input type="checkbox" name="confirm" value="on" />
+      Yes, revoke this certificate
+    </label>
+    <button type="submit" class="danger">Revoke</button>
+  </form>
+  {% endif %}
 
   <h2>Downloads</h2>
   <p class="row-actions">

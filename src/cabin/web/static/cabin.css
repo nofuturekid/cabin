@@ -209,7 +209,8 @@ td {
   color: var(--color-warn);
 }
 
-.badge-expired {
+.badge-expired,
+.badge-revoked {
   background: var(--color-danger-bg);
   border-color: var(--color-danger);
   color: var(--color-danger);

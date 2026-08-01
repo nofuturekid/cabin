@@ -136,6 +136,18 @@ def _sign_csr(client: TestClient, cfg: Config, cn: str = "app.lan") -> int:
     return int(resp.headers["location"].rsplit("/", 1)[1])
 
 
+def _revoke(client: TestClient, cfg: Config, cert_id: int) -> None:
+    resp = client.post(
+        f"/certs/{cert_id}/revoke",
+        data={
+            "reason": "superseded",
+            "confirm": "on",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+
 def _serial(cfg: Config, cert_id: int) -> str:
     db = _db(cfg)
     try:
@@ -262,6 +274,31 @@ def test_list_requires_login(client: TestClient, cfg: Config) -> None:
         resp = client.get(path)
         assert resp.status_code == 303
         assert resp.headers["location"] == "/login"
+
+
+def test_inventory_revoked_badge_and_filter(client: TestClient, cfg: Config) -> None:
+    """Spec 0007 FR-7/AC-6: a revoked certificate is visibly revoked in the
+    list, and the status filter can single those rows out."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg)
+    revoked_id = _issue(client, cfg, cn="gone.lan")
+    _issue(client, cfg, cn="live.lan")
+    _revoke(client, cfg, revoked_id)
+
+    listing = client.get("/certs")
+    assert listing.status_code == 200
+    assert "badge-revoked" in listing.text
+    assert 'value="revoked"' in listing.text  # the filter offers it
+
+    only_revoked = client.get("/certs", params={"status": "revoked"})
+    assert "gone.lan" in only_revoked.text
+    assert "live.lan" not in only_revoked.text
+
+    # revocation wins over the time-based states: a revoked certificate is
+    # not "valid" just because its notAfter is still in the future
+    still_valid = client.get("/certs", params={"status": "valid"})
+    assert "live.lan" in still_valid.text
+    assert "gone.lan" not in still_valid.text
 
 
 # --- FR-4, AC-4: PEM downloads -------------------------------------------------

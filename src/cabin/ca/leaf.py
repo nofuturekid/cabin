@@ -20,7 +20,12 @@ from cryptography.hazmat.primitives.asymmetric.types import (
 )
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from cabin.ca.x509 import KEY_TYPES, generate_key, signing_algorithm
+from cabin.ca.x509 import (
+    KEY_TYPES,
+    authority_key_identifier,
+    generate_key,
+    signing_algorithm,
+)
 
 #: NotBefore is backdated so a certificate issued "now" isn't rejected by a
 #: relying party whose clock is slightly behind ours (FR-1).
@@ -234,20 +239,19 @@ def _key_usage(profile: Profile, public_key: CertificatePublicKeyTypes) -> x509.
     )
 
 
-def _authority_key_identifier(
-    issuer_cert: x509.Certificate, issuer_key: CertificateIssuerPrivateKeyTypes
-) -> x509.AuthorityKeyIdentifier:
-    """FR-1: the AKI is COPIED from the issuer's SubjectKeyIdentifier, not
-    recomputed from its public key. An imported CA may use an SKI that isn't
-    RFC 5280 "method 1" (a SHA-1 of the public key), and OpenSSL will refuse
-    to build the chain unless our AKI matches that SKI byte for byte. Only
-    an issuer that carries no SKI at all leaves us the public key to derive
-    from."""
-    try:
-        issuer_ski = issuer_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
-    except x509.ExtensionNotFound:
-        return x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key())
-    return x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(issuer_ski)
+def _crl_distribution_points(crl_url: str) -> x509.CRLDistributionPoints:
+    """Spec 0007 FR-6: one distribution point, one URI, no reason/CRLIssuer
+    partitioning -- cabin serves a single full CRL."""
+    return x509.CRLDistributionPoints(
+        [
+            x509.DistributionPoint(
+                full_name=[x509.UniformResourceIdentifier(crl_url)],
+                relative_name=None,
+                reasons=None,
+                crl_issuer=None,
+            )
+        ]
+    )
 
 
 def _build_leaf(
@@ -258,10 +262,15 @@ def _build_leaf(
     sans: Sequence[str],
     profile: Profile,
     days: int,
+    crl_url: str | None = None,
 ) -> x509.Certificate:
     """The single place a leaf certificate is assembled: both flows build
     the same extension set from scratch, which is what keeps CSR extensions
-    from leaking into an issued certificate (FR-1/FR-2)."""
+    from leaking into an issued certificate (FR-1/FR-2).
+
+    ``crl_url`` adds a CRL distribution point (spec 0007 FR-6); without one
+    the extension is left out entirely rather than pointing somewhere that
+    does not answer."""
     now = datetime.now(UTC)
     # FR-4: a leaf must never outlive the CA that signed it.
     not_after = min(now + timedelta(days=days), issuer_cert.not_valid_after_utc)
@@ -280,12 +289,14 @@ def _build_leaf(
         .add_extension(_key_usage(profile, public_key), critical=True)
         .add_extension(x509.ExtendedKeyUsage([_PROFILE_EKU[profile]]), critical=False)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
-        .add_extension(_authority_key_identifier(issuer_cert, issuer_key), critical=False)
+        .add_extension(authority_key_identifier(issuer_cert, issuer_key), critical=False)
         .add_extension(
             x509.SubjectAlternativeName([_general_name(san) for san in sans]),
             critical=False,
         )
     )
+    if crl_url:
+        builder = builder.add_extension(_crl_distribution_points(crl_url), critical=False)
     return builder.sign(issuer_key, algorithm=signing_algorithm(issuer_key))
 
 
@@ -297,6 +308,7 @@ def issue_certificate(
     sans: Sequence[str],
     days: int = DEFAULT_DAYS,
     key_type: str = "ecdsa-p256",
+    crl_url: str | None = None,
 ) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes]:
     """Generate a key server-side and issue a leaf for it (FR-2).
 
@@ -309,7 +321,9 @@ def issue_certificate(
         raise IssueError(f"unsupported key type: {key_type!r}")
     resolved = _resolve_sans([_normalize_san(san) for san in sans], [], cn)
     key = generate_key(key_type)
-    cert = _build_leaf(issuer_cert, issuer_key, key.public_key(), cn, resolved, profile, days)
+    cert = _build_leaf(
+        issuer_cert, issuer_key, key.public_key(), cn, resolved, profile, days, crl_url
+    )
     return cert, key
 
 
@@ -320,6 +334,7 @@ def sign_csr(
     profile: Profile,
     days: int = DEFAULT_DAYS,
     sans_override: Sequence[str] | None = None,
+    crl_url: str | None = None,
 ) -> x509.Certificate:
     """Sign a pasted CSR (FR-2).
 
@@ -346,4 +361,6 @@ def sign_csr(
 
     explicit = [_normalize_san(san) for san in sans_override] if sans_override else []
     resolved = _resolve_sans(explicit, _csr_sans(csr), cn)
-    return _build_leaf(issuer_cert, issuer_key, csr.public_key(), cn, resolved, profile, days)
+    return _build_leaf(
+        issuer_cert, issuer_key, csr.public_key(), cn, resolved, profile, days, crl_url
+    )

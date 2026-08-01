@@ -31,7 +31,10 @@ revoked_entries, crl_number, this_update, next_update)` →
   extensions; each entry carries serial, revocation date and (unless
   `unspecified`) a CRLReason extension. Signature hash per issuer key type
   (reuse `signing_algorithm`).
-- FR-4: `cabin.ca.certs`: `revoke_certificate(db, secrets, cert_id, reason,
+- FR-4: `cabin.ca.crl` (a module of its own rather than part of
+  `cabin.ca.certs`: it needs the `Certificate` model, and putting it in
+  `certs.py` would make the two modules import each other):
+  `revoke_certificate(db, secrets, cert_id, reason,
 now)` sets revoked_at/reason (idempotent: revoking twice is a no-op returning
   the existing state, NOT an error), then regenerates and stores the CRL in
   one transaction. `RevocationError` when the certificate does not exist.
