@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from cabin.app import create_app
 from cabin.config import Config
+from cabin.secrets import SecretStore
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -43,3 +44,12 @@ def test_healthz_ok(tmp_path: Path) -> None:
         resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "version": version("cabin")}
+
+
+def test_app_state_has_secret_store(tmp_path: Path) -> None:
+    cfg = make_config(tmp_path)
+    app = create_app(cfg)
+    with TestClient(app):
+        store = app.state.secrets
+        assert isinstance(store, SecretStore)
+        assert store.unseal(store.seal(b"hello")) == b"hello"

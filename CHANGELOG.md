@@ -11,3 +11,7 @@ All notable changes to cabin are documented here. The format is based on
 - Spec 0001 (foundation): project skeleton, config (flag > env > default),
   SQLite via SQLAlchemy + Alembic with migrations applied at startup,
   `/healthz` endpoint, `cabin` CLI entry point, CI (ruff, mypy, pytest).
+- Spec 0002 (crypto-secrets): `cabin.secrets.SecretStore` with AES-256-GCM
+  seal/unseal, atomic `secret.key` creation (mode 0600), optional
+  `CABIN_MASTER_PASSPHRASE`-derived scrypt KEK wrapping the master key, and
+  `app.state.secrets` wired up during app startup.

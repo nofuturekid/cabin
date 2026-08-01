@@ -3,7 +3,7 @@
 import argparse
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_PORT = 8080
@@ -29,6 +29,7 @@ class Config:
     port: int
     data_dir: Path
     db_url: str
+    master_passphrase: str | None = field(default=None, repr=False)
 
     @classmethod
     def load(
@@ -46,4 +47,10 @@ class Config:
         port = _parse_port(args.port or env.get("PORT") or str(DEFAULT_PORT))
         data_dir = Path(args.data_dir or env.get("DATA_DIR") or DEFAULT_DATA_DIR)
         db_url = env.get("CABIN_DB_URL") or f"sqlite:///{data_dir}/cabin.db"
-        return cls(port=port, data_dir=data_dir, db_url=db_url)
+        master_passphrase = env.get("CABIN_MASTER_PASSPHRASE") or None
+        return cls(
+            port=port,
+            data_dir=data_dir,
+            db_url=db_url,
+            master_passphrase=master_passphrase,
+        )
