@@ -1,0 +1,43 @@
+{% extends "layout.html" %} {% block title %}CA — cabin{% endblock %} {% block
+content %}
+<div class="card card-wide">
+  <h1>Certificate Authority</h1>
+  {% for cert in certs %}
+  <h2>{{ cert.kind | capitalize }}</h2>
+  <table>
+    <tr>
+      <th>Subject</th>
+      <td>{{ cert.subject }}</td>
+    </tr>
+    <tr>
+      <th>Issuer</th>
+      <td>{{ cert.issuer }}</td>
+    </tr>
+    <tr>
+      <th>Serial</th>
+      <td>{{ cert.serial }}</td>
+    </tr>
+    <tr>
+      <th>Valid from</th>
+      <td>{{ cert.not_valid_before }}</td>
+    </tr>
+    <tr>
+      <th>Valid until</th>
+      <td>{{ cert.not_valid_after }}</td>
+    </tr>
+    <tr>
+      <th>SHA-256 fingerprint</th>
+      <td>{{ cert.fingerprint }}</td>
+    </tr>
+    <tr>
+      <th>Key type</th>
+      <td>{{ cert.key_type }}</td>
+    </tr>
+  </table>
+  {% endfor %}
+  <p>
+    <a href="/ca/root.pem">Download root.pem</a> ·
+    <a href="/ca/chain.pem">Download chain.pem</a>
+  </p>
+</div>
+{% endblock %}

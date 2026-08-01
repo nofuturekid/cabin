@@ -3,6 +3,9 @@ block content %}
 <div class="card">
   <h1>Dashboard</h1>
   <p>Logged in as <strong>{{ user.username }}</strong> ({{ user.role }}).</p>
+  {% if not ca_configured %}
+  <p class="error"><a href="/ca">CA: not set up</a></p>
+  {% endif %}
   <p>cabin version {{ version }}.</p>
 </div>
 {% endblock %}

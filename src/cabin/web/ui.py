@@ -9,14 +9,12 @@ import threading
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from fastapi.templating import Jinja2Templates
-from jinja2 import StrictUndefined
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import __version__, sessions, users
-from cabin.sessions import UserSession
+from cabin import sessions, users
+from cabin.ca import service as ca_service
 from cabin.users import (
     InvalidCredentialsError,
     LastSuperadminError,
@@ -26,9 +24,10 @@ from cabin.users import (
     UserNotFoundError,
     WeakPasswordError,
 )
-from cabin.web import TEMPLATES_DIR
+from cabin.web import templates
 from cabin.web.deps import (
     SESSION_COOKIE,
+    base_context,
     get_current_user,
     get_db,
     redirect_if_no_users,
@@ -38,12 +37,6 @@ from cabin.web.deps import (
 )
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-templates.env.globals["version"] = __version__
-# StrictUndefined turns a missing template variable into a hard error at
-# render time instead of a silently-empty string -- e.g. this is exactly
-# what would have caught the dashboard's missing csrf_token earlier.
-templates.env.undefined = StrictUndefined
 
 require_superadmin = require_role(Role.superadmin)
 
@@ -159,22 +152,18 @@ def logout(
     return resp
 
 
-def _base_context(request: Request, user: User) -> dict[str, object]:
-    """Context every authenticated page needs: current user and the
-    session's csrf_token (layout.html's logout form needs this on *every*
-    page, not just /users -- see BUG 1 regression test). ``version`` is a
-    Jinja global (see ``templates.env.globals``), not per-route context.
-    """
-    session_row: UserSession = request.state.session
-    return {"user": user, "csrf_token": session_row.csrf_token}
-
-
 # --- dashboard ---------------------------------------------------------------
 
 
 @router.get("/")
-def dashboard(request: Request, user: User = Depends(get_current_user)) -> Response:
-    return templates.TemplateResponse(request, "dashboard.html", _base_context(request, user))
+def dashboard(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    context = base_context(request, user)
+    context["ca_configured"] = ca_service.get_ca(db) is not None
+    return templates.TemplateResponse(request, "dashboard.html", context)
 
 
 # --- user management (superadmin only for mutations) --------------------------
@@ -187,7 +176,7 @@ def _users_page(
     error: str | None,
     status_code: int = 200,
 ) -> Response:
-    context = _base_context(request, user)
+    context = base_context(request, user)
     context.update(
         {
             "users": users.list_users(db),

@@ -105,13 +105,19 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   padding: var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   background: var(--color-bg);
   color: var(--color-text);
   font: inherit;
+}
+
+textarea {
+  font-family: ui-monospace, monospace;
+  resize: vertical;
 }
 
 button {
