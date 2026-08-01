@@ -16,9 +16,10 @@
         <a href="/">Dashboard</a>
         <a href="/ca">CA</a>
         <a href="/certs">Certificates</a>
-        <a href="/certs/new">Issue</a>
+        {% if nav.issue %}<a href="/certs/new">Issue</a>{% endif %}
         <a href="/users">Users</a>
-        <a href="/settings">Settings</a>
+        {% if nav.settings %}<a href="/settings">Settings</a>{% endif %} {% if
+        nav.tokens %}<a href="/tokens">API tokens</a>{% endif %}
       </nav>
       {% endif %}
       <span class="spacer"></span>

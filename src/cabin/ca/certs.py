@@ -22,7 +22,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from cabin.ca import leaf
 from cabin.ca.leaf import DEFAULT_DAYS, Profile
 from cabin.ca.service import signing_credentials
-from cabin.secrets import SecretStore
+from cabin.secrets import SecretsError, SecretStore
 from cabin.store import Base
 
 #: How long before not_after a certificate counts as "expiring" (FR-2).
@@ -192,6 +192,30 @@ def key_pem(secrets: SecretStore, row: Certificate) -> str | None:
     if row.key_sealed is None:
         return None
     return secrets.unseal(row.key_sealed).decode("ascii")
+
+
+#: One wording for "this key cannot be unsealed", wherever it surfaces -- the
+#: detail page, a download, or the API.
+KEY_UNAVAILABLE = (
+    "the stored private key could not be decrypted: it was sealed with a different "
+    "master key, or the stored value is damaged"
+)
+
+
+def key_material(secrets: SecretStore, row: Certificate) -> tuple[str | None, str | None]:
+    """``(key_pem, error)`` for every caller that wants to *show* a key
+    rather than use it: ``(None, None)`` when this certificate never had one,
+    ``(None, message)`` when it has one that can no longer be unsealed.
+
+    Shared so the UI page, the downloads and the API cannot drift on what a
+    broken master key looks like -- and so none of them turns it into a 500.
+    """
+    if row.key_sealed is None:
+        return None, None
+    try:
+        return key_pem(secrets, row), None
+    except SecretsError:
+        return None, KEY_UNAVAILABLE
 
 
 class CertStatus(StrEnum):

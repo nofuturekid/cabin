@@ -54,3 +54,18 @@ All notable changes to cabin are documented here. The format is based on
   `/settings`; without it they are issued without a CDP. The inventory
   gains a `revoked` status filter and badge (revocation outranks expiry),
   and the certificate detail page an admin-only, CSRF-protected revoke form.
+- Spec 0008 (api-tokens): API tokens with viewer/admin/superadmin roles,
+  optional expiry and immediate revocation (`cabin.api_tokens`, migration
+  0006), stored as a sha256 digest of a 32-byte secret and shown in
+  plaintext exactly once — on the new superadmin-only `/tokens` page that
+  creates, lists and revokes them. A token-authenticated REST API under
+  `/api/v1` (`Authorization: Bearer …`, never cookies, never CSRF) covering
+  CA info, the paginated inventory, certificate detail, issuance, CSR
+  signing and revocation, with Pydantic request/response models mirroring
+  the UI's limits, domain errors mapped to 400/404/409 JSON bodies instead
+  of tracebacks, and its own OpenAPI document at `/api/v1/openapi.json`
+  plus a Swagger UI at `/api/v1/docs` served entirely from vendored assets
+  (swagger-ui-dist 5.32.11, no CDN — it works on an isolated network, like
+  the rest of cabin's UI). Navigation now hides the entries a
+  role cannot use (Issue for viewers, Settings for non-admins, API tokens
+  for non-superadmins); the route guards are unchanged.
