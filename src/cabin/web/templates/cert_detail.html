@@ -25,6 +25,35 @@ endblock %} {% block content %}
     </tr>
   </table>
 
+  <h2>Downloads</h2>
+  <p class="row-actions">
+    <a href="/certs/{{ cert.id }}/download/cert.pem">Certificate (PEM)</a>
+    <a href="/certs/{{ cert.id }}/download/chain.pem">Full chain (PEM)</a>
+    {% if can_download_key %}
+    <a href="/certs/{{ cert.id }}/download/key.pem">Private key (PEM)</a>
+    {% endif %}
+  </p>
+  {% if can_download_key %}
+  <h3>PKCS#12 bundle</h3>
+  <p class="note">
+    Certificate, private key and chain in one file, for import into Windows or
+    macOS. The password protects the file itself — pick one and keep it, cabin
+    does not store it.
+  </p>
+  <form method="post" action="/certs/{{ cert.id }}/download/bundle.p12">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label for="p12-password">Bundle password (at least 8 characters)</label>
+    <input
+      id="p12-password"
+      type="password"
+      name="password"
+      minlength="8"
+      required
+    />
+    <button type="submit">Download bundle</button>
+  </form>
+  {% endif %}
+
   <h2>Certificate (PEM)</h2>
   <pre class="pem">{{ cert.cert_pem }}</pre>
 

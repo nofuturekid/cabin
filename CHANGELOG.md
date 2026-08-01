@@ -37,3 +37,9 @@ All notable changes to cabin are documented here. The format is based on
   CN fallback, ASCII/punycode hostnames), validity of
   1..3650 days clamped to the intermediate, and a `/certs/new` UI plus a
   `/certs/{id}` result page whose private key block is admin-only.
+- Spec 0006 (inventory-download): a paginated `/certs` inventory (50 per
+  page) with case-insensitive text search over CN, SANs and serial, a
+  valid/expiring/expired status filter and 30-day expiry badges, plus
+  per-certificate downloads — leaf PEM and full chain for any logged-in
+  user, private key PEM and password-protected PKCS#12 bundles for admins,
+  all served as no-store attachments named after CN and serial.
