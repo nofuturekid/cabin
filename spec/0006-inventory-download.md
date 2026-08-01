@@ -28,8 +28,14 @@ bundle) and expiry visibility.
   next 30 days and not yet expired. Filters combine; they are reflected in the
   form and preserved in pagination links.
 - FR-3: `cabin.ca.certs` gains `list_certificates(db, q, status, page,
-per_page) -> (rows, total)` and `certificate_status(cert, now)`; status
-  logic is pure and unit-tested (boundaries: exactly now, exactly +30d).
+  per_page, now) -> (rows, total)` and `certificate_status(not_after, now)`;
+  status logic is pure and unit-tested (boundaries: exactly now, exactly
+  +30d). `certificate_status` takes the expiry instant rather than a row so
+  it stays testable without a database (rows expose `not_after_dt`);
+  `list_certificates` takes the clock the caller renders badges with, so a
+  page's filter and its badges cannot straddle a tick, and it clamps `page`
+  itself so no caller can turn a hand-edited page number into an unbindable
+  OFFSET.
 - FR-4: Downloads (all under `/certs/{id}/download/...`, filename from CN
   slug + short serial):
   - `cert.pem` — leaf only, `application/x-pem-file` (any authenticated user)
@@ -42,8 +48,11 @@ per_page) -> (rows, total)` and `certificate_status(cert, now)`; status
     All download responses carry `Content-Disposition: attachment; filename=…`
     and `Cache-Control: no-store`.
 - FR-5: PKCS#12 built with `cryptography.hazmat.primitives.serialization.pkcs12.serialize_key_and_certificates`
-  using a modern encryption profile; friendly name = CN. Ed25519 keys that
-  PKCS#12 cannot represent must yield a clean 400, not a traceback.
+  using a modern encryption profile; friendly name = CN. pyca/cryptography
+  50 does serialize Ed25519 into PKCS#12, so no key type cabin issues is
+  rejected today; the requirement is therefore that a refusal by the
+  serializer — for whatever key, on whatever version — yields a clean 400,
+  never a traceback.
 - FR-6: The cert detail page (0005) gets the download links/form; nav gets
   "Certificates" → /certs. A `SecretsError` on any key-bearing path renders/
   returns a clean error, never a 500.

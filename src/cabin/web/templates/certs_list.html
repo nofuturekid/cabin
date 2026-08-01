@@ -1,0 +1,67 @@
+{% extends "layout.html" %} {% block title %}Certificates — cabin{% endblock %}
+{% block content %}
+<div class="card card-wide">
+  <h1>Certificates</h1>
+
+  <form method="get" action="/certs" class="filters">
+    <input
+      type="search"
+      name="q"
+      value="{{ q }}"
+      placeholder="common name, SAN or serial"
+    />
+    <select name="status">
+      {% for option in statuses %}
+      <option value="{{ option }}" {% if option == status %}selected{% endif %}>
+        {{ option }}
+      </option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="secondary">Filter</button>
+  </form>
+
+  {% if certs %}
+  <table>
+    <thead>
+      <tr>
+        <th>Common name</th>
+        <th>Profile</th>
+        <th>SANs</th>
+        <th>Serial</th>
+        <th>Key</th>
+        <th>Valid until</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for cert in certs %}
+      <tr>
+        <td><a href="/certs/{{ cert.id }}">{{ cert.subject_cn }}</a></td>
+        <td>{{ cert.profile }}</td>
+        <td>
+          {{ cert.sans | join(", ") }}{% if cert.sans_more %} +{{ cert.sans_more
+          }} more{% endif %}
+        </td>
+        <td><code>{{ cert.serial_short }}…</code></td>
+        <td>{{ "yes" if cert.has_key else "no" }}</td>
+        <td>
+          {{ cert.not_after }}
+          <span class="badge badge-{{ cert.status }}">{{ cert.status }}</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="note">{{ total }} certificate(s) — page {{ page }} of {{ pages }}</p>
+  {% else %}
+  <p class="note">
+    No certificates match.{% if can_issue %}
+    <a href="/certs/new">Issue one</a>.{% endif %}
+  </p>
+  {% endif %}
+  <p class="pager">
+    {% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %} {% if
+    next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}
+  </p>
+</div>
+{% endblock %}

@@ -10,6 +10,8 @@
   --color-accent-contrast: #ffffff;
   --color-danger: #c0342c;
   --color-danger-bg: #fbeae9;
+  --color-warn: #8a6100;
+  --color-warn-bg: #fdf3d7;
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius: 6px;
   --space-1: 0.25rem;
@@ -29,6 +31,8 @@
     --color-accent-contrast: #0b1220;
     --color-danger: #f28b82;
     --color-danger-bg: #3a2020;
+    --color-warn: #f0c36d;
+    --color-warn-bg: #3a2f16;
   }
 }
 
@@ -173,6 +177,42 @@ td {
 .note {
   color: var(--color-text-muted);
   font-size: 0.875rem;
+}
+
+.filters {
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.filters input[type="search"] {
+  flex: 1;
+}
+
+.pager {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.badge-expiring {
+  background: var(--color-warn-bg);
+  border-color: var(--color-warn);
+  color: var(--color-warn);
+}
+
+.badge-expired {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .row-actions {
