@@ -13,7 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import sessions, users
+from cabin import audit, sessions, users
+from cabin.audit import Actor, ActorKind, AuditAction
 from cabin.ca import service as ca_service
 from cabin.users import (
     InvalidCredentialsError,
@@ -28,6 +29,8 @@ from cabin.web import templates
 from cabin.web.deps import (
     SESSION_COOKIE,
     base_context,
+    client_ip,
+    current_actor,
     get_current_user,
     get_db,
     redirect_if_no_users,
@@ -49,6 +52,18 @@ _setup_lock = threading.Lock()
 
 def _login_and_redirect(request: Request, db: Session, user: User, to: str) -> RedirectResponse:
     token, _ = sessions.create_session(db, user)
+    # Every path that hands out a session goes through here -- /login and the
+    # first-run /setup -- so recording it here is what makes "no session is
+    # created without an event" true by construction (spec 0009 FR-4).
+    audit.record(
+        db,
+        audit.user_actor(user),
+        AuditAction.login_success,
+        summary=f"login for {user.username!r}",
+        target_type="user",
+        target_id=user.id,
+        ip=client_ip(request, db),
+    )
     resp = RedirectResponse(to, status_code=303)
     set_session_cookie(resp, request, token)
     return resp
@@ -96,6 +111,19 @@ def setup_submit(
                 _anon_context("setup already completed by another request"),
                 status_code=400,
             )
+    # Nobody is logged in yet, so the actor is cabin itself: an audit trail
+    # that starts one event *after* the account that owns the instance was
+    # created has a hole exactly where it matters most.
+    audit.record(
+        db,
+        audit.SYSTEM_ACTOR,
+        AuditAction.user_created,
+        summary=f"first-run setup created superadmin {user.username!r}",
+        target_type="user",
+        target_id=user.id,
+        detail={"username": user.username, "role": Role.superadmin.value},
+        ip=client_ip(request, db),
+    )
     return _login_and_redirect(request, db, user, "/")
 
 
@@ -118,6 +146,18 @@ def login_submit(
     try:
         user = users.verify_credentials(db, username, password)
     except InvalidCredentialsError:
+        # The one event that is not a successful state change (FR-4/AC-2):
+        # the attempted username is recorded as the label, but no user id --
+        # a failed login proves nothing about who was at the keyboard, and
+        # the username may not even exist.
+        attempted = username[: audit.MAX_LABEL_LENGTH]
+        audit.record(
+            db,
+            Actor(kind=ActorKind.user, id=None, label=attempted),
+            AuditAction.login_failed,
+            summary=f"failed login for {attempted!r}",
+            ip=client_ip(request, db),
+        )
         return templates.TemplateResponse(
             request,
             "login.html",
@@ -142,11 +182,21 @@ def logout(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> RedirectResponse:
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         sessions.delete_session(db, token)
+    audit.record(
+        db,
+        actor,
+        AuditAction.logout,
+        summary=f"logout for {user.username!r}",
+        target_type="user",
+        target_id=user.id,
+        ip=client_ip(request, db),
+    )
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
@@ -212,12 +262,23 @@ def create_user_route(
     role: str = Form(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
-        users.create_user(db, username, password, _parse_role(role))
+        created = users.create_user(db, username, password, _parse_role(role))
     except (WeakPasswordError, UserExistsError) as exc:
         return _users_page(request, db, user, str(exc), status_code=400)
+    audit.record(
+        db,
+        actor,
+        AuditAction.user_created,
+        summary=f"created user {created.username!r} as {created.role}",
+        target_type="user",
+        target_id=created.id,
+        detail={"username": created.username, "role": created.role},
+        ip=client_ip(request, db),
+    )
     return RedirectResponse("/users", status_code=303)
 
 
@@ -228,14 +289,36 @@ def update_role_route(
     role: str = Form(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
-        users.update_role(db, user_id, _parse_role(role))
+        # Read the old role before the change: "who was demoted from what" is
+        # the question this event exists to answer.
+        old_role = users.get_user(db, user_id).role
+        changed = users.update_role(db, user_id, _parse_role(role))
     except UserNotFoundError as exc:
         raise HTTPException(status_code=404) from exc
     except LastSuperadminError as exc:
         return _users_page(request, db, user, str(exc), status_code=400)
+    # Re-submitting the role a user already has leaves the world exactly as
+    # it was, so it is not an event -- the same no-op guard the settings,
+    # revocation and token-revoke routes apply.
+    if changed.role != old_role:
+        audit.record(
+            db,
+            actor,
+            AuditAction.user_role_changed,
+            summary=f"changed role of {changed.username!r} from {old_role} to {changed.role}",
+            target_type="user",
+            target_id=changed.id,
+            detail={
+                "username": changed.username,
+                "old_role": old_role,
+                "new_role": changed.role,
+            },
+            ip=client_ip(request, db),
+        )
     return RedirectResponse("/users", status_code=303)
 
 
@@ -246,10 +329,11 @@ def reset_password_route(
     password: str = Form(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
-        users.reset_password(db, user_id, password)
+        target = users.reset_password(db, user_id, password)
     except UserNotFoundError as exc:
         raise HTTPException(status_code=404) from exc
     except WeakPasswordError as exc:
@@ -257,6 +341,18 @@ def reset_password_route(
     # The old password can no longer be used to justify any of that user's
     # existing sessions, so they don't get to keep using them either.
     sessions.delete_sessions_for_user(db, user_id)
+    # That a password was reset is the event; the password itself is not part
+    # of it, not even hashed (FR-3).
+    audit.record(
+        db,
+        actor,
+        AuditAction.user_password_reset,
+        summary=f"reset the password of {target.username!r}",
+        target_type="user",
+        target_id=target.id,
+        detail={"username": target.username},
+        ip=client_ip(request, db),
+    )
     return RedirectResponse("/users", status_code=303)
 
 
@@ -266,9 +362,14 @@ def delete_user_route(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
+        # Copy what identifies the user out before the row is gone -- after
+        # the delete there is nothing left to describe the event with.
+        target = users.get_user(db, user_id)
+        deleted_username, deleted_role = target.username, target.role
         users.delete_user(db, user_id)
     except UserNotFoundError as exc:
         raise HTTPException(status_code=404) from exc
@@ -278,4 +379,14 @@ def delete_user_route(
     # above would have stopped it), so it's now safe to drop any sessions
     # that pointed at this user -- no orphan rows left behind.
     sessions.delete_sessions_for_user(db, user_id)
+    audit.record(
+        db,
+        actor,
+        AuditAction.user_deleted,
+        summary=f"deleted user {deleted_username!r}",
+        target_type="user",
+        target_id=user_id,
+        detail={"username": deleted_username, "role": deleted_role},
+        ip=client_ip(request, db),
+    )
     return RedirectResponse("/users", status_code=303)

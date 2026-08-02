@@ -130,6 +130,13 @@ def verify_token(db: Session, secret: str, now: datetime | None = None) -> ApiTo
     return row
 
 
+def get_token(db: Session, token_id: int) -> ApiToken | None:
+    """One token by id, or None. Lets a caller see what state a token is in
+    *before* acting on it -- which is how :func:`revoke_token`'s idempotence
+    stays compatible with recording a revocation exactly once."""
+    return db.get(ApiToken, token_id)
+
+
 def list_tokens(db: Session) -> list[ApiToken]:
     """Every token ever created, in creation order -- revoked and expired
     ones included, because "this one is dead" is what the page is for."""

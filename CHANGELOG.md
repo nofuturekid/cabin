@@ -69,3 +69,16 @@ All notable changes to cabin are documented here. The format is based on
   the rest of cabin's UI). Navigation now hides the entries a
   role cannot use (Issue for viewers, Settings for non-admins, API tokens
   for non-superadmins); the route guards are unchanged.
+- Spec 0009 (audit): an append-only audit log (`cabin.audit`, migration 0007) recording every state change with the actor that caused it — a UI
+  user, an API token, or cabin itself, so the trail stays readable once
+  ACME accounts join them. Logins (including failed ones, with the
+  attempted username), logouts, user management, CA creation and import,
+  settings changes, issuance, CSR signing, revocation and token
+  create/revoke each write exactly one event; failed and no-op requests
+  write none. Entries carry identifiers, names, serials, profiles and
+  reasons only — never key material, passwords, token secrets or CSR
+  bodies. A new `/audit` page (any authenticated user) lists them newest
+  first, 50 per page, filtered by text, action and actor kind, and links
+  certificate targets to their detail page; `GET /api/v1/audit` returns the
+  same for viewer+ tokens. New `trust_proxy` setting (default off) decides
+  whether `X-Forwarded-For` may be believed for the recorded client IP.

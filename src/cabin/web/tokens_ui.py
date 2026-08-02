@@ -14,11 +14,19 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import api_tokens
+from cabin import api_tokens, audit
 from cabin.api_tokens import ApiToken, TokenError, token_status
+from cabin.audit import Actor, AuditAction
 from cabin.users import Role, User
 from cabin.web import templates
-from cabin.web.deps import base_context, get_db, require_role, verify_csrf
+from cabin.web.deps import (
+    base_context,
+    client_ip,
+    current_actor,
+    get_db,
+    require_role,
+    verify_csrf,
+)
 
 router = APIRouter(prefix="/tokens")
 
@@ -130,6 +138,7 @@ def create_token(
     expires_at: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     """Renders the page rather than redirecting: the secret exists only in
@@ -137,9 +146,25 @@ def create_token(
     try:
         parsed_role = _parse_role(role)
         expiry = _parse_expiry(expires_at, datetime.now(UTC))
-        secret, _ = api_tokens.create_token(db, label, parsed_role, expiry)
+        secret, row = api_tokens.create_token(db, label, parsed_role, expiry)
     except TokenError as exc:
         return _page(request, db, user, error=str(exc), status_code=400)
+    # That a credential was minted, for whom and until when -- never the
+    # credential itself (FR-3).
+    audit.record(
+        db,
+        actor,
+        AuditAction.token_created,
+        summary=f"created API token {row.label!r} with role {row.role}",
+        target_type="api_token",
+        target_id=row.id,
+        detail={
+            "label": row.label,
+            "role": row.role,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        },
+        ip=client_ip(request, db),
+    )
     return _page(request, db, user, secret=secret)
 
 
@@ -149,10 +174,26 @@ def revoke_token(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     """Idempotent, and deliberately silent about an unknown id: the page
     lists exactly the tokens that exist, so "it is gone" is the same answer
     either way."""
+    row = api_tokens.get_token(db, token_id)
+    # An unknown token and an already-revoked one both leave the world
+    # exactly as it was, so neither is an event.
+    if row is None or row.revoked_at is not None:
+        return RedirectResponse("/tokens", status_code=303)
     api_tokens.revoke_token(db, token_id)
+    audit.record(
+        db,
+        actor,
+        AuditAction.token_revoked,
+        summary=f"revoked API token {row.label!r}",
+        target_type="api_token",
+        target_id=row.id,
+        detail={"label": row.label, "role": row.role},
+        ip=client_ip(request, db),
+    )
     return RedirectResponse("/tokens", status_code=303)

@@ -23,6 +23,20 @@ block content %}
       value="{{ base_url }}"
       placeholder="https://ca.example.org"
     />
+
+    <h2>Trust the reverse proxy</h2>
+    <p class="note">
+      Tick this only if cabin is reached exclusively through a reverse proxy you
+      control. The audit log then records the first address from the
+      <code>X-Forwarded-For</code> header instead of the address the request
+      arrived from. Without a proxy in front, anyone can send that header and
+      choose which IP the log blames.
+    </p>
+    <label class="checkbox">
+      <input id="trust_proxy" type="checkbox" name="trust_proxy" value="on" {{ "checked" if trust_proxy else "" }} />
+      Trust X-Forwarded-For from the proxy in front of cabin
+    </label>
+
     <button type="submit">Save</button>
   </form>
   {% if base_url %}
