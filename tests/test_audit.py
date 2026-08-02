@@ -35,6 +35,10 @@ SPEC_ACTIONS = {
     "cert_revoked",
     "token_created",
     "token_revoked",
+    # spec 0010 FR-6: the third door, ACME
+    "acme_account_created",
+    "acme_account_deactivated",
+    "acme_order_created",
 }
 
 

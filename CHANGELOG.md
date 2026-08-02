@@ -82,3 +82,38 @@ All notable changes to cabin are documented here. The format is based on
   certificate targets to their detail page; `GET /api/v1/audit` returns the
   same for viewer+ tokens. New `trust_proxy` setting (default off) decides
   whether `X-Forwarded-For` may be believed for the recorded client IP.
+- Spec 0010 (acme-core): cabin's own ACME v2 server (`cabin.acme`, migration
+  0008), written from RFC 8555 — directory, single-use nonces (128-bit,
+  spent by the DELETE that reads them, expiring after 24h), JWS request
+  verification against an explicit algorithm allowlist (RS256/ES256/ES384/
+  EdDSA — never `none`, never HS\*, never a key that cannot carry the
+  algorithm it announces), and account, order, authorization and challenge
+  resources. Accounts are identified by their RFC 7638 key thumbprint, so
+  new-account is idempotent on the key; `onlyReturnExisting`, contact
+  updates, deactivation and key rollover (RFC 8555 7.3.5) are all
+  implemented. An order for `nas.lan` yields one pending authorization with
+  http-01, dns-01 and tls-alpn-01 challenges carrying distinct tokens; a
+  wildcard yields a `wildcard: true` authorization with dns-01 only, and an
+  IP identifier one without dns-01 (RFC 8738). Identifiers go through the
+  SAN policy of spec 0005, so a name that could not be typed into the
+  issuance form cannot arrive through an order either; DNS names are
+  case-folded, and an order or authorization past its `expires` reads as
+  invalid/expired however the row was left. POSTs must be
+  `application/jose+json` (415 otherwise, RFC 8555 6.2), and every response
+  to one — success and RFC 7807 problem document alike — carries a fresh
+  `Replay-Nonce`, attached by middleware so no route can omit it; the
+  directory `Link: <directory>;rel="index"` is on every ACME response.
+  Account creation, order creation and deactivation are audited with
+  `actor_kind="acme"` and the account key's thumbprint prefix as the label.
+  All of it is behind a new `acme_enabled` setting, default off, and off
+  means 404 on every `/acme/…` path rather than 403. Enabling it requires
+  the `base_url` setting: every URL cabin publishes, and the RFC 8555 6.4
+  check that a signature covers the URL it was sent to, come from that
+  setting alone and never from the request's `Host` header. The directory
+  URL is shown on /settings and /ca once it is on. Challenge validation
+  (0011) and
+  finalize/certificate/revokeCert/EAB (0012) are not implemented yet: those
+  URLs are advertised, as RFC 8555 requires, and answer with a 501 problem
+  document rather than a bare 404. Interoperability is verified against the
+  certbot `acme` client library, added as a dev dependency; `josepy` is a
+  new runtime dependency.

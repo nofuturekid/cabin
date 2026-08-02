@@ -23,6 +23,11 @@ BASE_URL = "base_url"
 #: choose which IP the audit log blames.
 TRUST_PROXY = "trust_proxy"
 
+#: Whether cabin's ACME server answers at all (spec 0010 FR-5). Default
+#: false, and "off" means 404 rather than 403: an internal CA has no reason
+#: to tell the internet which protocols it declines to speak.
+ACME_ENABLED = "acme_enabled"
+
 #: What a checkbox-style setting stores when it is on / off.
 TRUE = "true"
 FALSE = "false"

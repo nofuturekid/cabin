@@ -37,10 +37,32 @@ block content %}
       Trust X-Forwarded-For from the proxy in front of cabin
     </label>
 
+    <h2>ACME</h2>
+    <p class="note">
+      Let clients such as certbot or acme.sh request certificates from cabin
+      automatically. While this is off, every <code>/acme/…</code> address
+      answers as if it did not exist. Set a base URL above as well — that is
+      the address clients are given.
+    </p>
+    <label class="checkbox">
+      <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
+      Enable the ACME server
+    </label>
+
     <button type="submit">Save</button>
   </form>
   {% if base_url %}
   <p class="note">CRL is served at <code>{{ base_url }}/crl</code>.</p>
-  {% endif %}
+  {% endif %} {% if acme_enabled %} {% if acme_directory_url %}
+  <p class="note">
+    ACME directory: <code>{{ acme_directory_url }}</code> — hand this URL to
+    your client.
+  </p>
+  {% else %}
+  <p class="note">
+    ACME is enabled, but without a base URL there is no directory address to
+    hand out.
+  </p>
+  {% endif %} {% endif %}
 </div>
 {% endblock %}

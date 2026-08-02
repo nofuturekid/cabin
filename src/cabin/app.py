@@ -9,6 +9,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 
 from cabin import __version__
+from cabin.acme.api import router as acme_router
+from cabin.acme.errors import AcmeError
+from cabin.acme.http import acme_error_handler, acme_response_headers
 from cabin.api.v1 import router as api_v1_router
 from cabin.config import Config
 from cabin.secrets import SecretStore
@@ -61,6 +64,13 @@ def create_app(config: Config) -> FastAPI:
                 set_session_cookie(response, request, token)
         return response
 
+    # Spec 0010 FR-4: a fresh Replay-Nonce and the directory Link on every
+    # ACME response. Middleware, so that an error raised anywhere below --
+    # including inside a dependency -- still comes back with a nonce the
+    # client can retry with.
+    app.middleware("http")(acme_response_headers)
+    app.add_exception_handler(AcmeError, acme_error_handler)
+
     @app.exception_handler(AuthRedirect)
     async def _auth_redirect_handler(request: Request, exc: AuthRedirect) -> RedirectResponse:
         return RedirectResponse(exc.location, status_code=303)
@@ -82,6 +92,10 @@ def create_app(config: Config) -> FastAPI:
     # Bearer tokens only, no cookies, no CSRF -- the API and the UI are two
     # separate front doors (spec 0008 FR-3).
     app.include_router(api_v1_router)
+    # A third front door, and the only one whose authentication is a
+    # signature rather than a credential cabin issued: ACME (spec 0010).
+    # Every route behind an acme_enabled gate that answers 404 when off.
+    app.include_router(acme_router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     return app
