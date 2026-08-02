@@ -90,3 +90,19 @@ test_api_audit_list, test_api_audit_requires_token
 Log export/rotation, tamper-evident hashing/signing of the log, retention
 policy, syslog/SIEM forwarding, ACME events (wired when 0010-0012 land),
 per-user visibility restrictions.
+
+Two deliberate omissions, recorded here so they read as decisions rather
+than oversights:
+
+- **Reads are not audited.** FR-4 covers state changes only, so downloading
+  a private key (`/certs/{id}/download/key.pem`) or a PKCS#12 bundle writes
+  no event, even though both hand out key material. "Who exported this key"
+  is a real audit question and wants a `cert_key_exported` action, but it is
+  a different class of event from this spec's — one that a viewer's page
+  refresh can trigger — and pulling it in would change what the log means.
+  Deferred to its own spec.
+- **No retention or rate limiting for `login_failed`.** Those rows are the
+  only ones an unauthenticated caller can cause, so a login-guessing script
+  grows the table unbounded. That is the accepted cost of recording failed
+  logins at all in v1; retention (above) and login throttling both belong to
+  a later spec, and neither changes the shape of the table.

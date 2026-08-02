@@ -13,10 +13,11 @@ Two rules shape this module:
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cabin.audit import ActorKind, AuditAction
 from cabin.ca.certs import CertStatus
 from cabin.ca.leaf import (
     DEFAULT_DAYS,
@@ -120,6 +121,36 @@ class RevocationInfo(BaseModel):
     reason: RevocationReason
     #: Where the CRL now listing this serial is published, if configured.
     crl_url: str | None = None
+
+
+class AuditEventInfo(BaseModel):
+    """One audit entry (spec 0009 FR-7) -- the same row /audit renders."""
+
+    id: int
+    occurred_at: datetime
+    actor_kind: ActorKind
+    #: Absent for an actor with no row behind it: a failed login, or cabin
+    #: itself.
+    actor_id: int | None = None
+    actor_label: str
+    action: AuditAction
+    target_type: str | None = None
+    #: Text, because not every target is an integer id.
+    target_id: str | None = None
+    summary: str
+    #: Identifiers, names, serials and reasons -- never key material,
+    #: passwords or token secrets (FR-3).
+    detail: dict[str, Any] | None = None
+    ip: str | None = None
+
+
+class AuditEventList(BaseModel):
+    items: list[AuditEventInfo]
+    #: Matches across the whole filtered set, not just this page.
+    total: int
+    page: int
+    per_page: int
+    pages: int
 
 
 class IssueRequest(BaseModel):

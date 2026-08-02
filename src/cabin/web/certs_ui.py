@@ -14,6 +14,8 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
+from cabin import audit
+from cabin.audit import Actor, AuditAction
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
@@ -42,6 +44,8 @@ from cabin.web.deps import (
     ADMIN_ROLES,
     base_context,
     certificate_or_404,
+    client_ip,
+    current_actor,
     get_current_user,
     get_db,
     require_admin,
@@ -162,6 +166,7 @@ def certs_issue(
     days: int = Form(DEFAULT_DAYS),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
@@ -179,6 +184,16 @@ def certs_issue(
         return _new_page(request, user, str(exc), status_code=400)
     except CANotConfiguredError:
         return _new_page(request, user, _NO_CA, status_code=400)
+    audit.record(
+        db,
+        actor,
+        AuditAction.cert_issued,
+        summary=audit.issued_summary(row),
+        target_type="certificate",
+        target_id=row.id,
+        detail=audit.certificate_detail(row, key_type=key_type),
+        ip=client_ip(request, db),
+    )
     # The key is never carried in the redirect: the result page re-derives
     # it from the sealed column for whoever is authorized to see it (FR-6).
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
@@ -193,6 +208,7 @@ def certs_sign(
     sans_override: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
@@ -209,6 +225,18 @@ def certs_sign(
         return _new_page(request, user, str(exc), status_code=400)
     except CANotConfiguredError:
         return _new_page(request, user, _NO_CA, status_code=400)
+    # The CSR itself is not recorded: it is bulky, and what it asked for is
+    # already described by the certificate that came out of it (FR-3).
+    audit.record(
+        db,
+        actor,
+        AuditAction.cert_signed,
+        summary=audit.signed_summary(row),
+        target_type="certificate",
+        target_id=row.id,
+        detail=audit.certificate_detail(row),
+        ip=client_ip(request, db),
+    )
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
 
 
@@ -270,11 +298,15 @@ def cert_revoke(
     confirm: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     """Spec 0007 FR-7: revocation cannot be undone, so it takes an explicit
     confirmation on top of CSRF and the admin role."""
     row = certificate_or_404(db, cert_id)
+    # Revoking is idempotent, so "was it already revoked" decides whether
+    # this request changes anything -- and only a change is an event.
+    was_revoked = row.revoked_at is not None
     if not confirm:
         return _detail_page(request, user, row, _CONFIRM_REVOKE, status_code=400)
     try:
@@ -288,4 +320,15 @@ def cert_revoke(
         crl_service.revoke_certificate(db, request.app.state.secrets, cert_id, parsed)
     except CANotConfiguredError:
         return _detail_page(request, user, row, _NO_CA, status_code=400)
+    if not was_revoked:
+        audit.record(
+            db,
+            actor,
+            AuditAction.cert_revoked,
+            summary=audit.revoked_summary(row, parsed),
+            target_type="certificate",
+            target_id=row.id,
+            detail=audit.revocation_detail(row, parsed),
+            ip=client_ip(request, db),
+        )
     return RedirectResponse(f"/certs/{cert_id}", status_code=303)

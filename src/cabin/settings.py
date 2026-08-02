@@ -17,6 +17,19 @@ from cabin.store import Base
 #: Empty/absent means "not configured" -- see spec 0007 FR-6.
 BASE_URL = "base_url"
 
+#: Whether cabin is behind a reverse proxy it may believe about the client's
+#: address (spec 0009 FR-5). Default false: ``X-Forwarded-For`` is a header
+#: any client can set, so trusting it without a proxy in front lets anyone
+#: choose which IP the audit log blames.
+TRUST_PROXY = "trust_proxy"
+
+#: What a checkbox-style setting stores when it is on / off.
+TRUE = "true"
+FALSE = "false"
+#: What counts as on when reading one back -- generous on input, exact on
+#: output, so a value typed straight into the database still works.
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
 
 class SettingError(Exception):
     """A submitted setting failed validation; the message names the reason
@@ -42,6 +55,11 @@ def set_setting(db: Session, key: str, value: str) -> None:
     else:
         row.value = value
     db.commit()
+
+
+def get_flag(db: Session, key: str) -> bool:
+    """A checkbox-style setting, absent meaning off."""
+    return (get_setting(db, key) or "").strip().lower() in _TRUE_VALUES
 
 
 def validate_base_url(raw: str) -> str:

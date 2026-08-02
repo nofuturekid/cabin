@@ -12,15 +12,19 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
+from cabin import audit
+from cabin.audit import Actor, AuditAction
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
 from cabin.ca import x509 as ca_x509
-from cabin.ca.service import CACertificate, CAExistsError
+from cabin.ca.service import CACertificate, CAExistsError, CAHierarchy
 from cabin.ca.x509 import CAImportError
 from cabin.users import User
 from cabin.web import templates
 from cabin.web.deps import (
     base_context,
+    client_ip,
+    current_actor,
     get_current_user,
     get_db,
     require_admin,
@@ -57,6 +61,12 @@ def _years_error(root_years: int, intermediate_years: int) -> str | None:
     return None
 
 
+def _subject(hierarchy: CAHierarchy) -> str:
+    """The signing CA's subject, read back off the stored certificate -- what
+    an audit entry has to name, since "the CA" is otherwise anonymous."""
+    return str(_cert_info(hierarchy.intermediate)["subject"])
+
+
 def _key_type_error(key_type: str) -> str | None:
     if key_type not in ca_x509.KEY_TYPES:
         return f"key_type must be one of: {', '.join(ca_x509.KEY_TYPES)}"
@@ -89,6 +99,7 @@ def ca_create(
     intermediate_years: int = Form(10),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     form_error = _key_type_error(key_type) or _years_error(root_years, intermediate_years)
@@ -98,7 +109,7 @@ def ca_create(
         return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
     try:
         with _ca_lock:
-            ca_service.create_hierarchy(
+            hierarchy = ca_service.create_hierarchy(
                 db,
                 request.app.state.secrets,
                 name,
@@ -110,6 +121,22 @@ def ca_create(
         context = base_context(request, user)
         context["error"] = str(exc)
         return templates.TemplateResponse(request, "ca_setup.html", context, status_code=409)
+    audit.record(
+        db,
+        actor,
+        AuditAction.ca_created,
+        summary=f"created CA hierarchy {name!r}",
+        target_type="ca",
+        target_id=hierarchy.intermediate.id,
+        detail={
+            "name": name,
+            "key_type": key_type,
+            "root_years": root_years,
+            "intermediate_years": intermediate_years,
+            "subject": _subject(hierarchy),
+        },
+        ip=client_ip(request, db),
+    )
     return RedirectResponse("/ca", status_code=303)
 
 
@@ -122,11 +149,12 @@ def ca_import(
     chain_pem: str = Form(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     try:
         with _ca_lock:
-            ca_service.import_hierarchy(
+            hierarchy = ca_service.import_hierarchy(
                 db,
                 request.app.state.secrets,
                 cert_pem,
@@ -142,6 +170,19 @@ def ca_import(
         context = base_context(request, user)
         context["error"] = str(exc)
         return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
+    # The subject only -- neither the submitted key nor its passphrase has any
+    # business in a log (FR-3).
+    subject = _subject(hierarchy)
+    audit.record(
+        db,
+        actor,
+        AuditAction.ca_imported,
+        summary=f"imported CA {subject}",
+        target_type="ca",
+        target_id=hierarchy.intermediate.id,
+        detail={"subject": subject},
+        ip=client_ip(request, db),
+    )
     return RedirectResponse("/ca", status_code=303)
 
 

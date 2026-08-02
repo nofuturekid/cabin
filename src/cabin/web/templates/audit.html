@@ -1,0 +1,66 @@
+{% extends "layout.html" %} {% block title %}Audit — cabin{% endblock %} {%
+block content %}
+<div class="card card-wide">
+  <h1>Audit log</h1>
+
+  <form method="get" action="/audit" class="filters">
+    <input
+      type="search"
+      name="q"
+      value="{{ q }}"
+      placeholder="actor, action or summary"
+    />
+    <select name="action">
+      {% for option in actions %}
+      <option value="{{ option }}" {{ "selected" if option == action else "" }}>{{ option }}</option>
+      {% endfor %}
+    </select>
+    <select name="actor_kind">
+      {% for option in actor_kinds %}
+      <option value="{{ option }}" {{ "selected" if option == actor_kind else "" }}>{{ option }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="secondary">Filter</button>
+  </form>
+
+  {% if events %}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Actor</th>
+        <th>Action</th>
+        <th>What happened</th>
+        <th>From</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for event in events %}
+      <tr>
+        <td>{{ event.occurred_at }}</td>
+        <td>
+          {{ event.actor_label }}
+          <span class="badge">{{ event.actor_kind }}</span>
+        </td>
+        <td><code>{{ event.action }}</code></td>
+        <td>
+          {% if event.cert_id %}
+          <a href="/certs/{{ event.cert_id }}">{{ event.summary }}</a>
+          {% else %}{{ event.summary }}{% endif %}
+        </td>
+        <td>{{ event.ip }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="note">{{ total }} event(s) — page {{ page }} of {{ pages }}</p>
+  {% else %}
+  <p class="note">No events match.</p>
+  {% endif %}
+  <p class="pager">
+    {% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %} {% if
+    next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}
+  </p>
+</div>
+{% endblock %}

@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import Response
 
 from cabin import sessions, users
+from cabin.audit import Actor, user_actor
 from cabin.ca.certs import Certificate, get_certificate
 from cabin.sessions import SESSION_LIFETIME, UserSession
+from cabin.settings import TRUST_PROXY, get_flag
 from cabin.users import Role, User
 
 SESSION_COOKIE = "cabin_session"
@@ -23,6 +25,10 @@ SESSION_COOKIE = "cabin_session"
 #: route guards and per-page visibility checks can't drift apart on what
 #: "admin" means -- use ADMIN_ROLES for the latter, never a re-inlined tuple.
 ADMIN_ROLES = (Role.admin, Role.superadmin)
+
+#: Width of audit_events.ip -- enough for an IPv4-mapped IPv6 address, and a
+#: bound on what a forwarded header may write into that column.
+MAX_IP_LENGTH = 45
 
 
 def set_session_cookie(response: Response, request: Request, token: str) -> None:
@@ -120,6 +126,31 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
         request.state.session_cookie_refresh = token
     request.state.session = session_row
     return user
+
+
+def current_actor(user: User = Depends(get_current_user)) -> Actor:
+    """Spec 0009 FR-5: who the audit log should blame for whatever this UI
+    request changes. The API's equivalent is :func:`cabin.audit.token_actor`
+    applied to the token its own dependency already resolved -- the two front
+    doors stay separate, as everywhere else."""
+    return user_actor(user)
+
+
+def client_ip(request: Request, db: Session) -> str | None:
+    """Spec 0009 FR-5: the address to record for this request.
+
+    ``X-Forwarded-For`` is only consulted when the ``trust_proxy`` setting is
+    on, because it is a header any client can send: believing it by default
+    would let anyone choose which address the audit log blames. When it is
+    on, only the *first* entry is taken -- everything after it was added by
+    the proxies in between and is no more trustworthy than the header itself.
+    """
+    if get_flag(db, TRUST_PROXY):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:MAX_IP_LENGTH]
+    return request.client.host if request.client is not None else None
 
 
 def require_role(*roles: Role) -> Callable[[User], User]:

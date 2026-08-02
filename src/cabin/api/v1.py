@@ -33,8 +33,10 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import __version__
+from cabin import __version__, audit
 from cabin.api.models import (
+    AuditEventInfo,
+    AuditEventList,
     CACertificateInfo,
     CAInfo,
     CertificateDetail,
@@ -48,6 +50,10 @@ from cabin.api.models import (
     StatusFilter,
 )
 from cabin.api_tokens import ApiToken
+from cabin.audit import MAX_PAGE as AUDIT_MAX_PAGE
+from cabin.audit import MAX_QUERY_LENGTH as AUDIT_MAX_QUERY_LENGTH
+from cabin.audit import PER_PAGE as AUDIT_PER_PAGE
+from cabin.audit import ActorKind, AuditAction, AuditEvent
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
@@ -69,7 +75,7 @@ from cabin.secrets import SecretsError
 from cabin.settings import BASE_URL, get_setting
 from cabin.users import Role
 from cabin.web.api_deps import require_api_read, require_api_write
-from cabin.web.deps import ADMIN_ROLES, certificate_or_404, get_db
+from cabin.web.deps import ADMIN_ROLES, certificate_or_404, client_ip, get_db
 
 PREFIX = "/api/v1"
 
@@ -183,6 +189,31 @@ def _detail(
     )
 
 
+def _record_certificate_event(
+    db: Session,
+    request: Request,
+    token: ApiToken,
+    action: AuditAction,
+    *,
+    summary: str,
+    target_id: int,
+    detail: dict[str, Any],
+) -> None:
+    """Spec 0009 FR-4: the API's half of the audit wiring. Every event from
+    here carries ``actor_kind="token"`` -- a script is not a person, and the
+    log has to be able to say which one changed something."""
+    audit.record(
+        db,
+        audit.token_actor(token),
+        action,
+        summary=summary,
+        target_type="certificate",
+        target_id=target_id,
+        detail=detail,
+        ip=client_ip(request, db),
+    )
+
+
 def _no_store(response: Response) -> None:
     """Mark a response that can carry an unsealed private key as
     uncacheable -- the same headers the UI's detail page sets, because a
@@ -275,7 +306,17 @@ def issue_certificate(
             key_type=body.key_type,
             crl_url=crl_service.distribution_url(db),
         )
-        return _detail(request, db, token, row, datetime.now(UTC))
+        detail = _detail(request, db, token, row, datetime.now(UTC))
+    _record_certificate_event(
+        db,
+        request,
+        token,
+        AuditAction.cert_issued,
+        summary=audit.issued_summary(row),
+        target_id=row.id,
+        detail=audit.certificate_detail(row, key_type=body.key_type),
+    )
+    return detail
 
 
 @router.post(
@@ -303,7 +344,18 @@ def sign_csr(
             sans_override=body.sans or None,
             crl_url=crl_service.distribution_url(db),
         )
-        return _detail(request, db, token, row, datetime.now(UTC))
+        detail = _detail(request, db, token, row, datetime.now(UTC))
+    # The CSR body stays out of the log, here as in the UI (FR-3).
+    _record_certificate_event(
+        db,
+        request,
+        token,
+        AuditAction.cert_signed,
+        summary=audit.signed_summary(row),
+        target_id=row.id,
+        detail=audit.certificate_detail(row),
+    )
+    return detail
 
 
 @router.get(
@@ -336,12 +388,27 @@ def revoke_certificate(
     body: RevokeRequest,
     request: Request,
     db: Session = Depends(get_db),
-    _token: ApiToken = Depends(require_api_write),
+    token: ApiToken = Depends(require_api_write),
 ) -> RevocationInfo:
     """Idempotent: revoking an already-revoked certificate succeeds and
     leaves the original date and reason in place."""
+    # Which means only the call that actually revokes is a state change, and
+    # only that one is an event -- a retry after a timeout must not add a
+    # second revocation to the log.
+    existing = certs_service.get_certificate(db, cert_id)
+    was_revoked = existing is not None and existing.revoked_at is not None
     with _domain_errors():
         row = crl_service.revoke_certificate(db, request.app.state.secrets, cert_id, body.reason)
+    if not was_revoked:
+        _record_certificate_event(
+            db,
+            request,
+            token,
+            AuditAction.cert_revoked,
+            summary=audit.revoked_summary(row, body.reason),
+            target_id=row.id,
+            detail=audit.revocation_detail(row, body.reason),
+        )
     revoked_at = row.revoked_at_dt
     assert revoked_at is not None  # revoke_certificate either sets it or raises
     return RevocationInfo(
@@ -351,6 +418,66 @@ def revoke_certificate(
         revoked_at=revoked_at,
         reason=RevocationReason(row.revocation_reason or RevocationReason.unspecified),
         crl_url=crl_service.distribution_url(db),
+    )
+
+
+# --- audit (spec 0009 FR-7) ----------------------------------------------------
+
+
+def _audit_event(event: AuditEvent) -> AuditEventInfo:
+    return AuditEventInfo.model_validate(
+        {
+            "id": event.id,
+            "occurred_at": event.occurred_at_dt,
+            "actor_kind": event.actor_kind,
+            "actor_id": event.actor_id,
+            "actor_label": event.actor_label,
+            "action": event.action,
+            "target_type": event.target_type,
+            "target_id": event.target_id,
+            "summary": event.summary,
+            "detail": event.detail,
+            "ip": event.ip,
+        }
+    )
+
+
+@router.get(
+    "/audit",
+    response_model=AuditEventList,
+    response_model_exclude_none=True,
+    summary="List audit events",
+)
+def list_audit_events(
+    q: str = Query("", max_length=AUDIT_MAX_QUERY_LENGTH),
+    action: AuditAction | None = None,
+    actor_kind: ActorKind | None = None,
+    page: int = Query(1, ge=1, le=AUDIT_MAX_PAGE),
+    db: Session = Depends(get_db),
+    _token: ApiToken = Depends(require_api_read),
+) -> AuditEventList:
+    """The same log the UI shows, paginated the same way. Readable by any
+    live token (viewer+): entries are metadata, not secrets.
+
+    Unlike the UI -- which treats an unknown ?action= as a typo and shows
+    everything -- an unknown value here is a 422, for the same reason the
+    inventory's status filter is: a script filtering on a name we do not have
+    must be told, not quietly handed the whole log.
+    """
+    rows, total = audit.list_events(
+        db,
+        q=q,
+        action=action.value if action is not None else "all",
+        actor_kind=actor_kind.value if actor_kind is not None else "all",
+        page=page,
+        per_page=AUDIT_PER_PAGE,
+    )
+    return AuditEventList(
+        items=[_audit_event(event) for event in rows],
+        total=total,
+        page=page,
+        per_page=AUDIT_PER_PAGE,
+        pages=max(1, (total + AUDIT_PER_PAGE - 1) // AUDIT_PER_PAGE),
     )
 
 
