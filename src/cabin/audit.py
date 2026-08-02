@@ -88,6 +88,8 @@ class AuditAction(StrEnum):
     acme_account_created = "acme_account_created"
     acme_account_deactivated = "acme_account_deactivated"
     acme_order_created = "acme_order_created"
+    acme_challenge_validated = "acme_challenge_validated"
+    acme_challenge_failed = "acme_challenge_failed"
 
 
 #: Accepted ``?action=`` / ``?actor_kind=`` values; "all" means "no filter".

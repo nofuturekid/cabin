@@ -6,7 +6,7 @@ belongs to exactly one account; nothing here validates a challenge or issues
 a certificate -- those are specs 0011 and 0012.
 """
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
@@ -30,6 +30,7 @@ from cabin.acme.http import (
     verified,
 )
 from cabin.acme.jws import KeyMode
+from cabin.acme.validation import validate_challenge
 from cabin.audit import AuditAction, acme_actor
 from cabin.ca import service as ca_service
 from cabin.web.deps import client_ip, get_db
@@ -124,13 +125,23 @@ def authz_resource(
 def challenge_resource(
     challenge_id: str,
     request: Request,
+    background: BackgroundTasks,
     body: bytes = Depends(acme_body),
     db: Session = Depends(get_db),
 ) -> Response:
-    """POST-as-GET reads the challenge. A ``{}`` payload is RFC 8555 7.5.1's
-    "please validate this" -- spec 0011's trigger; until then it reads the
-    same, which is a truthful answer for a challenge nothing has started
-    validating."""
+    """Read a challenge, or start it (spec 0011 FR-2, FR-3).
+
+    One URL, two meanings, told apart by the payload alone: an *empty*
+    payload is POST-as-GET and only reads, an empty JSON *object* is RFC
+    8555 7.5.1's "I am ready, go and check" and schedules the validation.
+    Getting that distinction wrong in either direction would be a bug a
+    client cannot work around -- polling would keep re-validating, or the
+    trigger would never fire.
+
+    The response never waits for the validation (FR-3): it reports
+    ``processing`` and the client polls the authorization, which is what the
+    ``up`` link below is for.
+    """
     verification = verified(db, body, f"{CHALLENGE_PREFIX}{challenge_id}", KeyMode.kid)
     challenge = service.get_challenge(db, challenge_id)
     if challenge is None:
@@ -139,7 +150,17 @@ def challenge_resource(
     if authz is None:  # pragma: no cover - a challenge always has its authz
         raise not_found("authorization")
     owned_order(db, account_of(verification), service.get_order(db, authz.order_id))
-    return json_response(challenge_json(db, challenge))
+
+    if verification.payload is not None and service.begin_challenge(db, challenge, authz):
+        # The task is handed the *factory*, not this request's session: by
+        # the time it runs, this one is closed (see cabin.acme.validation).
+        background.add_task(validate_challenge, request.app.state.db, challenge.id)
+    return json_response(
+        challenge_json(db, challenge),
+        # RFC 8555 7.5.1: which authorization to poll. Set here and appended
+        # to by the middleware, which adds the directory link.
+        Link=f'<{url(db, f"{AUTHZ_PREFIX}{authz.id}")}>;rel="up"',
+    )
 
 
 def _unimplemented(what: str) -> AcmeError:

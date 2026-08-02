@@ -12,6 +12,7 @@ library will not build.
 """
 
 import base64
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -37,6 +38,15 @@ def _uint(value: int, length: int) -> str:
     return b64(value.to_bytes(length, "big"))
 
 
+#: RFC 7638 3.2: the members that take part in a thumbprint, per key type.
+#: Everything else in a JWK is left out, and the order is lexicographic.
+_THUMBPRINT_MEMBERS = {
+    "RSA": ("e", "kty", "n"),
+    "EC": ("crv", "kty", "x", "y"),
+    "OKP": ("crv", "kty", "x"),
+}
+
+
 @dataclass(frozen=True)
 class AcmeKey:
     """A signing key plus the JWK and ``alg`` that go with it."""
@@ -44,6 +54,22 @@ class AcmeKey:
     alg: str
     private: Any
     jwk: dict[str, Any]
+
+    def thumbprint(self) -> str:
+        """The RFC 7638 thumbprint of this key -- the second half of every
+        key authorization (spec 0011 FR-1).
+
+        Computed here from the RFC rather than asked of the server, so that a
+        test comparing the two is comparing two readings of the specification
+        and not one value with itself.
+        """
+        members = _THUMBPRINT_MEMBERS[self.jwk["kty"]]
+        canonical = json.dumps(
+            {name: self.jwk[name] for name in members},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return b64(hashlib.sha256(canonical.encode("utf-8")).digest())
 
     def sign(self, signing_input: bytes) -> bytes:
         if self.alg == "RS256":

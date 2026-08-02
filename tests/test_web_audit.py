@@ -306,9 +306,16 @@ def test_ca_import_recorded(client: TestClient, cfg: Config) -> None:
 
 def test_settings_change_recorded(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
+    # The private-target checkbox is on by default (spec 0011 FR-9), so the
+    # form has to submit it to change nothing but the base URL -- an
+    # unticked checkbox is not "leave as it was", here or anywhere else.
+    unchanged = {
+        "allow_private_validation_targets": "on",
+        "csrf_token": _csrf(client, cfg),
+    }
     resp = client.post(
         "/settings",
-        data={"base_url": "https://ca.example.org", "csrf_token": _csrf(client, cfg)},
+        data={"base_url": "https://ca.example.org", **unchanged},
     )
     assert resp.status_code == 303
 
@@ -326,7 +333,11 @@ def test_settings_change_recorded(client: TestClient, cfg: Config) -> None:
     # Saving the same values again changes nothing, so it records nothing.
     resp = client.post(
         "/settings",
-        data={"base_url": "https://ca.example.org", "csrf_token": _csrf(client, cfg)},
+        data={
+            "base_url": "https://ca.example.org",
+            "allow_private_validation_targets": "on",
+            "csrf_token": _csrf(client, cfg),
+        },
     )
     assert resp.status_code == 303
     assert len(_events(cfg, AuditAction.settings_changed)) == 1
@@ -337,6 +348,7 @@ def test_settings_change_recorded(client: TestClient, cfg: Config) -> None:
         data={
             "base_url": "https://ca.example.org",
             "trust_proxy": "on",
+            "allow_private_validation_targets": "on",
             "csrf_token": _csrf(client, cfg),
         },
     )

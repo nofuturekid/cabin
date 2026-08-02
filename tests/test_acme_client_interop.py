@@ -1,8 +1,9 @@
-"""Spec 0010 AC-7: the interop gate.
+"""Spec 0010 AC-7 and spec 0011 AC-8: the interop gate.
 
-Unit tests prove cabin does what *we* read RFC 8555 to say. This one proves
-a real client agrees -- the certbot ACME library (BSD-licensed, a dev
-dependency only) registers an account and places an order against the app.
+Unit tests prove cabin does what *we* read RFC 8555 to say. These prove a
+real client agrees -- the certbot ACME library (BSD-licensed, a dev
+dependency only) registers an account, places an order and, from spec 0011,
+answers an http-01 challenge and polls the authorization to valid.
 """
 
 from collections.abc import Iterator
@@ -14,6 +15,7 @@ import pytest
 import requests
 from acme import client as acme_client
 from acme import messages
+from challenge_servers import http_server, point_at, serves
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -190,3 +192,37 @@ def test_real_client_sees_problem_documents(client: TestClient) -> None:
     # the client is still usable afterwards
     order = acme.new_order(_csr("nas.lan"))
     assert order.body.status == messages.STATUS_PENDING
+
+
+def test_client_completes_http01(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec 0011 AC-8: trigger, validate, poll -- driven end to end by the
+    certbot library against a real local web server.
+
+    The client computes the key authorization from its own account key and
+    serves it at its own idea of the well-known path; cabin has to agree with
+    both, and with the ``up`` Link the client insists on when answering.
+    """
+    acme = _connect(client)
+    acme.new_account(messages.NewRegistration.from_data(terms_of_service_agreed=True))
+    order = acme.new_order(_csr("nas.lan"))
+    authzr = order.authorizations[0]
+    challb = next(challenge for challenge in authzr.body.challenges if challenge.typ == "http-01")
+    chall = challb.chall
+    response, validation = chall.response_and_validation(acme.net.key)
+
+    with http_server(serves(validation.encode(), path=chall.path)) as server:
+        point_at(monkeypatch, server.port)
+
+        answered = acme.answer_challenge(challb, response)
+        assert answered.body.status in (
+            messages.STATUS_PROCESSING,
+            messages.STATUS_VALID,
+        )
+
+        polled, _ = acme.poll(authzr)
+
+    assert polled.body.status == messages.STATUS_VALID
+    assert server.requests == [(chall.path, "nas.lan")]
+    # ...and the order the client came for is now ready to finalize (0012)
+    updated = acme.net.post(order.uri, None, new_nonce_url=acme.directory["newNonce"]).json()
+    assert updated["status"] == "ready"

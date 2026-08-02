@@ -39,6 +39,9 @@ SPEC_ACTIONS = {
     "acme_account_created",
     "acme_account_deactivated",
     "acme_order_created",
+    # spec 0011 FR-8: one event per validation attempt
+    "acme_challenge_validated",
+    "acme_challenge_failed",
 }
 
 

@@ -515,11 +515,10 @@ def test_post_as_get_all_resources(acme: Acme, cfg: Config) -> None:
 
     assert read(acme, key, kid, f"{kid}/orders").json()["orders"] == [order_url]
 
-    # an empty JSON *object* is a different thing from an empty payload: for a
-    # challenge it is spec 0011's trigger, and until then it reads the same.
-    empty_object = acme.post(path_of(challenge_url), key, {}, kid=kid)
-    assert empty_object.status_code == 200, empty_object.text
-    assert empty_object.json() == read(acme, key, kid, challenge_url).json()
+    # An empty JSON *object* is a different thing from an empty payload: on a
+    # challenge it is spec 0011's trigger, which starts a validation. That
+    # difference is tested in test_acme_challenges_api.py, where there is a
+    # server for the validator to talk to.
 
     unknown = acme.post("/acme/order/nope", key, None, kid=kid)
     assert unknown.status_code == 404
