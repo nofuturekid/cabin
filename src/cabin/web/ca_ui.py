@@ -13,12 +13,14 @@ from sqlalchemy.orm import Session
 from starlette.responses import Response
 
 from cabin import audit
+from cabin.acme import http as acme_http
 from cabin.audit import Actor, AuditAction
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
 from cabin.ca import x509 as ca_x509
 from cabin.ca.service import CACertificate, CAExistsError, CAHierarchy
 from cabin.ca.x509 import CAImportError
+from cabin.settings import ACME_ENABLED, get_flag
 from cabin.users import User
 from cabin.web import templates
 from cabin.web.deps import (
@@ -87,6 +89,10 @@ def ca_page(
     context["certs"] = [_cert_info(hierarchy.root), _cert_info(hierarchy.intermediate)]
     # Spec 0007 FR-6: say where the CRL is -- or that nothing points at it yet.
     context["crl_url"] = crl_service.distribution_url(db)
+    # Spec 0010 FR-5: and where ACME clients should point, once it is on.
+    context["acme_directory_url"] = (
+        acme_http.directory_url(db) if get_flag(db, ACME_ENABLED) else None
+    )
     return templates.TemplateResponse(request, "ca_info.html", context)
 
 

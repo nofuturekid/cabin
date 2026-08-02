@@ -55,7 +55,8 @@ MAX_LABEL_LENGTH = 255
 
 class ActorKind(StrEnum):
     """Which door an actor came through (FR-1). Mirrors the table's CHECK
-    constraint; ``acme`` is reserved for specs 0010-0012 and unused today."""
+    constraint. ``acme`` is written by the ACME server of spec 0010, which
+    has no user row and no integer id to point at -- see :func:`acme_actor`."""
 
     user = "user"
     token = "token"
@@ -84,6 +85,9 @@ class AuditAction(StrEnum):
     cert_revoked = "cert_revoked"
     token_created = "token_created"
     token_revoked = "token_revoked"
+    acme_account_created = "acme_account_created"
+    acme_account_deactivated = "acme_account_deactivated"
+    acme_order_created = "acme_order_created"
 
 
 #: Accepted ``?action=`` / ``?actor_kind=`` values; "all" means "no filter".
@@ -111,6 +115,20 @@ def user_actor(user: User) -> Actor:
 
 def token_actor(token: ApiToken) -> Actor:
     return Actor(kind=ActorKind.token, id=token.id, label=token.label)
+
+
+#: How much of an ACME account's key thumbprint identifies it in the log.
+#: 16 base64url characters are 96 bits -- far past the point where two of an
+#: operator's accounts could collide, and short enough to read.
+ACME_LABEL_PREFIX = 16
+
+
+def acme_actor(thumbprint: str) -> Actor:
+    """Spec 0010 FR-6: an ACME account has no user row and no integer id, so
+    it is named by the thing that actually identifies it -- the prefix of its
+    key thumbprint. Takes the thumbprint rather than the account row so this
+    module stays a leaf and never imports :mod:`cabin.acme`."""
+    return Actor(kind=ActorKind.acme, id=None, label=f"acme:{thumbprint[:ACME_LABEL_PREFIX]}")
 
 
 class AuditEvent(Base):
