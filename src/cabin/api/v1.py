@@ -24,7 +24,6 @@ from datetime import UTC, datetime
 from functools import cache
 from typing import Any
 
-from cryptography import x509
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -34,14 +33,13 @@ from sqlalchemy.orm import Session
 from starlette.responses import Response
 
 from cabin import __version__, audit
+from cabin.api import views
 from cabin.api.models import (
     AuditEventInfo,
     AuditEventList,
-    CACertificateInfo,
     CAInfo,
     CertificateDetail,
     CertificateList,
-    CertificateSummary,
     ErrorDetail,
     IssueRequest,
     RevocationInfo,
@@ -56,7 +54,6 @@ from cabin.audit import PER_PAGE as AUDIT_PER_PAGE
 from cabin.audit import ActorKind, AuditAction, AuditEvent
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
-from cabin.ca import service as ca_service
 from cabin.ca.certs import (
     KEY_UNAVAILABLE,
     MAX_PAGE,
@@ -64,16 +61,11 @@ from cabin.ca.certs import (
     PER_PAGE,
     Certificate,
     CertSource,
-    CertStatus,
-    certificate_status,
 )
 from cabin.ca.crl import RevocationError
 from cabin.ca.leaf import IssueError
-from cabin.ca.revocation import RevocationReason
-from cabin.ca.service import CACertificate, CANotConfiguredError
-from cabin.ca.x509 import describe_certificate
+from cabin.ca.service import CANotConfiguredError
 from cabin.secrets import SecretsError
-from cabin.settings import BASE_URL, get_setting
 from cabin.users import Role
 from cabin.web.api_deps import require_api_read, require_api_write
 from cabin.web.deps import ADMIN_ROLES, certificate_or_404, client_ip, get_db
@@ -94,8 +86,6 @@ _AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 router = APIRouter(prefix=PREFIX, tags=["cabin"], responses=_AUTH_RESPONSES)
-
-_NO_CA = "no CA has been created or imported yet"
 
 
 @contextmanager
@@ -131,35 +121,6 @@ def _domain_errors() -> Iterator[None]:
         raise HTTPException(status_code=409, detail=KEY_UNAVAILABLE) from exc
 
 
-def _hierarchy(db: Session) -> ca_service.CAHierarchy:
-    hierarchy = ca_service.get_ca(db)
-    if hierarchy is None:
-        raise CANotConfiguredError(_NO_CA)
-    return hierarchy
-
-
-def _ca_info(row: CACertificate) -> CACertificateInfo:
-    described = describe_certificate(x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8")))
-    return CACertificateInfo.model_validate({**described, "kind": row.kind})
-
-
-def _fields(row: Certificate, now: datetime) -> dict[str, Any]:
-    """Everything both certificate response models share, computed once."""
-    return {
-        "id": row.id,
-        "serial_hex": row.serial_hex,
-        "subject_cn": row.subject_cn,
-        "sans": row.sans,
-        "profile": row.profile,
-        "not_before": datetime.fromisoformat(row.not_before),
-        "not_after": row.not_after_dt,
-        "status": certificate_status(row.not_after_dt, now, row.revoked_at_dt),
-        "has_key": row.key_sealed is not None,
-        "revoked_at": row.revoked_at_dt,
-        "revocation_reason": row.revocation_reason,
-    }
-
-
 def _key_fields(request: Request, token: ApiToken, row: Certificate) -> dict[str, str | None]:
     """FR-5: the private key for an admin+ caller on a certificate whose key
     cabin actually holds -- and, when that key can no longer be unsealed, a
@@ -178,13 +139,9 @@ def _key_fields(request: Request, token: ApiToken, row: Certificate) -> dict[str
 def _detail(
     request: Request, db: Session, token: ApiToken, row: Certificate, now: datetime
 ) -> CertificateDetail:
-    hierarchy = _hierarchy(db)
     return CertificateDetail.model_validate(
         {
-            **_fields(row, now),
-            "cert_pem": row.cert_pem,
-            # Nearest issuer first, matching /certs/{id}/download/chain.pem.
-            "chain_pem": hierarchy.intermediate.cert_pem + hierarchy.root.cert_pem,
+            **views.certificate_pem(db, row, now).model_dump(),
             **_key_fields(request, token, row),
         }
     )
@@ -232,13 +189,7 @@ def get_ca(
     _token: ApiToken = Depends(require_api_read),
 ) -> CAInfo:
     with _domain_errors():
-        hierarchy = _hierarchy(db)
-    return CAInfo(
-        root=_ca_info(hierarchy.root),
-        intermediate=_ca_info(hierarchy.intermediate),
-        base_url=get_setting(db, BASE_URL),
-        crl_url=crl_service.distribution_url(db),
-    )
+        return views.ca_info(db)
 
 
 # --- inventory -----------------------------------------------------------------
@@ -263,13 +214,7 @@ def list_certificates(
     rows, total = certs_service.list_certificates(
         db, q=q, status=status, page=page, per_page=PER_PAGE, now=now
     )
-    return CertificateList(
-        items=[CertificateSummary.model_validate(_fields(row, now)) for row in rows],
-        total=total,
-        page=page,
-        per_page=PER_PAGE,
-        pages=max(1, (total + PER_PAGE - 1) // PER_PAGE),
-    )
+    return views.certificate_list(rows, total, page, now)
 
 
 # --- issuance ------------------------------------------------------------------
@@ -412,16 +357,7 @@ def revoke_certificate(
             target_id=row.id,
             detail=audit.revocation_detail(row, body.reason),
         )
-    revoked_at = row.revoked_at_dt
-    assert revoked_at is not None  # revoke_certificate either sets it or raises
-    return RevocationInfo(
-        id=row.id,
-        serial_hex=row.serial_hex,
-        status=CertStatus.revoked,
-        revoked_at=revoked_at,
-        reason=RevocationReason(row.revocation_reason or RevocationReason.unspecified),
-        crl_url=crl_service.distribution_url(db),
-    )
+    return views.revocation_info(db, row)
 
 
 # --- audit (spec 0009 FR-7) ----------------------------------------------------

@@ -80,6 +80,18 @@ block content %}
       placeholder="192.168.1.53, 10.0.0.53"
     />
 
+    <h2>MCP</h2>
+    <p class="note">
+      Let an assistant such as Claude Code look at this CA and — with an admin
+      token — issue, sign and revoke certificates through it. While this is
+      off, <code>/mcp</code> answers as if it did not exist. Set a base URL
+      above as well; that is where clients connect.
+    </p>
+    <label class="checkbox">
+      <input id="mcp_enabled" type="checkbox" name="mcp_enabled" value="on" {{ "checked" if mcp_enabled else "" }} />
+      Enable the MCP server
+    </label>
+
     <button type="submit">Save</button>
   </form>
   {% if base_url %}
@@ -92,6 +104,20 @@ block content %}
   {% else %}
   <p class="note">
     ACME is enabled, but without a base URL there is no directory address to
+    hand out.
+  </p>
+  {% endif %} {% endif %} {% if mcp_enabled %} {% if mcp_url %}
+  <h2>MCP endpoint</h2>
+  <p class="note">
+    Every call needs an API token — create one under
+    <a href="/tokens">Tokens</a>. A viewer token may only look; issuing,
+    signing and revoking need an admin token.
+  </p>
+  <pre class="pem">claude mcp add --transport http cabin {{ mcp_url }} \
+  --header "Authorization: Bearer &lt;token&gt;"</pre>
+  {% else %}
+  <p class="note">
+    MCP is enabled, but without a base URL there is no endpoint address to
     hand out.
   </p>
   {% endif %} {% endif %}

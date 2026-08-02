@@ -1,9 +1,11 @@
 """Instance settings: the public base URL cabin bakes into the CRL
 distribution point of newly issued certificates (spec 0007 FR-6), whether an
 ``X-Forwarded-For`` header may be believed (spec 0009 FR-5), whether the
-ACME server answers at all (spec 0010 FR-5), and the two knobs ACME
-validation has -- which addresses it may connect to and which resolvers it
-asks (spec 0011 FR-5, FR-9).
+ACME server answers at all (spec 0010 FR-5), the two knobs ACME validation
+has -- which addresses it may connect to and which resolvers it asks
+(spec 0011 FR-5, FR-9) -- and whether the MCP server answers, with the
+address and the client command an operator needs for it (spec 0013 FR-4,
+FR-6).
 
 Admin-only, like every page that exists to change something. Each changed
 key is one audit event with its old and new value; saving a form that
@@ -18,12 +20,14 @@ from starlette.responses import Response
 from cabin import audit
 from cabin.acme.http import directory_url
 from cabin.audit import Actor, AuditAction
+from cabin.mcp import endpoint_url as mcp_endpoint_url
 from cabin.settings import (
     ACME_ENABLED,
     ALLOW_PRIVATE_VALIDATION_TARGETS,
     BASE_URL,
     DNS_RESOLVERS,
     FALSE,
+    MCP_ENABLED,
     TRUE,
     TRUST_PROXY,
     SettingError,
@@ -54,6 +58,7 @@ def _page(
     base_url: str,
     trust_proxy: bool,
     acme_enabled: bool,
+    mcp_enabled: bool,
     allow_private: bool,
     dns_resolvers: str,
     error: str | None = None,
@@ -65,6 +70,11 @@ def _page(
             "base_url": base_url,
             "trust_proxy": trust_proxy,
             "acme_enabled": acme_enabled,
+            "mcp_enabled": mcp_enabled,
+            # Spec 0013 FR-6: the address an operator pastes into their MCP
+            # client, and None until there is a base URL to build it from --
+            # the same rule the ACME directory URL below follows.
+            "mcp_url": mcp_endpoint_url(db),
             # Spec 0011 FR-9: on unless it has been turned off, so the box
             # is ticked for an instance that has never touched it.
             "allow_private_validation_targets": allow_private,
@@ -125,6 +135,7 @@ def settings_page(
         get_setting(db, BASE_URL) or "",
         get_flag(db, TRUST_PROXY),
         get_flag(db, ACME_ENABLED),
+        get_flag(db, MCP_ENABLED),
         get_flag(db, ALLOW_PRIVATE_VALIDATION_TARGETS, default=True),
         get_setting(db, DNS_RESOLVERS) or "",
     )
@@ -136,6 +147,7 @@ def settings_submit(
     base_url: str = Form(""),
     trust_proxy: str = Form(""),
     acme_enabled: str = Form(""),
+    mcp_enabled: str = Form(""),
     allow_private_validation_targets: str = Form(""),
     dns_resolvers: str = Form(""),
     db: Session = Depends(get_db),
@@ -147,6 +159,7 @@ def settings_submit(
     # default here means -- off.
     wants_proxy = bool(trust_proxy)
     wants_acme = bool(acme_enabled)
+    wants_mcp = bool(mcp_enabled)
     wants_private = bool(allow_private_validation_targets)
     try:
         value = validate_base_url(base_url)
@@ -158,6 +171,11 @@ def settings_submit(
             # refuses to serve in that state; say so here rather than store a
             # setting that reads as on and answers 404.
             raise SettingError("set a base URL before enabling the ACME server")
+        if wants_mcp and not value:
+            # Spec 0013 FR-4: same story, and the same backstop in the gate --
+            # the endpoint's whole purpose is an address to paste somewhere
+            # else, and there is none to publish without a base URL.
+            raise SettingError("set a base URL before enabling the MCP server")
     except SettingError as exc:
         # Hand the rejected input back, not an empty form: an operator fixes
         # a typo, they don't retype the URL.
@@ -168,6 +186,7 @@ def settings_submit(
             base_url,
             wants_proxy,
             wants_acme,
+            wants_mcp,
             wants_private,
             dns_resolvers,
             str(exc),
@@ -189,6 +208,14 @@ def settings_submit(
         ACME_ENABLED,
         TRUE if get_flag(db, ACME_ENABLED) else FALSE,
         TRUE if wants_acme else FALSE,
+    )
+    save_setting(
+        request,
+        db,
+        actor,
+        MCP_ENABLED,
+        TRUE if get_flag(db, MCP_ENABLED) else FALSE,
+        TRUE if wants_mcp else FALSE,
     )
     save_setting(
         request,

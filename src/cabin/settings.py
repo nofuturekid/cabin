@@ -29,6 +29,14 @@ TRUST_PROXY = "trust_proxy"
 #: to tell the internet which protocols it declines to speak.
 ACME_ENABLED = "acme_enabled"
 
+#: Whether cabin's MCP server answers at all (spec 0013 FR-4). Default
+#: false, and off means 404 for the same reason ACME's does: an assistant
+#: that can issue certificates is not something to leave switched on by
+#: accident, and an internal CA does not advertise what it declines to
+#: speak. Needs :data:`BASE_URL`, because the endpoint address is something
+#: an operator pastes into a client.
+MCP_ENABLED = "mcp_enabled"
+
 #: Whether an ACME client must present operator-issued credentials before it
 #: may register (spec 0012 FR-4, RFC 8555 7.3.4). Default false: cabin is an
 #: internal CA, and the common case is a network where every host that can

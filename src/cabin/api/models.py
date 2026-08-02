@@ -88,12 +88,23 @@ class CertificateSummary(BaseModel):
     revocation_reason: RevocationReason | None = None
 
 
-class CertificateDetail(CertificateSummary):
-    """One certificate with its PEM material."""
+class CertificatePem(CertificateSummary):
+    """One certificate with the public material needed to deploy it.
+
+    Split out from :class:`CertificateDetail` so that "this response cannot
+    contain a private key" is a property of the type rather than of the code
+    that fills it in -- which is what spec 0013 FR-3 needs for the MCP
+    server's lookup tool, where no role is allowed a stored key.
+    """
 
     cert_pem: str
     #: The issuer chain, nearest issuer first -- intermediate then root.
     chain_pem: str
+
+
+class CertificateDetail(CertificatePem):
+    """One certificate, private key included where the caller may have it."""
+
     #: Present only in the response to POST /certificates and, for an
     #: admin+ caller, on a certificate whose key cabin still holds.
     key_pem: str | None = None
