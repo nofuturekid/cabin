@@ -13,10 +13,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import Response
 
 from cabin import sessions, users
+from cabin.ca.certs import Certificate, get_certificate
 from cabin.sessions import SESSION_LIFETIME, UserSession
 from cabin.users import Role, User
 
 SESSION_COOKIE = "cabin_session"
+
+#: The roles that may change things (viewers may only look). Shared here so
+#: route guards and per-page visibility checks can't drift apart on what
+#: "admin" means -- use ADMIN_ROLES for the latter, never a re-inlined tuple.
+ADMIN_ROLES = (Role.admin, Role.superadmin)
 
 
 def set_session_cookie(response: Response, request: Request, token: str) -> None:
@@ -33,13 +39,37 @@ def set_session_cookie(response: Response, request: Request, token: str) -> None
 
 
 def base_context(request: Request, user: User) -> dict[str, object]:
-    """Context every authenticated page needs: current user and the
-    session's csrf_token (layout.html's logout form needs this on *every*
-    page -- see ui.py's BUG 1 regression test), for use across UI routers.
-    ``version`` is a Jinja global, not per-route context.
+    """Context every authenticated page needs: current user, the session's
+    csrf_token (layout.html's logout form needs this on *every* page -- see
+    ui.py's BUG 1 regression test), and the nav flags below, for use across
+    UI routers. ``version`` is a Jinja global, not per-route context.
+
+    Spec 0008 FR-6: ``nav`` says which entries this role can actually use,
+    so the menu stops offering pages that only answer 403. It is cosmetic --
+    every route still guards itself with its own dependency -- but a nav
+    full of dead ends is a bug report waiting to happen.
     """
     session_row: UserSession = request.state.session
-    return {"user": user, "csrf_token": session_row.csrf_token}
+    role = Role(user.role)
+    return {
+        "user": user,
+        "csrf_token": session_row.csrf_token,
+        "nav": {
+            "issue": role in ADMIN_ROLES,
+            "settings": role in ADMIN_ROLES,
+            "tokens": role == Role.superadmin,
+        },
+    }
+
+
+def certificate_or_404(db: Session, cert_id: int) -> Certificate:
+    """One stored certificate, or a 404 with one wording. Shared by the UI
+    pages, the downloads and the API so a missing certificate cannot answer
+    three different ways depending on which door was used."""
+    row = get_certificate(db, cert_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such certificate")
+    return row
 
 
 class AuthRedirect(Exception):
@@ -102,11 +132,6 @@ def require_role(*roles: Role) -> Callable[[User], User]:
 
     return _dep
 
-
-#: The roles that may change things (viewers may only look). Shared here so
-#: route guards and per-page visibility checks can't drift apart on what
-#: "admin" means -- use ADMIN_ROLES for the latter, never a re-inlined tuple.
-ADMIN_ROLES = (Role.admin, Role.superadmin)
 
 #: The guard for every mutating (and mutation-only) page.
 require_admin = require_role(*ADMIN_ROLES)

@@ -1,0 +1,87 @@
+{% extends "layout.html" %} {% block title %}API tokens — cabin{% endblock %} {%
+block content %}
+<div class="card card-wide">
+  <h1>API tokens</h1>
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% endif %} {% if secret %}
+  <div class="card">
+    <h2>New token</h2>
+    <p class="note">
+      Copy it now: this is the only time the secret is shown. cabin stores just
+      a hash of it and cannot show it again — if it is lost, revoke the token
+      and create a new one.
+    </p>
+    <pre class="pem">{{ secret }}</pre>
+    <p class="note">
+      Use it as <code>Authorization: Bearer &lt;token&gt;</code> against
+      <code>/api/v1</code>. The API is documented at
+      <a href="/api/v1/docs">/api/v1/docs</a>.
+    </p>
+  </div>
+  {% endif %}
+
+  <table>
+    <thead>
+      <tr>
+        <th>Label</th>
+        <th>Role</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Last used</th>
+        <th>Expires</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for token in tokens %}
+      <tr>
+        <td>{{ token.label }}</td>
+        <td>{{ token.role }}</td>
+        <td>
+          <span class="badge badge-{{ token.status }}">{{ token.status }}</span>
+        </td>
+        <td>{{ token.created_at }}</td>
+        <td>{{ token.last_used_at }}</td>
+        <td>{{ token.expires_at }}</td>
+        <td class="row-actions">
+          {% if token.can_revoke %}
+          <form method="post" action="/tokens/{{ token.id }}/revoke">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit" class="danger">Revoke</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Create a token</h2>
+  <p class="note">
+    The token carries a role of its own — give a script the least it needs.
+    Viewer tokens can only read; admin tokens can issue, sign and revoke.
+  </p>
+  <form method="post" action="/tokens">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label for="label">Label</label>
+    <input
+      id="label"
+      type="text"
+      name="label"
+      maxlength="100"
+      placeholder="ansible on nas.lan"
+      required
+    />
+    <label for="role">Role</label>
+    <select id="role" name="role">
+      {% for r in roles %}
+      <option value="{{ r.value }}">{{ r.value }}</option>
+      {% endfor %}
+    </select>
+    <label for="expires_at">Expires (optional)</label>
+    <input id="expires_at" type="date" name="expires_at" />
+    <button type="submit">Create token</button>
+  </form>
+</div>
+{% endblock %}

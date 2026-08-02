@@ -9,7 +9,7 @@ admins. The download routes live in :mod:`cabin.web.certs_download_ui`.
 from datetime import UTC, datetime
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.responses import Response
@@ -36,12 +36,12 @@ from cabin.ca.leaf import (
 from cabin.ca.revocation import RevocationReason
 from cabin.ca.service import CANotConfiguredError
 from cabin.ca.x509 import KEY_TYPES
-from cabin.secrets import SecretsError
 from cabin.users import Role, User
 from cabin.web import templates
 from cabin.web.deps import (
     ADMIN_ROLES,
     base_context,
+    certificate_or_404,
     get_current_user,
     get_db,
     require_admin,
@@ -56,12 +56,6 @@ _NO_CA = "no CA yet: create or import one under CA before issuing certificates"
 _CONFIRM_REVOKE = "tick the confirmation box: revoking a certificate cannot be undone"
 #: The reason ends up in the CRL, so an unknown one is refused, not guessed.
 _UNKNOWN_REASON = "unknown revocation reason: {!r}"
-#: Shared with :mod:`cabin.web.certs_download_ui`: one wording for "this key
-#: cannot be unsealed", whether it is a page or a download that hits it.
-KEY_UNAVAILABLE = (
-    "the stored private key could not be decrypted: it was sealed with a different "
-    "master key, or the stored value is damaged"
-)
 #: How much of the serial identifies a certificate in the list and in
 #: download filenames (FR-1/FR-4).
 SERIAL_CHARS = 8
@@ -227,17 +221,13 @@ def _detail_page(
 ) -> Response:
     context = base_context(request, user)
     context["cert"] = row
-    # FR-6: viewers see the certificate, never the private key.
+    # FR-6: viewers see the certificate, never the private key. A key we can
+    # no longer unseal must not take the whole page down either -- the
+    # certificate itself is still perfectly usable.
     is_admin = Role(user.role) in ADMIN_ROLES
-    key_pem: str | None = None
-    key_error: str | None = None
-    if is_admin:
-        try:
-            key_pem = certs_service.key_pem(request.app.state.secrets, row)
-        except SecretsError:
-            # A key we can no longer unseal must not take the whole page
-            # down: the certificate itself is still perfectly usable.
-            key_error = KEY_UNAVAILABLE
+    key_pem, key_error = (
+        certs_service.key_material(request.app.state.secrets, row) if is_admin else (None, None)
+    )
     context["key_pem"] = key_pem
     context["key_error"] = key_error
     # Spec 0006 AC-6: no key/PKCS#12 controls in a viewer's HTML at all, and
@@ -262,13 +252,6 @@ def _detail_page(
     return response
 
 
-def _row(db: Session, cert_id: int) -> Certificate:
-    row = certs_service.get_certificate(db, cert_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="no such certificate")
-    return row
-
-
 @router.get("/{cert_id}")
 def cert_detail(
     cert_id: int,
@@ -276,7 +259,7 @@ def cert_detail(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
-    return _detail_page(request, user, _row(db, cert_id))
+    return _detail_page(request, user, certificate_or_404(db, cert_id))
 
 
 @router.post("/{cert_id}/revoke")
@@ -291,7 +274,7 @@ def cert_revoke(
 ) -> Response:
     """Spec 0007 FR-7: revocation cannot be undone, so it takes an explicit
     confirmation on top of CSRF and the admin role."""
-    row = _row(db, cert_id)
+    row = certificate_or_404(db, cert_id)
     if not confirm:
         return _detail_page(request, user, row, _CONFIRM_REVOKE, status_code=400)
     try:

@@ -20,10 +20,15 @@ from starlette.responses import Response
 from cabin.ca import certs as certs_service
 from cabin.ca import service as ca_service
 from cabin.ca.certs import Certificate
-from cabin.secrets import SecretsError
 from cabin.users import User
-from cabin.web.certs_ui import KEY_UNAVAILABLE, SERIAL_CHARS
-from cabin.web.deps import get_current_user, get_db, require_admin, verify_csrf
+from cabin.web.certs_ui import SERIAL_CHARS
+from cabin.web.deps import (
+    certificate_or_404,
+    get_current_user,
+    get_db,
+    require_admin,
+    verify_csrf,
+)
 
 router = APIRouter(prefix="/certs")
 
@@ -61,13 +66,6 @@ def _attachment(body: bytes, media_type: str, filename: str) -> Response:
     )
 
 
-def _row(db: Session, cert_id: int) -> Certificate:
-    row = certs_service.get_certificate(db, cert_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="no such certificate")
-    return row
-
-
 def _chain(db: Session) -> list[x509.Certificate]:
     """Issuer chain for a leaf, nearest issuer first."""
     hierarchy = ca_service.get_ca(db)
@@ -85,10 +83,9 @@ def _key_pem(request: Request, row: Certificate) -> str:
     decrypted -- a broken master key is a state conflict, and explicitly not
     a 500.
     """
-    try:
-        pem = certs_service.key_pem(request.app.state.secrets, row)
-    except SecretsError as exc:
-        raise HTTPException(status_code=409, detail=KEY_UNAVAILABLE) from exc
+    pem, error = certs_service.key_material(request.app.state.secrets, row)
+    if error is not None:
+        raise HTTPException(status_code=409, detail=error)
     if pem is None:
         raise HTTPException(status_code=404, detail=_NO_KEY)
     return pem
@@ -100,7 +97,7 @@ def download_cert_pem(
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> Response:
-    row = _row(db, cert_id)
+    row = certificate_or_404(db, cert_id)
     return _attachment(
         row.cert_pem.encode("ascii"), "application/x-pem-file", _filename(row, ".pem")
     )
@@ -112,7 +109,7 @@ def download_chain_pem(
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> Response:
-    row = _row(db, cert_id)
+    row = certificate_or_404(db, cert_id)
     body = row.cert_pem + "".join(
         cert.public_bytes(serialization.Encoding.PEM).decode("ascii") for cert in _chain(db)
     )
@@ -126,7 +123,7 @@ def download_key_pem(
     db: Session = Depends(get_db),
     _user: User = Depends(require_admin),
 ) -> Response:
-    row = _row(db, cert_id)
+    row = certificate_or_404(db, cert_id)
     return _attachment(
         _key_pem(request, row).encode("ascii"),
         "application/x-pem-file",
@@ -149,7 +146,7 @@ def download_bundle_p12(
     one is the same clean 400 as a too-short one, rather than FastAPI's 422
     (AC-5).
     """
-    row = _row(db, cert_id)
+    row = certificate_or_404(db, cert_id)
     if len(password) < MIN_P12_PASSWORD:
         raise HTTPException(
             status_code=400,

@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 
 from cabin import __version__
+from cabin.api.v1 import router as api_v1_router
 from cabin.config import Config
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
@@ -19,6 +20,7 @@ from cabin.web.certs_ui import router as certs_router
 from cabin.web.crl_ui import router as crl_router
 from cabin.web.deps import SESSION_COOKIE, AuthRedirect, set_session_cookie
 from cabin.web.settings_ui import router as settings_router
+from cabin.web.tokens_ui import router as tokens_router
 from cabin.web.ui import router as ui_router
 
 
@@ -71,9 +73,13 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(certs_router)
     app.include_router(certs_download_router)
     app.include_router(settings_router)
+    app.include_router(tokens_router)
     # Mounted at the root and, unlike every other router, without an auth
     # dependency: a CRL is public by design (spec 0007 FR-5).
     app.include_router(crl_router)
+    # Bearer tokens only, no cookies, no CSRF -- the API and the UI are two
+    # separate front doors (spec 0008 FR-3).
+    app.include_router(api_v1_router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     return app

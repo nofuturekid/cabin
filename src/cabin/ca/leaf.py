@@ -38,7 +38,9 @@ DEFAULT_DAYS = 365
 #: standards limit, so one request can't mint a multi-megabyte certificate.
 MAX_SANS = 100
 
-_MAX_CN_LENGTH = 64
+#: Public because the API's request models mirror the same limit (spec 0008
+#: FR-5) and must not be allowed to drift from the one enforced here.
+MAX_CN_LENGTH = 64
 _MAX_HOSTNAME_LENGTH = 253
 
 #: Pragmatic hostname check: dot-separated labels of letters/digits/hyphens
@@ -211,8 +213,8 @@ def _validate_cn(subject_cn: str) -> str:
     cn = subject_cn.strip()
     if not cn:
         raise IssueError("subject CN must not be empty")
-    if len(cn) > _MAX_CN_LENGTH:
-        raise IssueError(f"subject CN must be at most {_MAX_CN_LENGTH} characters")
+    if len(cn) > MAX_CN_LENGTH:
+        raise IssueError(f"subject CN must be at most {MAX_CN_LENGTH} characters")
     if any(ord(char) < 32 or ord(char) == 127 for char in cn):
         raise IssueError("subject CN must not contain control characters")
     return cn
