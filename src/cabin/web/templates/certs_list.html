@@ -26,6 +26,7 @@
       <tr>
         <th>Common name</th>
         <th>Profile</th>
+        <th>Source</th>
         <th>SANs</th>
         <th>Serial</th>
         <th>Key</th>
@@ -35,8 +36,17 @@
     <tbody>
       {% for cert in certs %}
       <tr>
-        <td><a href="/certs/{{ cert.id }}">{{ cert.subject_cn }}</a></td>
+        <td>
+          <a href="/certs/{{ cert.id }}"
+            >{{ cert.subject_cn or "(no subject)" }}</a
+          >
+        </td>
         <td>{{ cert.profile }}</td>
+        <td>
+          <span class="badge badge-source-{{ cert.source }}"
+            >{{ cert.source }}</span
+          >
+        </td>
         <td>
           {{ cert.sans | join(", ") }}{% if cert.sans_more %} +{{ cert.sans_more
           }} more{% endif %}
@@ -52,7 +62,9 @@
     </tbody>
   </table>
 
-  <p class="note">{{ total }} certificate(s) — page {{ page }} of {{ pages }}</p>
+  <p class="note">
+    {{ total }} certificate(s) — page {{ page }} of {{ pages }}
+  </p>
   {% else %}
   <p class="note">
     No certificates match.{% if can_issue %}

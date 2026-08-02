@@ -63,6 +63,7 @@ from cabin.ca.certs import (
     MAX_QUERY_LENGTH,
     PER_PAGE,
     Certificate,
+    CertSource,
     CertStatus,
     certificate_status,
 )
@@ -305,6 +306,7 @@ def issue_certificate(
             days=body.days,
             key_type=body.key_type,
             crl_url=crl_service.distribution_url(db),
+            source=CertSource.api,
         )
         detail = _detail(request, db, token, row, datetime.now(UTC))
     _record_certificate_event(
@@ -343,6 +345,7 @@ def sign_csr(
             days=body.days,
             sans_override=body.sans or None,
             crl_url=crl_service.distribution_url(db),
+            source=CertSource.api,
         )
         detail = _detail(request, db, token, row, datetime.now(UTC))
     # The CSR body stays out of the log, here as in the UI (FR-3).

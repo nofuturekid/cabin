@@ -42,6 +42,12 @@ SPEC_ACTIONS = {
     # spec 0011 FR-8: one event per validation attempt
     "acme_challenge_validated",
     "acme_challenge_failed",
+    # spec 0012 FR-6: what ACME did with a certificate, and the operator's
+    # external account keys
+    "acme_certificate_issued",
+    "acme_certificate_revoked",
+    "acme_eab_key_created",
+    "acme_eab_key_revoked",
 }
 
 

@@ -13,6 +13,7 @@ library will not build.
 
 import base64
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -209,6 +210,29 @@ class Acme:
         for name in drop:
             header.pop(name, None)
         return self.post_body(path, flattened(key, header, payload))
+
+
+def external_account_binding(
+    *,
+    kid: str,
+    mac_key: bytes,
+    url: str,
+    jwk: dict[str, Any],
+    alg: str = "HS256",
+) -> dict[str, str]:
+    """The inner JWS of RFC 8555 7.3.4, built straight from the RFC.
+
+    HMAC rather than a signature, the account's public JWK as the payload,
+    and no nonce -- it is a binding, not a request.
+    """
+    protected_b64 = b64json({"alg": alg, "kid": kid, "url": url})
+    payload_b64 = b64json(jwk)
+    signing_input = f"{protected_b64}.{payload_b64}".encode("ascii")
+    return {
+        "protected": protected_b64,
+        "payload": payload_b64,
+        "signature": b64(hmac.new(mac_key, signing_input, hashlib.sha256).digest()),
+    }
 
 
 def account_url(resp: Response) -> str:

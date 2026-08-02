@@ -29,6 +29,13 @@ TRUST_PROXY = "trust_proxy"
 #: to tell the internet which protocols it declines to speak.
 ACME_ENABLED = "acme_enabled"
 
+#: Whether an ACME client must present operator-issued credentials before it
+#: may register (spec 0012 FR-4, RFC 8555 7.3.4). Default false: cabin is an
+#: internal CA, and the common case is a network where every host that can
+#: reach it is meant to be able to ask for a certificate. Turning it on is
+#: how an operator narrows that to hosts they have handed a key to.
+ACME_REQUIRE_EAB = "acme_require_eab"
+
 #: Whether ACME validation may connect to private addresses (spec 0011
 #: FR-9). Default **true**: an internal CA validates RFC 1918 hosts by
 #: definition, so refusing them would leave cabin unable to do its job. It

@@ -90,6 +90,13 @@ class AuditAction(StrEnum):
     acme_order_created = "acme_order_created"
     acme_challenge_validated = "acme_challenge_validated"
     acme_challenge_failed = "acme_challenge_failed"
+    # Spec 0012. Deliberately separate from cert_issued/cert_revoked: those
+    # name a person or a script, these name an ACME account, and an operator
+    # asking "what did ACME do here" must be able to filter on that alone.
+    acme_certificate_issued = "acme_certificate_issued"
+    acme_certificate_revoked = "acme_certificate_revoked"
+    acme_eab_key_created = "acme_eab_key_created"
+    acme_eab_key_revoked = "acme_eab_key_revoked"
 
 
 #: Accepted ``?action=`` / ``?actor_kind=`` values; "all" means "no filter".

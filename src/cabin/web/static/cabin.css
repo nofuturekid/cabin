@@ -210,10 +210,18 @@ td {
 }
 
 .badge-expired,
-.badge-revoked {
+.badge-revoked,
+.badge-eab-revoked {
   background: var(--color-danger-bg);
   border-color: var(--color-danger);
   color: var(--color-danger);
+}
+
+/* Where a certificate came from, and whether an EAB key is still spendable:
+   both are neutral facts, so neither gets an alarm colour. */
+.badge-source-acme,
+.badge-eab-bound {
+  background: var(--color-surface-alt, transparent);
 }
 
 .row-actions {

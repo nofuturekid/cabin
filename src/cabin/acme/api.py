@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin.acme import api_account, api_order
+from cabin.acme import api_account, api_finalize, api_order
 from cabin.acme.errors import AcmeError, ErrorType
 from cabin.acme.http import (
     ACME_PREFIX,
@@ -33,7 +33,7 @@ from cabin.acme.http import (
     require_jose_content_type,
     url,
 )
-from cabin.settings import BASE_URL, get_setting
+from cabin.settings import ACME_REQUIRE_EAB, BASE_URL, get_flag, get_setting
 from cabin.web.deps import get_db
 
 router = APIRouter(
@@ -52,9 +52,10 @@ router = APIRouter(
 def directory(request: Request, db: Session = Depends(get_db)) -> Response:
     website = get_setting(db, BASE_URL)
     meta: dict[str, object] = {
-        # Spec 0012 owns external account binding; saying "false" now is not
-        # a placeholder, it is the truth about this server today.
-        "externalAccountRequired": False
+        # RFC 8555 9.7.6 / spec 0012 FR-4: a client reads this before it
+        # builds a registration, so that "you need credentials" is something
+        # it learns from the directory rather than from a 403.
+        "externalAccountRequired": get_flag(db, ACME_REQUIRE_EAB)
     }
     if website:
         meta["website"] = website
@@ -85,6 +86,7 @@ def new_nonce(request: Request) -> Response:
 
 router.include_router(api_account.router)
 router.include_router(api_order.router)
+router.include_router(api_finalize.router)
 
 
 #: Resources that are read with POST-as-GET. Each gets an explicit GET route
@@ -101,6 +103,7 @@ _POST_ONLY_PATHS = (
     "/order/{order_id}/finalize",
     "/authz/{authz_id}",
     "/chal/{challenge_id}",
+    "/cert/{cert_id}",
 )
 
 

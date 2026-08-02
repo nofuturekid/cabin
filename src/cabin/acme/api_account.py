@@ -10,11 +10,12 @@ operation that may change which key that handle answers to.
 import json
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
 from cabin import audit
-from cabin.acme import jws, service
+from cabin.acme import eab, jws, service
 from cabin.acme.errors import AcmeError, ErrorType
 from cabin.acme.http import (
     ACCOUNT_PREFIX,
@@ -32,6 +33,7 @@ from cabin.acme.http import (
 from cabin.acme.jws import KeyMode
 from cabin.acme.models import AccountStatus, AcmeAccount
 from cabin.audit import AuditAction, acme_actor
+from cabin.settings import ACME_REQUIRE_EAB, get_flag
 from cabin.web.deps import client_ip, get_db
 
 router = APIRouter()
@@ -42,6 +44,80 @@ def _reject_unusable(account: AcmeAccount) -> None:
     finding it by key is "nothing further" too."""
     if account.status != AccountStatus.valid:
         raise AcmeError(ErrorType.unauthorized, f"this account is {account.status}")
+
+
+def _external_account(
+    db: Session,
+    request: Request,
+    verification: jws.VerifiedRequest,
+    payload: dict[str, object],
+) -> eab.AcmeEabKey | None:
+    """Spec 0012 FR-4: the external account binding, verified but not yet
+    spent.
+
+    Runs only for a registration that will actually create an account: an
+    existing account has already returned above, which is what keeps a
+    client that re-registers (certbot does, routinely) from being asked for
+    a credential it used months ago and no longer has.
+
+    A binding that is *presented* is always verified, whether or not the
+    setting requires one. Accepting an unverified binding would be worse
+    than accepting none: it would tell the operator, in the UI, that a key
+    was used by an account that never proved it held it.
+    """
+    binding = payload.get("externalAccountBinding")
+    if binding is None:
+        if get_flag(db, ACME_REQUIRE_EAB):
+            raise AcmeError(
+                ErrorType.external_account_required,
+                "this server requires an external account binding: ask its operator for a key "
+                "identifier and HMAC key",
+            )
+        return None
+    return eab.verify(
+        db,
+        request.app.state.secrets,
+        binding,
+        new_account_url=url(db, NEW_ACCOUNT_PATH),
+        account_jwk=verification.key.jwk,
+    )
+
+
+def _spend_binding(
+    db: Session, binding: eab.AcmeEabKey, account: AcmeAccount, created: bool
+) -> None:
+    """One key, one account (FR-4).
+
+    ``created`` is False when two registrations with the same account key
+    raced and this one read back the winner's row; the key is then already
+    bound to that same account, and re-binding would fail for a reason that
+    is not the client's.
+
+    When the claim genuinely loses -- two *different* account keys, one EAB
+    key -- the account this request just created is removed again. Leaving
+    it would hand out an account the client was told it could not have, and
+    it has nothing attached to it yet.
+
+    The mirror image -- one account key, two *different* EAB keys -- loses
+    against the unique index on ``bound_account_id`` instead of against the
+    conditional UPDATE, because both registrations end up at the same
+    account and only one key may be bound to it. That is the same refusal
+    and has to read like one: an ``IntegrityError`` escaping here would be a
+    500 telling the client nothing about a rule it broke. The account is
+    left alone in that case -- it is already carrying somebody's binding.
+    """
+    if binding.bound_account_id == account.id:
+        return
+    try:
+        bound = eab.bind(db, binding, account)
+    except IntegrityError as exc:
+        db.rollback()
+        raise eab.refused() from exc
+    if not bound:
+        if created:
+            db.delete(account)
+            db.commit()
+        raise eab.refused()
 
 
 @router.post("/new-account")
@@ -65,6 +141,7 @@ def new_account(
     if payload.get("onlyReturnExisting"):
         raise AcmeError(ErrorType.account_does_not_exist, "no account is registered for this key")
 
+    binding = _external_account(db, request, verification, payload)
     contacts = service.parse_contacts(payload["contact"]) if "contact" in payload else None
     account, created = service.get_or_create_account(
         db,
@@ -72,6 +149,8 @@ def new_account(
         contacts=contacts,
         tos_agreed=bool(payload.get("termsOfServiceAgreed")),
     )
+    if binding is not None:
+        _spend_binding(db, binding, account, created)
     if created:
         audit.record(
             db,

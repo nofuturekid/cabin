@@ -570,6 +570,76 @@ def record_challenge_failure(
     db.refresh(challenge)
 
 
+# --- spec 0012 FR-1: what finalization does to an order --------------------------------
+
+
+def claim_for_issuance(db: Session, order: AcmeOrder) -> bool:
+    """Move an order to ``processing``, if this call is the one that gets to.
+
+    The guard against issuing twice for one order, and the reason it is a
+    single conditional UPDATE rather than a check followed by a write: two
+    finalize requests that arrive together both read a ready order, and if
+    both were allowed to proceed the account would be charged two
+    certificates for one authorization -- with only one of them reachable
+    afterwards, since the order can name exactly one.
+
+    The WHERE clause tests ``certificate_id IS NULL`` as well as the status,
+    so that this is also what makes a *repeated* finalize idempotent rather
+    than merely unlikely to collide. ``status`` is matched against the two
+    values the column can actually hold at this point: an order that is
+    ``ready`` in the protocol sense still stores ``pending``, because
+    readiness is computed from its authorizations (:func:`order_status`)
+    rather than written.
+    """
+    claimed = cast(
+        "CursorResult[Any]",
+        db.execute(
+            update(AcmeOrder)
+            .where(
+                AcmeOrder.id == order.id,
+                AcmeOrder.certificate_id.is_(None),
+                AcmeOrder.status.in_([OrderStatus.pending, OrderStatus.ready]),
+            )
+            .values(status=OrderStatus.processing, error_json=None)
+        ),
+    )
+    db.commit()
+    db.refresh(order)
+    return bool(claimed.rowcount == 1)
+
+
+def release_claim(db: Session, order: AcmeOrder) -> None:
+    """Undo :func:`claim_for_issuance` after an issuance that did not happen.
+
+    Back to ``pending`` rather than to ``ready``: ``ready`` is not a stored
+    state (see :func:`order_status`), and pending is what lets the order's
+    still-valid authorizations put it back there on the next read. The
+    alternative -- leaving it ``processing`` -- would strand the client on
+    an order it can neither finalize nor retry.
+    """
+    order.status = OrderStatus.pending
+    db.commit()
+
+
+def attach_certificate(db: Session, order: AcmeOrder, certificate_id: int) -> None:
+    """FR-1: the order is valid, and here is what came out of it."""
+    order.certificate_id = certificate_id
+    order.status = OrderStatus.valid
+    db.commit()
+
+
+def order_for_certificate(db: Session, certificate_id: int) -> AcmeOrder | None:
+    """Which order produced a certificate, or None for one cabin issued
+    through another door (the UI, the API).
+
+    This is the whole of "does this account own that certificate": the
+    certificate table knows nothing about ACME, and the link runs one way --
+    from the order to the certificate -- so that nothing outside ACME has to
+    care that ACME exists.
+    """
+    return db.scalar(select(AcmeOrder).where(AcmeOrder.certificate_id == certificate_id))
+
+
 def orders_of(db: Session, account: AcmeAccount) -> list[AcmeOrder]:
     return list(
         db.scalars(

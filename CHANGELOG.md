@@ -159,3 +159,57 @@ All notable changes to cabin are documented here. The format is based on
   dependency for the outbound HTTP of http-01, alongside `dnspython`. The
   certbot client drives trigger, validation and polling to a valid
   authorization end to end in the interop test.
+- Spec 0012 (acme-finalize-eab): the end of an ACME order, which completes
+  the ACME server. `POST /acme/order/{id}/finalize` takes the client's CSR
+  (base64url DER), checks its signature and requires its subjectAltName set
+  to be *exactly* the order's identifiers — DNS names compared
+  case-insensitively, IPs compared as addresses, a wildcard identifier
+  matching the wildcard SAN — and a common name, if present, to be one of
+  them; each mismatch is its own `badCSR` detail (`cabin.acme.csr`). The key
+  a CSR asks cabin to certify is held to the same floor as an account key —
+  RSA of at least `jws.MIN_RSA_BITS`, P-256, P-384 or Ed25519 — so a client
+  cannot be issued for a key it could not have registered with. A CSR with
+  no subject at all is accepted, as RFC 8555 7.4 allows and the certbot
+  library produces: its common name is then the first ordered identifier
+  short enough to be one, and an order whose names are all longer than 64
+  characters is issued with an empty subject and a critical subjectAltName
+  (RFC 5280 4.2.1.6) rather than refused. Issuance goes through the
+  spec-0005 path with the `server` profile, the configured CRL distribution
+  point and the SANs taken from the order rather than from the CSR. The move
+  out of `ready` is a conditional UPDATE, so two finalize requests that
+  arrive together mint one certificate, not two — the loser is answered with
+  the `processing` order and a `Retry-After`; finalizing an already-issued
+  order returns the same order and the same certificate URL, and an issuance
+  that fails puts the order back where it was.
+  `POST /acme/cert/{id}` (POST-as-GET, ownership checked against the order)
+  serves leaf + intermediate + root as `application/pem-certificate-chain`;
+  an id that is not a row id — out of range, non-ASCII digits, a leading
+  zero — is the same 404 problem document as an unknown one.
+  `POST /acme/revoke-cert` implements both authorizations of RFC 8555 7.6 —
+  the account that placed the order, or a JWS signed with the certificate's
+  own key pair, matched on its DER SubjectPublicKeyInfo — accepts only the
+  RFC 5280 reason codes spec 0007 can put on a CRL (`removeFromCRL`,
+  `certificateHold` and the CA-compromise codes are `badRevocationReason`),
+  answers `alreadyRevoked` on the second attempt, refuses a certificate
+  cabin did not issue after comparing the submitted bytes rather than
+  trusting its serial, and republishes the CRL. External account binding
+  (RFC 8555 7.3.4) arrives with the new `acme_require_eab` setting, which
+  the directory's `meta.externalAccountRequired` reflects: the inner JWS is
+  verified on a separate, explicit HS256 path that shares no algorithm table
+  with the account-key allowlist, with the MAC compared in constant time,
+  and the operator's HMAC keys are stored sealed (`acme_eab_keys`, migration
+  0009) and shown exactly once, base64url, on creation. A key binds one
+  account, enforced by a conditional UPDATE plus a unique index; revoked and
+  already-bound keys — and a second key for an account that already has one,
+  which loses against the index — are refused with one wording, so a client
+  learns nothing about which keys exist. New admin page `/acme/admin` (nav
+  entry "ACME") with the two ACME switches, the directory URL, the EAB key
+  table and copy-ready certbot/acme.sh snippets; /settings keeps the enable
+  switch next to the base URL it depends on and cross-links to it. New
+  `certificates.source` column (migration 0009, `ui`/`api`/`acme`, existing
+  rows backfilled to `ui`) threaded through every issuance path and shown as
+  a badge in the inventory. New audit actions `acme_certificate_issued`,
+  `acme_certificate_revoked`, `acme_eab_key_created` and
+  `acme_eab_key_revoked`. The certbot client drives the full flow — account,
+  order, http-01, finalize, chain download — and the same flow again with
+  EAB required, in the interop tests.

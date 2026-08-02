@@ -17,6 +17,7 @@ from cabin.config import Config
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
 from cabin.web import STATIC_DIR
+from cabin.web.acme_ui import router as acme_ui_router
 from cabin.web.audit_ui import router as audit_router
 from cabin.web.ca_ui import router as ca_router
 from cabin.web.certs_download_ui import router as certs_download_router
@@ -84,6 +85,11 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(certs_router)
     app.include_router(certs_download_router)
     app.include_router(settings_router)
+    # Before the ACME protocol router below, and mounted at /acme/admin: that
+    # router owns every other path under /acme (including a catch-all that
+    # answers 404 for anything it does not know), which is what keeps ACME
+    # invisible while it is switched off -- see cabin.web.acme_ui.
+    app.include_router(acme_ui_router)
     app.include_router(tokens_router)
     app.include_router(audit_router)
     # Mounted at the root and, unlike every other router, without an auth

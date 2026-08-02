@@ -32,9 +32,18 @@ No GPL code.
     for DNS, IP-aware); a CN, if present, must also be in that set; anything
     else → `badCSR` with a specific detail. Wildcard identifiers match the
     wildcard SAN.
+  - the CSR's public key is held to the account-key floor (`jws.MIN_RSA_BITS`
+    for RSA, P-256/P-384 for EC, Ed25519) → `badCSR` otherwise: what a client
+    may not sign with, it may not be issued for either
   - issue via the spec-0005 path (`sign_csr_and_store`) with the `server`
     profile and the configured CRL URL; store `certificate_id` on the order;
     order → `valid`
+  - a CSR with no subject takes its CN from the first *identifier that fits*
+    `leaf.MAX_CN_LENGTH`; if none does (a DNS identifier may be 253
+    characters), the certificate is issued with an empty subject and a
+    critical SAN (RFC 5280 §4.2.1.6) rather than refused
+  - the losing side of two concurrent finalizes is answered 200 with the
+    `processing` order and a `Retry-After` (RFC 8555 §7.4 SHOULD)
   - respond 200 with the order object including `certificate` URL
   - the whole issuance is idempotent per order: finalizing an already-`valid`
     order returns the same order/certificate, never a second certificate
@@ -51,6 +60,13 @@ No GPL code.
   - already-revoked → `alreadyRevoked`
   - delegates to `cabin.ca.crl.revoke_certificate`, so the CRL updates
   - certificates cabin did not issue → `unauthorized`
+  - **deviation, decided:** RFC 8555 §7.6 also permits an account that merely
+    holds valid authorizations for *all* the certificate's identifiers to
+    revoke it. cabin does not implement that door. On an internal network,
+    control of a name is often as cheap as a DHCP lease, so it would let any
+    client that can re-prove a name revoke another account's certificate for
+    it. Issuance authorizes; revocation stays with the issuing account, the
+    certificate's own key, or an operator in the UI.
 - FR-4: EAB (RFC 8555 §7.3.4):
   - migration 0009: `acme_eab_keys` (id PK = the key identifier, hmac_sealed
     NOT NULL (sealed via SecretStore), label, created_at, bound_account_id
@@ -63,8 +79,17 @@ No GPL code.
     account's JWK; verify with the unsealed HMAC key in constant time;
     mismatch → `unauthorized`/`malformed` per RFC
   - one-time binding: a key already bound to an account cannot bind another
-    (`unauthorized`); revoked keys rejected
+    (`unauthorized`); revoked keys rejected. The reverse — a second key for an
+    account that already has one — loses against the unique index and is the
+    same `unauthorized`, never a 500.
   - directory `meta.externalAccountRequired` reflects the setting
+  - **known, decided:** turning `acme_require_eab` on does not retroactively
+    gate accounts registered before the switch. RFC 8555 §7.3.1 has
+    new-account return an existing account for a known key before any binding
+    is looked at, and certbot re-registers routinely, so an account that
+    predates the setting keeps working without ever presenting a credential.
+    Revoking such an account is an operator action (deactivation), not a
+    consequence of the flag.
 - FR-5: UI `/acme` (admin): enable/disable ACME, require-EAB toggle, the
   directory URL with a copy hint, an EAB key table (label, key id, bound
   account, created) with "New key" (shows the HMAC secret ONCE, base64url) and
@@ -116,7 +141,14 @@ test_eab_required_rejects_plain_registration, test_eab_valid_binds_key,
 test_eab_key_single_use, test_eab_revoked_key_rejected,
 test_eab_tampered_signature_rejected, test_acme_ui_key_lifecycle,
 test_inventory_shows_acme_source, test_audit_acme_issue_revoke,
-test_client_full_flow_with_eab
+test_client_full_flow_with_eab,
+test_finalize_issues_for_a_name_no_common_name_can_hold,
+test_finalize_takes_the_first_identifier_that_fits_the_common_name,
+test_finalize_refuses_a_weak_csr_key,
+test_finalize_accepts_every_key_type_cabin_issues,
+test_a_finalize_that_loses_the_race_is_told_when_to_come_back,
+test_certificate_ids_that_cannot_be_rows_are_not_found,
+test_a_second_key_for_one_account_is_refused_rather_than_crashing
 
 ## Out of Scope
 
