@@ -1,0 +1,57 @@
+# cabin — all-in-one internal CA.
+#
+#   mkdir -p data && sudo chown 65532:65532 data
+#   docker compose up -d
+#
+# Then open http://localhost:8080/ and complete the first-run wizard.
+#
+# The image runs as uid/gid 65532 (nonroot), so the bind-mounted ./data has to
+# belong to that uid — docker would otherwise create it as root and cabin
+# could not write its database. Alternatively pin the container to the owner
+# of ./data with `user: "1000:1000"`.
+services:
+  cabin:
+    image: ghcr.io/nofuturekid/cabin:latest
+    container_name: cabin
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    # cabin binds a port above 1024 as a nonroot user and touches nothing but
+    # /data, so it needs no capabilities at all. Dropping them also defuses
+    # the eight setuid-root binaries (su, mount, passwd, …) that come with
+    # the Debian base image and that cabin never calls.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      # Holds cabin.db and secret.key. BACK THIS UP — without secret.key
+      # every private key in the database is unrecoverable.
+      - ./data:/data
+    # All optional. Everything else cabin knows is configured in the UI.
+    # environment:
+    #   # Send session cookies only over HTTPS. Turn this on once cabin sits
+    #   # behind a TLS-terminating reverse proxy.
+    #   COOKIE_SECURE: "true"
+    #   # Wraps the master key in secret.key with a passphrase-derived KEK.
+    #   # Set it before the first start; adding or changing it later needs a
+    #   # fresh secret.key, and that loses every sealed private key.
+    #   CABIN_MASTER_PASSPHRASE: "change-me"
+    #   # Database URL. Defaults to sqlite:///$DATA_DIR/cabin.db.
+    #   CABIN_DB_URL: "postgresql+psycopg://cabin:cabin@db:5432/cabin"
+
+# Optional PostgreSQL instead of the bundled SQLite file: uncomment this
+# service, uncomment CABIN_DB_URL above and add `depends_on: [db]` to cabin.
+# Note that the image does not bundle a PostgreSQL driver yet — SQLite is the
+# default and the only backend cabin is tested against.
+#
+#  db:
+#    image: postgres:17-alpine
+#    container_name: cabin-db
+#    restart: unless-stopped
+#    environment:
+#      POSTGRES_DB: cabin
+#      POSTGRES_USER: cabin
+#      POSTGRES_PASSWORD: change-me
+#    volumes:
+#      - ./pgdata:/var/lib/postgresql/data

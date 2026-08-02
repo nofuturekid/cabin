@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 
 import pytest
 
-from cabin.config import Config, ConfigError
+from cabin.config import Config, ConfigError, ensure_data_dir_writable
 
 
 def test_config_defaults() -> None:
@@ -70,3 +71,25 @@ def test_config_cookie_secure_defaults_false() -> None:
 def test_config_cookie_secure_env_parsing(value: str, expected: bool) -> None:
     cfg = Config.load(argv=[], env={"COOKIE_SECURE": value})
     assert cfg.cookie_secure is expected
+
+
+def test_ensure_data_dir_writable_creates_a_missing_directory(tmp_path: Path) -> None:
+    data_dir = tmp_path / "nested" / "data"
+    ensure_data_dir_writable(data_dir)
+    assert data_dir.is_dir()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes regardless of the mode bits")
+def test_ensure_data_dir_writable_says_what_to_fix(tmp_path: Path) -> None:
+    """The message has to carry the whole fix: an operator who mounted the
+    wrong-owner volume sees this line and nothing else."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o500)
+
+    with pytest.raises(ConfigError) as excinfo:
+        ensure_data_dir_writable(data_dir)
+
+    message = str(excinfo.value)
+    assert str(data_dir) in message
+    assert f"uid {os.geteuid()}:{os.getegid()}" in message
+    assert f"chown -R {os.geteuid()}:{os.getegid()}" in message

@@ -1,5 +1,6 @@
 import sqlite3
 import stat
+import tomllib
 from importlib.metadata import version
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from cabin.app import create_app
 from cabin.config import Config
 from cabin.secrets import SecretStore
+from cabin.web import templates
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -40,10 +42,23 @@ def test_startup_idempotent(tmp_path: Path) -> None:
 
 
 def test_healthz_ok(tmp_path: Path) -> None:
+    """Spec 0014 FR-6: one version, and it comes from package metadata.
+
+    The container build stamps the release version into the wheel it installs
+    (`ARG VERSION` -> `uv version`), so `importlib.metadata` is the single
+    source of truth -- there is no environment override that could let
+    /healthz and the UI footer drift apart, and a plain source checkout
+    reports what pyproject.toml declares.
+    """
+    declared = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    expected = declared["project"]["version"]
+
     with TestClient(create_app(make_config(tmp_path))) as client:
         resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "version": version("cabin")}
+    assert resp.json()["version"] == expected
+    assert templates.env.globals["version"] == expected
 
 
 def test_app_state_has_secret_store(tmp_path: Path) -> None:

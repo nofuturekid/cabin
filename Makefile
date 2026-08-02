@@ -1,4 +1,4 @@
-.PHONY: check test lint format run
+.PHONY: check test lint format run docker-smoke
 
 check: ## everything CI runs: format check, lint, types, tests
 	uv run ruff format --check .
@@ -17,3 +17,6 @@ format:
 
 run:
 	uv run cabin
+
+docker-smoke: ## build the container image and check it serves /healthz
+	./scripts/docker-smoke.sh

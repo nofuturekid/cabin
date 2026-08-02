@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>cabin</Name>
+  <Repository>ghcr.io/nofuturekid/cabin:latest</Repository>
+  <Registry>https://github.com/nofuturekid/cabin/pkgs/container/cabin</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nofuturekid/cabin/issues</Support>
+  <Project>https://github.com/nofuturekid/cabin</Project>
+  <Overview>
+    cabin is an all-in-one internal certificate authority in a single container:
+    a web UI, a REST API (/api/v1 with OpenAPI docs), an ACME v2 server
+    (http-01, dns-01, tls-alpn-01, External Account Binding), an MCP server for
+    AI assistants, direct certificate issuance, CSR signing, PKCS#12 export, a
+    CRL and an audit log.&#13;
+    &#13;
+    Everything is configured in the web UI — on first start it asks for an
+    admin account and then walks you through creating (or importing) the CA.&#13;
+    &#13;
+    Private keys are encrypted at rest with a master key kept in
+    /data/secret.key. BACK UP THE APPDATA FOLDER: without secret.key the
+    database is useless.
+  </Overview>
+  <Category>Network:Management Security:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/nofuturekid/cabin/main/deploy/unraid/cabin.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/nofuturekid/cabin/main/deploy/unraid/cabin.png</Icon>
+  <!--
+    The image itself runs as its own nonroot user (uid 65532), which cannot
+    write to an Unraid appdata share. 99:100 is nobody:users, the owner of
+    /mnt/user/appdata, so the container is pinned to it here.
+
+    cabin binds a port above 1024 and touches nothing but /data, so it needs
+    no capabilities at all. Dropping them also defuses the eight setuid-root
+    binaries (su, mount, passwd, …) that come with the Debian base image and
+    that cabin never calls.
+  -->
+  <ExtraParams>--user 99:100 --security-opt no-new-privileges:true --cap-drop ALL</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config
+    Name="WebUI"
+    Target="8080"
+    Default="8080"
+    Mode="tcp"
+    Description="Port for the web UI, the REST API, ACME and MCP."
+    Type="Port"
+    Display="always"
+    Required="true"
+    Mask="false">8080</Config>
+  <Config
+    Name="Data"
+    Target="/data"
+    Default="/mnt/user/appdata/cabin"
+    Mode="rw"
+    Description="Holds cabin.db and secret.key. BACK THIS UP — secret.key encrypts every private key in the database, and without it they are unrecoverable."
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false">/mnt/user/appdata/cabin</Config>
+  <Config
+    Name="COOKIE_SECURE"
+    Target="COOKIE_SECURE"
+    Default=""
+    Mode=""
+    Description="Set to true to send session cookies only over HTTPS. Turn this on once cabin sits behind a TLS-terminating reverse proxy."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"/>
+  <Config
+    Name="CABIN_MASTER_PASSPHRASE"
+    Target="CABIN_MASTER_PASSPHRASE"
+    Default=""
+    Mode=""
+    Description="Optional passphrase that wraps the master key in secret.key. Set it before the first start — adding or changing it later needs a fresh secret.key and loses every sealed private key."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="true"/>
+</Container>
