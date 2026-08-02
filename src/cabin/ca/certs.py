@@ -39,6 +39,20 @@ MAX_QUERY_LENGTH = 200
 MAX_PAGE = 1_000_000
 
 
+class CertSource(StrEnum):
+    """Which front door a certificate came out of (spec 0012 FR-7).
+
+    Worth a column of its own rather than an inference from the audit log:
+    the log can be filtered, exported and (one day) rotated, while "who
+    issued this" is a property of the certificate that an operator reads off
+    the inventory row.
+    """
+
+    ui = "ui"
+    api = "api"
+    acme = "acme"
+
+
 class Certificate(Base):
     """One issued leaf. ``key_sealed`` is NULL whenever the private key
     never existed here -- i.e. for every CSR-signed certificate."""
@@ -63,6 +77,15 @@ class Certificate(Base):
     #: :func:`cabin.ca.crl.revoke_certificate` (spec 0007 FR-4).
     revoked_at: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
     revocation_reason: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    #: Spec 0012 FR-7: one of :class:`CertSource`. Defaulted at the column so
+    #: that a caller which does not care (every pre-0012 one) still writes a
+    #: truthful value.
+    source: Mapped[str] = mapped_column(
+        sa.String(16),
+        nullable=False,
+        default=CertSource.ui,
+        server_default=CertSource.ui,
+    )
 
     @property
     def sans(self) -> list[str]:
@@ -88,10 +111,17 @@ def _store(
     profile: Profile,
     sans: Sequence[str],
     key_sealed: str | None,
+    source: CertSource,
 ) -> Certificate:
+    common_names = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
     row = Certificate(
+        source=str(source),
         serial_hex=format(cert.serial_number, "x"),
-        subject_cn=cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value,
+        # Empty for a certificate issued with no subject at all (see
+        # ``leaf.sign_csr``'s ``allow_empty_subject``): the SAN list is then
+        # the whole of what it names, and claiming a CN it does not carry
+        # would make the inventory disagree with the certificate.
+        subject_cn=common_names[0].value if common_names else "",
         sans_json=json.dumps(list(sans)),
         profile=str(profile),
         not_before=cert.not_valid_before_utc.isoformat(),
@@ -132,13 +162,16 @@ def issue_and_store(
     days: int = DEFAULT_DAYS,
     key_type: str = "ecdsa-p256",
     crl_url: str | None = None,
+    source: CertSource = CertSource.ui,
 ) -> Certificate:
     """Issue a leaf with a server-generated key and store it, sealing the
     key before it touches the DB (FR-5).
 
     ``crl_url`` (spec 0007 FR-6) is passed in rather than read from the
     settings table here, so this module keeps knowing nothing about where
-    cabin itself is published.
+    cabin itself is published. ``source`` (spec 0012 FR-7) is which front
+    door asked; it defaults to the UI so that no caller can accidentally
+    record nothing.
 
     Raises CANotConfiguredError if no CA exists, IssueError for invalid
     input.
@@ -154,7 +187,7 @@ def issue_and_store(
         key_type=key_type,
         crl_url=crl_url,
     )
-    return _store(db, cert, profile, _cert_sans(cert), _sealed_key(secrets, key))
+    return _store(db, cert, profile, _cert_sans(cert), _sealed_key(secrets, key), source)
 
 
 def sign_csr_and_store(
@@ -166,9 +199,16 @@ def sign_csr_and_store(
     days: int = DEFAULT_DAYS,
     sans_override: Sequence[str] | None = None,
     crl_url: str | None = None,
+    subject_cn_fallback: str | None = None,
+    allow_empty_subject: bool = False,
+    source: CertSource = CertSource.ui,
 ) -> Certificate:
     """Sign a pasted CSR and store the result. There is no key to seal --
-    cabin never sees the requester's private key (FR-5)."""
+    cabin never sees the requester's private key (FR-5).
+
+    ``subject_cn_fallback`` names the subject for a CSR that carries none,
+    and ``allow_empty_subject`` issues without one when there is no name
+    short enough to be a CN; see :func:`cabin.ca.leaf.sign_csr`."""
     issuer_cert, issuer_key = signing_credentials(db, secrets)
     cert = leaf.sign_csr(
         issuer_cert,
@@ -178,12 +218,25 @@ def sign_csr_and_store(
         days=days,
         sans_override=sans_override,
         crl_url=crl_url,
+        subject_cn_fallback=subject_cn_fallback,
+        allow_empty_subject=allow_empty_subject,
     )
-    return _store(db, cert, profile, _cert_sans(cert), None)
+    return _store(db, cert, profile, _cert_sans(cert), None, source)
 
 
 def get_certificate(db: Session, cert_id: int) -> Certificate | None:
     return db.get(Certificate, cert_id)
+
+
+def certificate_by_serial(db: Session, serial_hex: str) -> Certificate | None:
+    """One certificate by its stored serial (spec 0012 FR-3).
+
+    ACME revocation identifies a certificate by handing over the whole
+    thing, and the serial is the only indexed way back to the row. It is not
+    proof of anything on its own -- the caller compares the bytes -- which is
+    why this returns a candidate rather than a decision.
+    """
+    return db.scalar(select(Certificate).where(Certificate.serial_hex == serial_hex))
 
 
 def key_pem(secrets: SecretStore, row: Certificate) -> str | None:

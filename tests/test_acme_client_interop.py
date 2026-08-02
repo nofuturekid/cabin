@@ -7,6 +7,7 @@ answers an http-01 challenge and polls the authorization to valid.
 """
 
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,21 +15,23 @@ import josepy as jose
 import pytest
 import requests
 from acme import client as acme_client
-from acme import messages
+from acme import crypto_util, messages
 from challenge_servers import http_server, point_at, serves
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from cryptography.x509.verification import PolicyBuilder, Store
 from fastapi.testclient import TestClient
 from requests.adapters import BaseAdapter
 from requests.structures import CaseInsensitiveDict
 
+from cabin.acme import eab
 from cabin.app import create_app
 from cabin.ca import service as ca_service
 from cabin.config import Config
 from cabin.secrets import SecretStore
-from cabin.settings import ACME_ENABLED, BASE_URL, TRUE, set_setting
+from cabin.settings import ACME_ENABLED, ACME_REQUIRE_EAB, BASE_URL, TRUE, set_setting
 from cabin.store import create_session_factory
 
 DIRECTORY_URL = "http://testserver/acme/directory"
@@ -226,3 +229,126 @@ def test_client_completes_http01(client: TestClient, monkeypatch: pytest.MonkeyP
     # ...and the order the client came for is now ready to finalize (0012)
     updated = acme.net.post(order.uri, None, new_nonce_url=acme.directory["newNonce"]).json()
     assert updated["status"] == "ready"
+
+
+def _answer_http01(
+    acme: acme_client.ClientV2,
+    order: messages.OrderResource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serve every http-01 challenge of ``order`` until its authorizations
+    are valid -- the client's own key authorization, at the client's own
+    path."""
+    for authzr in order.authorizations:
+        challb = next(
+            challenge for challenge in authzr.body.challenges if challenge.typ == "http-01"
+        )
+        response, validation = challb.chall.response_and_validation(acme.net.key)
+        with http_server(serves(validation.encode(), path=challb.chall.path)) as server:
+            point_at(monkeypatch, server.port)
+            acme.answer_challenge(challb, response)
+            polled, _ = acme.poll(authzr)
+        assert polled.body.status == messages.STATUS_VALID
+
+
+def _root_certificate(cfg: Config) -> x509.Certificate:
+    db = create_session_factory(cfg.db_url)()
+    try:
+        hierarchy = ca_service.get_ca(db)
+        assert hierarchy is not None
+        return x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii"))
+    finally:
+        db.close()
+
+
+def test_client_full_flow_to_certificate(
+    client: TestClient, cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 0012 AC-1: account, order, http-01, finalize, download -- every
+    step driven by the certbot ACME library, and the chain it gets back has
+    to verify to the root cabin publishes.
+
+    The CSR is the client's own (``acme.crypto_util.make_csr``), which
+    carries no subject at all: the names live in the SAN extension, exactly
+    as RFC 8555 7.4 allows.
+    """
+    acme = _connect(client)
+    acme.new_account(messages.NewRegistration.from_data(terms_of_service_agreed=True))
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    csr_pem = crypto_util.make_csr(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ),
+        ["nas.lan", "www.nas.lan"],
+    )
+
+    order = acme.new_order(csr_pem)
+    _answer_http01(acme, order, monkeypatch)
+    finalized = acme.finalize_order(order, datetime.now() + timedelta(seconds=30))
+
+    assert finalized.body.status == messages.STATUS_VALID
+    chain = x509.load_pem_x509_certificates(finalized.fullchain_pem.encode("ascii"))
+    assert len(chain) == 3
+    leaf, intermediate, root = chain
+    # the leaf carries exactly the names that were ordered, and the client's
+    # own public key
+    sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert set(sans.get_values_for_type(x509.DNSName)) == {"nas.lan", "www.nas.lan"}
+    assert leaf.public_key().public_numbers() == key.public_key().public_numbers()
+    # ...and the chain really verifies to cabin's root -- checked by
+    # pyca/cryptography's path validator rather than by comparing subjects,
+    # so signatures, validity and basic constraints all have to hold
+    assert root == _root_certificate(cfg)
+    verifier = PolicyBuilder().store(Store([root])).build_server_verifier(x509.DNSName("nas.lan"))
+    verifier.verify(leaf, [intermediate])
+
+
+def test_client_full_flow_with_eab(
+    client: TestClient, cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 0012 AC-8: with external account binding required, the real
+    client registers when it is given the key id and HMAC key -- and cannot
+    get an account without them."""
+    db = create_session_factory(cfg.db_url)()
+    try:
+        set_setting(db, ACME_REQUIRE_EAB, TRUE)
+        row, secret = eab.create_key(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), label="certbot"
+        )
+        key_id = row.id
+    finally:
+        db.close()
+
+    acme = _connect(client)
+    assert acme.directory.meta.external_account_required is True
+
+    with pytest.raises(messages.Error) as refused:
+        acme.new_account(messages.NewRegistration.from_data(terms_of_service_agreed=True))
+    assert refused.value.typ == "urn:ietf:params:acme:error:externalAccountRequired"
+
+    binding = messages.ExternalAccountBinding.from_data(
+        acme.net.key.public_key(), key_id, secret, acme.directory
+    )
+    registration = acme.new_account(
+        messages.NewRegistration.from_data(
+            terms_of_service_agreed=True, external_account_binding=binding
+        )
+    )
+
+    assert registration.body.status == "valid"
+    db = create_session_factory(cfg.db_url)()
+    try:
+        bound = eab.get_key(db, key_id)
+        assert bound is not None
+        assert bound.bound_account_id == registration.uri.rsplit("/", 1)[1]
+    finally:
+        db.close()
+
+    # ...and the bound account goes all the way to a certificate
+    order = acme.new_order(_csr("nas.lan"))
+    _answer_http01(acme, order, monkeypatch)
+    finalized = acme.finalize_order(order, datetime.now() + timedelta(seconds=30))
+    assert finalized.body.status == messages.STATUS_VALID
+    assert len(x509.load_pem_x509_certificates(finalized.fullchain_pem.encode("ascii"))) == 3

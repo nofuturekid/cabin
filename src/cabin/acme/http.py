@@ -55,6 +55,14 @@ ACCOUNT_PREFIX = f"{ACME_PREFIX}/account/"
 ORDER_PREFIX = f"{ACME_PREFIX}/order/"
 AUTHZ_PREFIX = f"{ACME_PREFIX}/authz/"
 CHALLENGE_PREFIX = f"{ACME_PREFIX}/chal/"
+#: Spec 0012 FR-2. The id here is the ``certificates`` row id, which is a
+#: small integer and therefore guessable -- which is fine, and deliberately
+#: so: the route authenticates the JWS and checks that the account owns the
+#: order that produced the certificate, exactly as every order URL does.
+CERT_PREFIX = f"{ACME_PREFIX}/cert/"
+
+#: RFC 8555 7.4.2: what a certificate is served as.
+PEM_CHAIN_CONTENT_TYPE = "application/pem-certificate-chain"
 
 
 def directory_url(db: Session) -> str | None:
@@ -323,6 +331,10 @@ def order_json(db: Session, order: AcmeOrder) -> dict[str, object]:
         body["notBefore"] = order.not_before
     if order.not_after:
         body["notAfter"] = order.not_after
+    if order.certificate_id is not None:
+        # RFC 8555 7.1.3: present exactly when there is a certificate to
+        # fetch, which is what a client polls a finalized order for.
+        body["certificate"] = url(db, f"{CERT_PREFIX}{order.certificate_id}")
     if order.error_json:
         body["error"] = json.loads(order.error_json)
     return body

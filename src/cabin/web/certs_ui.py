@@ -90,6 +90,11 @@ def _cert_row(row: Certificate, now: datetime) -> dict[str, object]:
         "id": row.id,
         "subject_cn": row.subject_cn,
         "profile": row.profile,
+        # Spec 0012 FR-7: which front door this came out of. Displayed only
+        # -- it is not a filter facet, because the status filter already
+        # partitions the inventory and a second dimension would have to
+        # combine with it, which the query is not shaped for.
+        "source": row.source,
         "has_key": row.key_sealed is not None,
         "not_after": row.not_after_dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         "status": certificate_status(row.not_after_dt, now, row.revoked_at_dt).value,

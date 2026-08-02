@@ -25,6 +25,7 @@ nonce cannot spend it on someone else's behalf.
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from enum import StrEnum
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from josepy import errors as jose_errors
 from josepy import jwa as jose_jwa
@@ -50,6 +52,15 @@ from cabin.acme.models import AccountStatus, AcmeAccount, kid_hash
 #: account key is not), and RS1/PS*/ES512, which nothing in this ecosystem
 #: needs.
 ALLOWED_ALGORITHMS: tuple[str, ...] = ("RS256", "ES256", "ES384", "EdDSA")
+
+#: The one MAC algorithm cabin accepts, and only for the external account
+#: binding of RFC 8555 7.3.4 (spec 0012 FR-4). It is deliberately NOT in
+#: :data:`ALLOWED_ALGORITHMS`: the outer JWS is signed with an account key,
+#: which is a key pair, and an HMAC there would mean cabin verifying a
+#: request against a secret it also knows -- the classic confusion attack.
+#: Two constants, two code paths, and :func:`verify_external_binding` is the
+#: only caller of this one.
+EAB_ALGORITHM = "HS256"
 
 #: RSA below this is not a key, it is a formality.
 MIN_RSA_BITS = 2048
@@ -117,6 +128,21 @@ class AccountKey:
                 return False
             return True
         return bool(_JWA[self.alg].verify(self.key.key, signing_input, signature))
+
+    def public_der(self) -> bytes:
+        """This key as a DER SubjectPublicKeyInfo -- the encoding a
+        certificate carries its public key in.
+
+        Spec 0012 FR-3 needs to answer "is the key that signed this request
+        the key in that certificate?", and comparing the two SPKIs is the
+        only form of that question which does not depend on how either side
+        happened to be serialized.
+        """
+        raw = self.key if isinstance(self.key, ed25519.Ed25519PublicKey) else self.key.key
+        encoded: bytes = raw.public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        return encoded
 
 
 @dataclass(frozen=True)
@@ -409,6 +435,124 @@ def verify_request(
         key=key,
         account=account,
     )
+
+
+def key_mode(body: bytes) -> KeyMode:
+    """Which of the two forms a request arrived in, read from the header
+    alone and before anything is verified.
+
+    Exactly one route needs this: RFC 8555 7.6 lets a revocation be signed
+    either by the account that ordered the certificate or by the
+    certificate's own key, and the route has to know which claim is being
+    made before it can check it. Everywhere else the mode is a property of
+    the route, not of the request, and stays that way -- this function does
+    not decide anything, it only reports what the client said, and
+    :func:`verify_request` is still what enforces it.
+    """
+    protected = _parse(body).protected
+    has_jwk, has_kid = "jwk" in protected, "kid" in protected
+    if has_jwk == has_kid:
+        raise AcmeError(
+            ErrorType.malformed,
+            "the JWS must carry exactly one of the jwk and kid headers",
+        )
+    return KeyMode.kid if has_kid else KeyMode.jwk
+
+
+@dataclass(frozen=True)
+class ExternalBinding:
+    """A parsed ``externalAccountBinding``, before its MAC has been checked.
+
+    Split from the check itself because the two happen at different times:
+    the ``kid`` is what tells cabin *which* key to unseal, and it can only
+    look that up once it has read the header.
+    """
+
+    kid: str
+    signing_input: bytes
+    signature: bytes
+    payload_b64: str
+
+
+def parse_external_binding(document: object, *, url: str) -> ExternalBinding:
+    """Read the inner JWS of an external account binding (RFC 8555 7.3.4)
+    and check everything about it that does not need the secret.
+
+    This is the one place in cabin where a JWS is verified with a shared
+    secret, and it is written out here rather than folded into
+    :func:`verify_request` on purpose. The two are different security
+    arguments: an account key proves "I am this account", the MAC proves "an
+    operator gave me this credential", and the binding exists precisely
+    because those are not the same claim. Sharing the algorithm table would
+    mean one of them could be presented where the other was expected.
+
+    Checked here: ``alg`` is exactly :data:`EAB_ALGORITHM` -- not "one of
+    the HMAC family", since HS384/HS512 with a key sized for HS256 buys
+    nothing -- there is a ``kid`` and no inline ``jwk``, and the ``url`` is
+    the new-account URL cabin published, so that a binding made for another
+    CA (or another endpoint) cannot be replayed here.
+    """
+    jws = _parse_document(document)
+    alg = jws.protected.get("alg")
+    if alg != EAB_ALGORITHM:
+        raise AcmeError(
+            ErrorType.bad_signature_algorithm,
+            f"an external account binding must be signed with {EAB_ALGORITHM}, not {_echo(alg)}",
+            extra={"algorithms": [EAB_ALGORITHM]},
+        )
+    kid = jws.protected.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise AcmeError(
+            ErrorType.malformed,
+            "the external account binding names no key identifier in its kid header",
+        )
+    if "jwk" in jws.protected:
+        raise AcmeError(
+            ErrorType.malformed,
+            "the external account binding must name its key by kid, not carry one inline",
+        )
+    if jws.protected.get("url") != url:
+        raise AcmeError(
+            ErrorType.malformed,
+            "the external account binding was not made for this server's new-account URL",
+        )
+    return ExternalBinding(
+        kid=kid,
+        signing_input=jws.signing_input,
+        signature=jws.signature,
+        payload_b64=jws.payload_b64,
+    )
+
+
+def verify_external_binding(
+    binding: ExternalBinding, *, mac_key: bytes, account_jwk: dict[str, Any]
+) -> None:
+    """The half of RFC 8555 7.3.4 that needs the operator's secret: the MAC,
+    and that the binding really carries the key being registered.
+
+    Raises ``unauthorized`` for either failure -- a client that presents a
+    binding it cannot prove is not entitled to register, and telling it
+    which of the two checks failed would help nobody but an attacker.
+    """
+    expected = hmac.new(mac_key, binding.signing_input, hashlib.sha256).digest()
+    # Constant time: a MAC comparison that returns early leaks, byte by
+    # byte, what the right answer would have been.
+    if not hmac.compare_digest(expected, binding.signature):
+        raise AcmeError(ErrorType.unauthorized, "the external account binding does not verify")
+
+    payload = _payload(binding.payload_b64)
+    if payload is None:
+        raise AcmeError(ErrorType.malformed, "the external account binding carries no key")
+    # Compared member by member against the canonical account JWK rather than
+    # as whole documents: a client may add "kid"/"alg"/"use" to the key it
+    # signs, and refusing those would fail registrations that are perfectly
+    # correct. Every member that identifies the key must still be present
+    # and equal, so this cannot pass for a different key.
+    if any(payload.get(name) != value for name, value in account_jwk.items()):
+        raise AcmeError(
+            ErrorType.unauthorized,
+            "the external account binding is not for the key this request is signed with",
+        )
 
 
 def verify_embedded(document: object, *, url: str) -> tuple[AccountKey, dict[str, Any]]:

@@ -38,6 +38,16 @@ class ErrorType(StrEnum):
     dns = "dns"
     tls = "tls"
     incorrect_response = "incorrectResponse"
+    # Spec 0012: finalization, revocation and external account binding.
+    # ``order_not_ready`` and ``bad_csr`` are the two a client meets while
+    # finalizing, and they mean different things: "not yet" against "not
+    # like that". Collapsing either into ``malformed`` would leave a client
+    # retrying a request that can never succeed.
+    order_not_ready = "orderNotReady"
+    bad_csr = "badCSR"
+    already_revoked = "alreadyRevoked"
+    bad_revocation_reason = "badRevocationReason"
+    external_account_required = "externalAccountRequired"
 
 
 #: The status each type is answered with unless a caller overrides it.
@@ -65,6 +75,16 @@ _STATUS: dict[ErrorType, int] = {
     ErrorType.dns: 400,
     ErrorType.tls: 400,
     ErrorType.incorrect_response: 400,
+    # RFC 8555 7.4 names the status for this one explicitly: a finalize
+    # against an order that is not ready is a 403, and the certbot client
+    # keys off exactly that pair to decide to keep polling.
+    ErrorType.order_not_ready: 403,
+    ErrorType.bad_csr: 400,
+    ErrorType.already_revoked: 400,
+    ErrorType.bad_revocation_reason: 400,
+    # RFC 8555 7.3.4: the registration was refused, not malformed -- 403,
+    # like every other "you may not do this".
+    ErrorType.external_account_required: 403,
 }
 
 #: RFC 7807's media type; a client that cannot parse the body still learns

@@ -1,7 +1,7 @@
 {% extends "layout.html" %} {% block title %}{{ cert.subject_cn }} — cabin{%
 endblock %} {% block content %}
 <div class="card card-wide">
-  <h1>{{ cert.subject_cn }}</h1>
+  <h1>{{ cert.subject_cn or "(no subject)" }}</h1>
   <table>
     <tr>
       <th>Serial</th>

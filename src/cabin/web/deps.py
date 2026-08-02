@@ -63,6 +63,7 @@ def base_context(request: Request, user: User) -> dict[str, object]:
         "nav": {
             "issue": role in ADMIN_ROLES,
             "settings": role in ADMIN_ROLES,
+            "acme": role in ADMIN_ROLES,
             "tokens": role == Role.superadmin,
         },
     }

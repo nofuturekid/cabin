@@ -189,7 +189,9 @@ def _san_from_cn(subject_cn: str) -> str | None:
     return None
 
 
-def _resolve_sans(explicit: Sequence[str], csr_sans: Sequence[str], subject_cn: str) -> list[str]:
+def _resolve_sans(
+    explicit: Sequence[str], csr_sans: Sequence[str], subject_cn: str | None
+) -> list[str]:
     """FR-3's ladder: explicit SANs win, then the CSR's, then the CN.
 
     The winning rung is de-duplicated here, so "nas.lan" and "dns:nas.lan"
@@ -199,7 +201,7 @@ def _resolve_sans(explicit: Sequence[str], csr_sans: Sequence[str], subject_cn: 
     """
     chosen = list(explicit) or list(csr_sans)
     if not chosen:
-        fallback = _san_from_cn(subject_cn)
+        fallback = None if subject_cn is None else _san_from_cn(subject_cn)
         if fallback is None:
             raise IssueError("no usable SAN: give at least one SAN, or use a hostname or IP as CN")
         chosen = [fallback]
@@ -260,7 +262,7 @@ def _build_leaf(
     issuer_cert: x509.Certificate,
     issuer_key: CertificateIssuerPrivateKeyTypes,
     public_key: CertificatePublicKeyTypes,
-    subject_cn: str,
+    subject_cn: str | None,
     sans: Sequence[str],
     profile: Profile,
     days: int,
@@ -272,16 +274,23 @@ def _build_leaf(
 
     ``crl_url`` adds a CRL distribution point (spec 0007 FR-6); without one
     the extension is left out entirely rather than pointing somewhere that
-    does not answer."""
+    does not answer.
+
+    ``subject_cn=None`` builds an empty subject, for a name too long to be a
+    common name (see :func:`sign_csr`). RFC 5280 4.2.1.6 then requires the
+    subjectAltName to be critical -- with no subject it is the only name the
+    certificate has, so a relying party that skipped it would be trusting a
+    certificate that says nothing about who it is for."""
     now = datetime.now(UTC)
     # FR-4: a leaf must never outlive the CA that signed it.
     not_after = min(now + timedelta(days=days), issuer_cert.not_valid_after_utc)
     if not_after <= now:
         raise IssueError("the signing CA certificate has expired")
 
+    subject = [] if subject_cn is None else [x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)]
     builder = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)]))
+        .subject_name(x509.Name(subject))
         .issuer_name(issuer_cert.subject)
         .public_key(public_key)
         .serial_number(x509.random_serial_number())
@@ -294,7 +303,7 @@ def _build_leaf(
         .add_extension(authority_key_identifier(issuer_cert, issuer_key), critical=False)
         .add_extension(
             x509.SubjectAlternativeName([_general_name(san) for san in sans]),
-            critical=False,
+            critical=subject_cn is None,
         )
     )
     if crl_url:
@@ -337,6 +346,8 @@ def sign_csr(
     days: int = DEFAULT_DAYS,
     sans_override: Sequence[str] | None = None,
     crl_url: str | None = None,
+    subject_cn_fallback: str | None = None,
+    allow_empty_subject: bool = False,
 ) -> x509.Certificate:
     """Sign a pasted CSR (FR-2).
 
@@ -344,6 +355,20 @@ def sign_csr(
     CN, and -- unless ``sans_override`` is given -- its SAN entries. Every
     other extension it carries is ignored, so a CSR cannot talk cabin into
     issuing a CA certificate.
+
+    ``subject_cn_fallback`` names the subject when the CSR has none. A
+    subject-less CSR is not a broken one: RFC 8555 7.4 lets an ACME client
+    put its names in the SAN extension alone, and the certbot library does
+    exactly that. Only a caller that already knows which names it authorized
+    may supply it -- for the pasted-CSR forms of spec 0005 there is nothing
+    to fall back to, so they keep refusing (and this stays None).
+
+    ``allow_empty_subject`` is the same caller saying "and if you have no
+    fallback either, issue it anyway". It only makes sense together with
+    ``sans_override``: the names then live entirely in the SAN, which is
+    what a relying party checks -- and it is the only way to certify a name
+    longer than a common name's 64 characters, which ACME can order and a
+    subject cannot hold.
     """
     _validate_days(days)
     try:
@@ -354,12 +379,15 @@ def sign_csr(
         raise IssueError("the CSR's signature is not valid")
 
     common_names = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
-    if not common_names:
-        raise IssueError("the CSR has no subject common name")
-    raw_cn = common_names[0].value
-    if not isinstance(raw_cn, str):
+    raw_cn: object = common_names[0].value if common_names else subject_cn_fallback
+    cn: str | None = None
+    if raw_cn is None:
+        if not allow_empty_subject:
+            raise IssueError("the CSR has no subject common name")
+    elif not isinstance(raw_cn, str):
         raise IssueError("the CSR's subject common name is not a text value")
-    cn = _validate_cn(raw_cn)
+    else:
+        cn = _validate_cn(raw_cn)
 
     explicit = [_normalize_san(san) for san in sans_override] if sans_override else []
     resolved = _resolve_sans(explicit, _csr_sans(csr), cn)

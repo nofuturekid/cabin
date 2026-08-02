@@ -48,6 +48,10 @@ block content %}
       <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
       Enable the ACME server
     </label>
+    <p class="note">
+      The directory URL, external account keys and client setup snippets live
+      on the <a href="/acme/admin">ACME</a> page.
+    </p>
 
     <h2>ACME validation</h2>
     <p class="note">

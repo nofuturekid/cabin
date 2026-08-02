@@ -2,8 +2,9 @@
 authorizations and their challenges.
 
 RFC 8555 sections 7.4, 7.5. Everything here is read with POST-as-GET and
-belongs to exactly one account; nothing here validates a challenge or issues
-a certificate -- those are specs 0011 and 0012.
+belongs to exactly one account. Finalization, the certificate itself and
+revocation -- the three routes that mint or retire one -- live next door in
+:mod:`cabin.acme.api_finalize`.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
@@ -36,18 +37,6 @@ from cabin.ca import service as ca_service
 from cabin.web.deps import client_ip, get_db
 
 router = APIRouter()
-
-#: Spec 0012 owns finalization and revocation. Until then the URLs are
-#: advertised -- the directory and every order have to name them -- but they
-#: answer honestly rather than 404ing without a nonce, which would strand a
-#: client mid-flow.
-#:
-#: The two stubs below take no body and verify nothing, which is safe only
-#: because they do nothing. Spec 0012 MUST give them the same
-#: ``verified(...)`` treatment as every other POST route here before they
-#: gain any effect -- a finalize that signs a CSR without checking the JWS
-#: would issue certificates to anyone who can guess an order URL.
-_NOT_IMPLEMENTED_STATUS = 501
 
 
 @router.post("/new-order")
@@ -161,21 +150,3 @@ def challenge_resource(
         # to by the middleware, which adds the directory link.
         Link=f'<{url(db, f"{AUTHZ_PREFIX}{authz.id}")}>;rel="up"',
     )
-
-
-def _unimplemented(what: str) -> AcmeError:
-    return AcmeError(
-        ErrorType.server_internal,
-        f"{what} is not implemented yet on this cabin instance",
-        status=_NOT_IMPLEMENTED_STATUS,
-    )
-
-
-@router.post("/revoke-cert")
-def revoke_cert() -> Response:
-    raise _unimplemented("certificate revocation over ACME")
-
-
-@router.post("/order/{order_id}/finalize")
-def finalize_order(order_id: str) -> Response:
-    raise _unimplemented("order finalization")

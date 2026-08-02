@@ -80,7 +80,7 @@ def _page(
     return templates.TemplateResponse(request, "settings.html", context, status_code=status_code)
 
 
-def _save(
+def save_setting(
     request: Request,
     db: Session,
     actor: Actor,
@@ -92,6 +92,10 @@ def _save(
     submitted value is the one already in effect. ``current`` is the
     *effective* value (a never-set flag reads as "false"), so the first save
     of an unchanged default is not logged as a change that never happened.
+
+    Public because the ACME page (spec 0012 FR-5) writes settings too, and
+    two pages that record a settings change differently would be two
+    versions of the audit log's most-read event.
     """
     if current == value:
         return
@@ -169,8 +173,8 @@ def settings_submit(
             str(exc),
             status_code=400,
         )
-    _save(request, db, actor, BASE_URL, get_setting(db, BASE_URL) or "", value)
-    _save(
+    save_setting(request, db, actor, BASE_URL, get_setting(db, BASE_URL) or "", value)
+    save_setting(
         request,
         db,
         actor,
@@ -178,7 +182,7 @@ def settings_submit(
         TRUE if get_flag(db, TRUST_PROXY) else FALSE,
         TRUE if wants_proxy else FALSE,
     )
-    _save(
+    save_setting(
         request,
         db,
         actor,
@@ -186,7 +190,7 @@ def settings_submit(
         TRUE if get_flag(db, ACME_ENABLED) else FALSE,
         TRUE if wants_acme else FALSE,
     )
-    _save(
+    save_setting(
         request,
         db,
         actor,
@@ -194,5 +198,12 @@ def settings_submit(
         TRUE if get_flag(db, ALLOW_PRIVATE_VALIDATION_TARGETS, default=True) else FALSE,
         TRUE if wants_private else FALSE,
     )
-    _save(request, db, actor, DNS_RESOLVERS, get_setting(db, DNS_RESOLVERS) or "", resolvers)
+    save_setting(
+        request,
+        db,
+        actor,
+        DNS_RESOLVERS,
+        get_setting(db, DNS_RESOLVERS) or "",
+        resolvers,
+    )
     return RedirectResponse("/settings", status_code=303)
