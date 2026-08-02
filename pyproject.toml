@@ -21,6 +21,7 @@ dependencies = [
     "josepy>=2.2.0",
     "dnspython>=2.8.0",
     "httpx2>=2.9.1",
+    "fastmcp>=3.4.5",
 ]
 
 [project.scripts]

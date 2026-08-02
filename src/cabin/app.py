@@ -14,6 +14,7 @@ from cabin.acme.errors import AcmeError
 from cabin.acme.http import acme_error_handler, acme_response_headers
 from cabin.api.v1 import router as api_v1_router
 from cabin.config import Config
+from cabin.mcp import create_mcp_app
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
 from cabin.web import STATIC_DIR
@@ -38,9 +39,19 @@ def create_app(config: Config) -> FastAPI:
         app.state.config = config
         app.state.secrets = SecretStore.open(config.data_dir, config.master_passphrase)
         app.state.db = create_session_factory(config.db_url)
-        yield
+        # Spec 0013 FR-1: the MCP endpoint's streamable-HTTP session manager
+        # is started and stopped here. A sub-app attached to this router does
+        # not get a lifespan of its own, and without this one every call to
+        # it would fail with "task group is not initialized".
+        async with mcp.lifespan():
+            yield
 
     app = FastAPI(title="cabin", version=__version__, lifespan=lifespan)
+
+    # Both accessors are called per request, by which time the lifespan above
+    # has put the session factory and the secret store on app.state -- which
+    # is why they are closures rather than the values themselves.
+    mcp = create_mcp_app(lambda: app.state.db(), lambda: app.state.secrets)
 
     @app.middleware("http")
     async def _refresh_session_cookie(
@@ -102,6 +113,11 @@ def create_app(config: Config) -> FastAPI:
     # signature rather than a credential cabin issued: ACME (spec 0010).
     # Every route behind an acme_enabled gate that answers 404 when off.
     app.include_router(acme_router)
+    # The fourth front door: MCP (spec 0013). It brings its own routes,
+    # because exactly where the sub-app hangs is the whole of that spec's
+    # FR-1 -- see cabin.mcp.server. Behind an mcp_enabled gate that answers
+    # 404 when off, like ACME's.
+    app.router.routes.extend(mcp.routes)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     return app

@@ -51,6 +51,10 @@ class CertSource(StrEnum):
     ui = "ui"
     api = "api"
     acme = "acme"
+    #: Spec 0013: the MCP server. A fourth front door rather than a flavour
+    #: of "api" -- "an assistant did this" is exactly the distinction an
+    #: operator reading the inventory wants to be able to make.
+    mcp = "mcp"
 
 
 class Certificate(Base):

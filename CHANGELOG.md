@@ -213,3 +213,36 @@ All notable changes to cabin are documented here. The format is based on
   `acme_eab_key_revoked`. The certbot client drives the full flow — account,
   order, http-01, finalize, chain download — and the same flow again with
   EAB required, in the interop tests.
+- Spec 0013 (mcp): a Model Context Protocol server (`fastmcp`, new runtime
+  dependency) so an assistant can operate the CA directly. Six tools
+  (`cabin.mcp.server`): `get_ca_info`, `list_certificates`,
+  `get_certificate`, `issue_certificate`, `sign_csr` and
+  `revoke_certificate` — a second consumer of the same domain services, with
+  the response shapes factored out of `/api/v1` into the new
+  `cabin.api.views` so both front doors describe a certificate identically,
+  and the REST request models reused for parameter validation so the limits
+  (days 1..3650, ≤100 SANs, CN ≤64) come from one definition and failures
+  come back as sentences rather than tracebacks. Authentication is the
+  spec-0008 API token (`Authorization: Bearer`, no cookies, no CSRF): a
+  missing or dead token is the transport's 401, and a viewer token is
+  refused the three mutating tools with a message naming the role it would
+  need. Only `issue_certificate` ever returns a private key — the one it
+  just generated — which the new `CertificatePem` model makes a property of
+  the type rather than of the code. Off by default behind the new
+  `mcp_enabled` setting, which needs a base URL for the same reason ACME
+  does; while it is off, `/mcp` and everything under it answer 404 before
+  authentication runs. The endpoint is attached as a route at exactly `/mcp`
+  (stateless streamable-HTTP) so the URL an operator pastes into their
+  client is the one that answers, rather than a 307 to `/mcp/`
+  (python-sdk#1367). MCP-driven changes are recorded with
+  `actor_kind="token"`, the token's label and the detail `{"via": "mcp"}`,
+  and carry the new `mcp` value in `certificates.source`. An exception
+  cabin did not anticipate is masked rather than relayed
+  (`mask_error_details`), so a database error cannot carry SQL, its bound
+  parameters or a filesystem path to the caller — everything cabin does
+  mean the caller to read is raised as an explicit tool error. The
+  endpoint accepts every HTTP method so that the gate, not the router
+  above it, answers for the ones it does not implement (a 405 with an
+  `Allow` header would admit the path exists while MCP is off), and every
+  response it sends carries `Cache-Control: no-store`. /settings gains
+  the switch, the endpoint URL and a ready-to-paste `claude mcp add` line.
