@@ -246,3 +246,38 @@ All notable changes to cabin are documented here. The format is based on
   `Allow` header would admit the path exists while MCP is off), and every
   response it sends carries `Cache-Control: no-store`. /settings gains
   the switch, the endpoint URL and a ready-to-paste `claude mcp add` line.
+- Spec 0014 (deployment): cabin ships. A multi-stage `Dockerfile` builds a
+  wheel with uv and installs it into a virtualenv that is copied into a
+  `python:3.13-slim` runtime pinned by digest — no uv, no compiler and no
+  source tree in the final image, which runs as the nonroot uid 65532, keeps
+  its state in the `/data` volume and health-checks itself with the standard
+  library rather than a bundled curl. Measured at **216 MB uncompressed on
+  linux/amd64** and 243 MB on linux/arm64 (235 MB and 262 MB as the sum of
+  layer sizes), against the 250 MB target the spec sets for amd64. The virtualenv stays root-owned
+  and read-only to the runtime user, so a code execution bug cannot rewrite
+  the code it runs as — and the shipped compose file and Unraid template add
+  `no-new-privileges` and `--cap-drop ALL`, which cabin needs none of and
+  which defuse the eight setuid-root binaries the Debian base image brings.
+  An unwritable `DATA_DIR` — the wrong-owner bind mount every one of those
+  files warns about — is now caught before the database is opened and
+  reported as one sentence naming the directory, the effective uid and the
+  `chown` that fixes it, instead of as a SQLAlchemy traceback. The release
+  version is stamped into the wheel's metadata at build
+  time (`--build-arg VERSION` → `uv version`), so `/healthz`, the OpenAPI
+  document and the UI footer all report it from one source and a plain
+  source build still reports the version in `pyproject.toml`. New
+  `docker-compose.yml` (bind-mounted `./data`, the optional environment
+  variables and a PostgreSQL alternative as comments), new
+  `deploy/unraid/cabin.xml` template plus icon — mapping appdata to `/data`
+  and running as `99:100`, the owner of an Unraid appdata share — and two
+  GitHub Actions lanes that build linux/amd64 + linux/arm64 with buildx and
+  QEMU and push to `ghcr.io/nofuturekid/cabin`: `release.yml` (tag, plus
+  `:latest` for stable releases or `:beta` for prereleases) and `main.yml`
+  (the moving `:main` tag, versioned with a `+main.<sha>` local segment).
+  The `:main` lane hangs off CI finishing green rather than off the push, so
+  a red test suite cannot move the tag people pull.
+  `make docker-smoke` builds the image, runs it as the invoking uid against
+  an empty data directory, waits for `/healthz` and checks the version and
+  the 0600 `secret.key` it created. README rewritten around what cabin is,
+  what it can do, the two ways to install it, the five environment variables
+  and what to back up.

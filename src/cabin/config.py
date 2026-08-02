@@ -14,6 +14,31 @@ class ConfigError(Exception):
     """Invalid runtime configuration."""
 
 
+def ensure_data_dir_writable(data_dir: Path) -> None:
+    """Refuse to start when DATA_DIR cannot be written, and say why.
+
+    This is the first-run failure: a bind-mounted volume that belongs to
+    another uid, which is exactly what the README, the compose file and the
+    Unraid template all warn about. Left to the database layer it surfaces as
+    a SQLAlchemy traceback that names neither the directory, nor the uid it
+    tried to write as, nor the fix -- so it is checked here instead, before
+    anything opens a connection.
+    """
+    ids = f"uid {os.geteuid()}:{os.getegid()}"
+    fix = f"chown -R {os.geteuid()}:{os.getegid()} <the host directory mounted there>"
+    try:
+        data_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise ConfigError(
+            f"data directory {data_dir} cannot be created as {ids} "
+            f"({exc.strerror}); create it or fix its ownership: {fix}"
+        ) from exc
+    if not os.access(data_dir, os.W_OK | os.X_OK):
+        raise ConfigError(
+            f"data directory {data_dir} is not writable by {ids}; fix its ownership: {fix}"
+        )
+
+
 def _parse_port(raw: str) -> int:
     try:
         port = int(raw)

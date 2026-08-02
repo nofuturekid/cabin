@@ -1,0 +1,35 @@
+# Everything the image does not need. Keeping this tight matters twice: the
+# build context is uploaded on every build, and a stray .venv or data/ would
+# otherwise end up in the builder stage.
+.git
+.github
+.gitignore
+.dockerignore
+
+tests
+spec
+docs
+deploy
+scripts
+# README.md and LICENSE stay: pyproject.toml points its metadata at them, so
+# the wheel cannot be built without them.
+*.md
+!README.md
+
+.venv
+data
+dist
+build
+*.egg-info
+
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+Dockerfile
+docker-compose.yml
+Makefile
