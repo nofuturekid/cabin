@@ -49,6 +49,33 @@ block content %}
       Enable the ACME server
     </label>
 
+    <h2>ACME validation</h2>
+    <p class="note">
+      To prove a name belongs to them, clients let cabin fetch a file over
+      HTTP, read a DNS record, or open a TLS connection — so an ACME order
+      decides where cabin connects. Cabin never connects to loopback,
+      link-local or multicast addresses; private addresses are the normal
+      case for an internal CA and are allowed unless you untick this.
+    </p>
+    <label class="checkbox">
+      <input id="allow_private_validation_targets" type="checkbox" name="allow_private_validation_targets" value="on" {{ "checked" if allow_private_validation_targets else "" }} />
+      Validate names that resolve to private addresses (192.168.x, 10.x, …)
+    </label>
+
+    <p class="note">
+      For <code>dns-01</code>, cabin asks this host's own resolver by default.
+      Name one or more resolvers here (IP addresses, comma-separated) if the
+      internal zone is only visible to a different one.
+    </p>
+    <label for="dns_resolvers">DNS resolvers</label>
+    <input
+      id="dns_resolvers"
+      type="text"
+      name="dns_resolvers"
+      value="{{ dns_resolvers }}"
+      placeholder="192.168.1.53, 10.0.0.53"
+    />
+
     <button type="submit">Save</button>
   </form>
   {% if base_url %}

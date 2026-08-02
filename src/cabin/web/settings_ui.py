@@ -1,7 +1,9 @@
 """Instance settings: the public base URL cabin bakes into the CRL
 distribution point of newly issued certificates (spec 0007 FR-6), whether an
-``X-Forwarded-For`` header may be believed (spec 0009 FR-5), and whether the
-ACME server answers at all (spec 0010 FR-5).
+``X-Forwarded-For`` header may be believed (spec 0009 FR-5), whether the
+ACME server answers at all (spec 0010 FR-5), and the two knobs ACME
+validation has -- which addresses it may connect to and which resolvers it
+asks (spec 0011 FR-5, FR-9).
 
 Admin-only, like every page that exists to change something. Each changed
 key is one audit event with its old and new value; saving a form that
@@ -18,7 +20,9 @@ from cabin.acme.http import directory_url
 from cabin.audit import Actor, AuditAction
 from cabin.settings import (
     ACME_ENABLED,
+    ALLOW_PRIVATE_VALIDATION_TARGETS,
     BASE_URL,
+    DNS_RESOLVERS,
     FALSE,
     TRUE,
     TRUST_PROXY,
@@ -27,6 +31,7 @@ from cabin.settings import (
     get_setting,
     set_setting,
     validate_base_url,
+    validate_dns_resolvers,
 )
 from cabin.users import User
 from cabin.web import templates
@@ -49,6 +54,8 @@ def _page(
     base_url: str,
     trust_proxy: bool,
     acme_enabled: bool,
+    allow_private: bool,
+    dns_resolvers: str,
     error: str | None = None,
     status_code: int = 200,
 ) -> Response:
@@ -58,6 +65,10 @@ def _page(
             "base_url": base_url,
             "trust_proxy": trust_proxy,
             "acme_enabled": acme_enabled,
+            # Spec 0011 FR-9: on unless it has been turned off, so the box
+            # is ticked for an instance that has never touched it.
+            "allow_private_validation_targets": allow_private,
+            "dns_resolvers": dns_resolvers,
             # Spec 0010 FR-5: the URL an operator hands to a client -- None
             # until a base URL is set, because an ACME directory is only
             # useful as an absolute URL, and one guessed from this request
@@ -110,6 +121,8 @@ def settings_page(
         get_setting(db, BASE_URL) or "",
         get_flag(db, TRUST_PROXY),
         get_flag(db, ACME_ENABLED),
+        get_flag(db, ALLOW_PRIVATE_VALIDATION_TARGETS, default=True),
+        get_setting(db, DNS_RESOLVERS) or "",
     )
 
 
@@ -119,6 +132,8 @@ def settings_submit(
     base_url: str = Form(""),
     trust_proxy: str = Form(""),
     acme_enabled: str = Form(""),
+    allow_private_validation_targets: str = Form(""),
+    dns_resolvers: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
@@ -128,8 +143,10 @@ def settings_submit(
     # default here means -- off.
     wants_proxy = bool(trust_proxy)
     wants_acme = bool(acme_enabled)
+    wants_private = bool(allow_private_validation_targets)
     try:
         value = validate_base_url(base_url)
+        resolvers = validate_dns_resolvers(dns_resolvers)
         if wants_acme and not value:
             # Spec 0010 FR-5: ACME hands clients absolute URLs and checks the
             # ones they sign against them, so without a base URL the server
@@ -147,6 +164,8 @@ def settings_submit(
             base_url,
             wants_proxy,
             wants_acme,
+            wants_private,
+            dns_resolvers,
             str(exc),
             status_code=400,
         )
@@ -167,4 +186,13 @@ def settings_submit(
         TRUE if get_flag(db, ACME_ENABLED) else FALSE,
         TRUE if wants_acme else FALSE,
     )
+    _save(
+        request,
+        db,
+        actor,
+        ALLOW_PRIVATE_VALIDATION_TARGETS,
+        TRUE if get_flag(db, ALLOW_PRIVATE_VALIDATION_TARGETS, default=True) else FALSE,
+        TRUE if wants_private else FALSE,
+    )
+    _save(request, db, actor, DNS_RESOLVERS, get_setting(db, DNS_RESOLVERS) or "", resolvers)
     return RedirectResponse("/settings", status_code=303)

@@ -30,6 +30,14 @@ class ErrorType(StrEnum):
     unsupported_identifier = "unsupportedIdentifier"
     rejected_identifier = "rejectedIdentifier"
     user_action_required = "userActionRequired"
+    # Spec 0011: the three ways a validation attempt fails at the target
+    # rather than at the protocol. The distinction is the whole point --
+    # "cabin could not reach you", "your DNS did not answer" and "what you
+    # served was not what I asked for" have three different fixes.
+    connection = "connection"
+    dns = "dns"
+    tls = "tls"
+    incorrect_response = "incorrectResponse"
 
 
 #: The status each type is answered with unless a caller overrides it.
@@ -49,6 +57,14 @@ _STATUS: dict[ErrorType, int] = {
     ErrorType.unsupported_identifier: 400,
     ErrorType.rejected_identifier: 400,
     ErrorType.user_action_required: 403,
+    # A validation failure is the client's problem to fix (its server, its
+    # DNS, its certificate), so all four are 400 -- and they are answered as
+    # the ``error`` field of a challenge rather than as a response status,
+    # since the request that carried them succeeded.
+    ErrorType.connection: 400,
+    ErrorType.dns: 400,
+    ErrorType.tls: 400,
+    ErrorType.incorrect_response: 400,
 }
 
 #: RFC 7807's media type; a client that cannot parse the body still learns

@@ -15,8 +15,9 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -379,19 +380,41 @@ def _has_expired(expires_at: str, now: datetime | None) -> bool:
     return expires_at <= _iso(now or datetime.now(UTC))
 
 
-def order_status(order: AcmeOrder, now: datetime | None = None) -> str:
-    """RFC 8555 7.1.3: ``expires`` is the instant after which the server
-    considers the order invalid -- so past it, it is invalid, whatever the
-    stored row still says.
+def order_status(db: Session, order: AcmeOrder, now: datetime | None = None) -> str:
+    """RFC 8555 7.1.3/7.1.6: what this order's status *is*, which is a
+    function of its authorizations and of the clock rather than of the
+    column alone.
 
     Computed rather than written back: a read is not a state change, and a
-    lazy UPDATE on every POST-as-GET would be a write amplification for no
-    gain. Spec 0011 calls this before validating a challenge, which is why it
-    is one shared function and not two readings of the same column.
+    lazy UPDATE on every POST-as-GET would be write amplification for no
+    gain. It also means an authorization that expires tomorrow silently
+    walks the order back out of ``ready``, which a stored status could not
+    do without a scheduler.
+
+    Three rules, in order (spec 0011 FR-7):
+
+    * past ``expires``, a pending or ready order is invalid, whatever the
+      row still says;
+    * an authorization that is invalid or expired makes the order invalid --
+      there is now a name in it that can never be proven;
+    * all authorizations valid makes it ready, which is what a client waits
+      for before finalizing.
+
+    Statuses cabin *writes* (``processing``, ``valid``, ``invalid``) win
+    over all of that: they record something that has already happened.
     """
-    if order.status == OrderStatus.pending and _has_expired(order.expires_at, now):
+    if order.status not in (OrderStatus.pending, OrderStatus.ready):
+        return order.status
+    if _has_expired(order.expires_at, now):
         return OrderStatus.invalid
-    return order.status
+    statuses = [authorization_status(authz, now) for authz in authorizations_of(db, order)]
+    if any(
+        status in (AuthorizationStatus.invalid, AuthorizationStatus.expired) for status in statuses
+    ):
+        return OrderStatus.invalid
+    if statuses and all(status == AuthorizationStatus.valid for status in statuses):
+        return OrderStatus.ready
+    return OrderStatus.pending
 
 
 def authorization_status(authz: AcmeAuthorization, now: datetime | None = None) -> str:
@@ -438,6 +461,113 @@ def challenges_of(db: Session, authz: AcmeAuthorization) -> list[AcmeChallenge]:
             .order_by(AcmeChallenge.id)
         ).all()
     )
+
+
+# --- FR-2/FR-7: what a validation attempt does to these rows ---------------------------
+
+
+def begin_challenge(
+    db: Session,
+    challenge: AcmeChallenge,
+    authz: AcmeAuthorization,
+    now: datetime | None = None,
+) -> bool:
+    """Spec 0011 FR-2: move a challenge ``pending -> processing``.
+
+    Returns True when this call is the one that scheduled a validation, so
+    the route knows whether to queue the background task. Two of the four
+    cases are deliberately *not* errors: a client that re-sends the trigger
+    (a lost response, an impatient retry) is asking for the state it is
+    already in, and RFC 8555 has it poll the same URL either way.
+
+    The two that are errors say why: an ``invalid`` challenge is finished
+    and will not be retried in v1 (the client's remedy is a new order), and
+    an authorization that is no longer pending has nothing left to prove.
+    """
+    if challenge.status in (ChallengeStatus.processing, ChallengeStatus.valid):
+        return False
+    if challenge.status == ChallengeStatus.invalid:
+        raise AcmeError(
+            ErrorType.malformed,
+            "this challenge has already failed; place a new order to try again",
+        )
+    status = authorization_status(authz, now)
+    if status != AuthorizationStatus.pending:
+        raise AcmeError(
+            ErrorType.malformed,
+            f"this authorization is {status} and cannot be validated",
+        )
+    # One statement, not a read followed by a write: two triggers that arrive
+    # together both saw ``pending`` above, and if both were allowed to
+    # schedule, two validations would race over one challenge -- one of them
+    # able to write ``invalid`` over the other's ``valid`` and leave an
+    # authorization that is valid under a challenge that says it failed. The
+    # WHERE clause is what makes exactly one of them the winner; the loser
+    # reads the row back as processing and returns False, which is the same
+    # no-op as re-triggering (FR-2).
+    # cast: a DML statement always produces a CursorResult, and its rowcount
+    # is the answer to "did this call make the change?"; Session.execute is
+    # typed as the union of everything it can return.
+    claimed = cast(
+        "CursorResult[Any]",
+        db.execute(
+            update(AcmeChallenge)
+            .where(
+                AcmeChallenge.id == challenge.id,
+                AcmeChallenge.status == ChallengeStatus.pending,
+            )
+            # Whatever a previous attempt said is no longer true.
+            .values(status=ChallengeStatus.processing, error_json=None)
+        ),
+    )
+    db.commit()
+    db.refresh(challenge)
+    return bool(claimed.rowcount == 1)
+
+
+def record_challenge_success(
+    db: Session,
+    challenge: AcmeChallenge,
+    authz: AcmeAuthorization,
+    now: datetime | None = None,
+) -> None:
+    """FR-7: one proof is enough -- the challenge and its authorization
+    become valid together, in one transaction, and the order's own status
+    follows from that on the next read (:func:`order_status`)."""
+    moment = _iso(now or datetime.now(UTC))
+    challenge.status = ChallengeStatus.valid
+    challenge.validated_at = moment
+    challenge.error_json = None
+    authz.status = AuthorizationStatus.valid
+    db.commit()
+
+
+def record_challenge_failure(
+    db: Session, challenge: AcmeChallenge, problem: dict[str, object]
+) -> None:
+    """FR-7: the challenge is invalid and says why; the authorization stays
+    pending, because a name that could not be proven over HTTP may still be
+    provable over DNS, and RFC 8555 7.1.6 leaves that door open.
+
+    Conditional on the challenge still being ``processing``, so that a
+    result can only apply to the attempt that is still running: a straggler
+    -- an attempt already overtaken, or one whose result arrives after a
+    restart -- must not turn a proven challenge back into a failed one while
+    its authorization stays valid.
+    """
+    db.execute(
+        update(AcmeChallenge)
+        .where(
+            AcmeChallenge.id == challenge.id,
+            AcmeChallenge.status == ChallengeStatus.processing,
+        )
+        .values(
+            status=ChallengeStatus.invalid,
+            error_json=json.dumps(problem, sort_keys=True),
+        )
+    )
+    db.commit()
+    db.refresh(challenge)
 
 
 def orders_of(db: Session, account: AcmeAccount) -> list[AcmeOrder]:

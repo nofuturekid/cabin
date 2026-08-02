@@ -171,7 +171,10 @@ async def acme_response_headers(
     response = await call_next(request)
     if getattr(request.state, "acme_enabled", False) is not True:
         return response
-    response.headers["Link"] = f'<{request.state.acme_origin}{DIRECTORY_PATH}>;rel="index"'
+    # Appended, never assigned: a route may have set a Link of its own --
+    # spec 0011's challenge trigger owes the client an ``up`` link to the
+    # authorization -- and overwriting it here would take that away.
+    response.headers.append("Link", f'<{request.state.acme_origin}{DIRECTORY_PATH}>;rel="index"')
     if not _wants_nonce(request):
         return response
     db: Session = request.app.state.db()
@@ -269,12 +272,22 @@ def account_json(db: Session, account: AcmeAccount) -> dict[str, object]:
 
 
 def challenge_json(db: Session, challenge: AcmeChallenge) -> dict[str, object]:
-    return {
+    body: dict[str, object] = {
         "type": challenge.type,
         "url": url(db, f"{CHALLENGE_PREFIX}{challenge.id}"),
         "status": challenge.status,
         "token": challenge.token,
     }
+    if challenge.validated_at:
+        # RFC 8555 7.1.5: present exactly when the challenge is valid, and
+        # the reason a client can tell "proven just now" from "proven last
+        # week" without keeping state of its own.
+        body["validated"] = challenge.validated_at
+    if challenge.error_json:
+        # Spec 0011 FR-7: why the attempt failed, as the problem document
+        # the validator produced -- the same wording the audit log has.
+        body["error"] = json.loads(challenge.error_json)
+    return body
 
 
 def authz_json(db: Session, authz: AcmeAuthorization) -> dict[str, object]:
@@ -296,7 +309,9 @@ def authz_json(db: Session, authz: AcmeAuthorization) -> dict[str, object]:
 
 def order_json(db: Session, order: AcmeOrder) -> dict[str, object]:
     body: dict[str, object] = {
-        "status": service.order_status(order),
+        # Computed, not read: an order whose authorizations are all valid is
+        # ready, and one that expired underneath them is invalid.
+        "status": service.order_status(db, order),
         "expires": order.expires_at,
         "identifiers": service.order_identifiers(order),
         "authorizations": [

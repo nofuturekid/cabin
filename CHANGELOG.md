@@ -117,3 +117,45 @@ All notable changes to cabin are documented here. The format is based on
   document rather than a bare 404. Interoperability is verified against the
   certbot `acme` client library, added as a dev dependency; `josepy` is a
   new runtime dependency.
+- Spec 0011 (acme-challenges): the three RFC 8555/8737 validation methods
+  (`cabin.acme.validation`), so an ACME client can actually prove control of
+  a name. One key-authorization helper (RFC 8555 8.1) feeds all three:
+  http-01 fetches `http://<identifier>/.well-known/acme-challenge/<token>`
+  on port 80, follows up to five redirects (each one address-checked again),
+  reads at most 64 KiB and compares in constant time; dns-01 reads TXT
+  records at `_acme-challenge.<identifier>` through dnspython and accepts any
+  record carrying the digest; tls-alpn-01 opens a TLS connection with ALPN
+  `acme-tls/1` and checks the presented certificate's SAN and its critical
+  `id-pe-acmeIdentifier` extension. `POST /acme/chal/{id}` with an empty JSON
+  object triggers a validation — it answers immediately with the challenge in
+  `processing` plus `Link: <authz>;rel="up"` and runs the attempt as a
+  background task with a session of its own, with no retries. One monotonic
+  deadline of 10 seconds bounds the whole attempt rather than each operation
+  inside it, so a target that dribbles a response out one byte at a time, or
+  a slow chain of redirects, cannot hold a worker thread indefinitely. The
+  move out of `pending` is a conditional UPDATE, so two triggers that arrive
+  together produce one validation, and a late failure can no longer overwrite
+  a challenge that has already succeeded. Re-triggering a processing or valid
+  challenge is a no-op;
+  triggering a failed one, or one whose authorization is no longer pending,
+  is `malformed`. A valid challenge makes its authorization valid, and an
+  order whose authorizations are all valid now reads `ready` (an expired or
+  failed one makes it `invalid`); a failed challenge carries an RFC 7807
+  problem document in its `error` field and leaves the authorization pending,
+  so another challenge type can still be tried. Every attempt is audited as
+  `acme_challenge_validated` / `acme_challenge_failed`. Validation targets
+  are attacker-influenced, so identifiers are resolved before connecting and
+  refused when any resolved address is loopback, link-local, multicast or
+  unspecified — including the IPv4-mapped, IPv4-compatible, 6to4 and NAT64
+  spellings of those. Every redirect hop is resolved and checked again, and
+  only ports 80 and 443 are followed, so a redirect cannot aim validation at
+  an arbitrary internal port; a connection-level failure tells the client
+  only that cabin could not reach the name, while the audit log keeps the
+  precise reason and address. Private addresses are allowed by default (an
+  internal CA validates RFC 1918 hosts by definition) and can be switched off
+  with the new `allow_private_validation_targets` setting; the new
+  `dns_resolvers` setting (comma-separated IPs) overrides the system resolver
+  for dns-01. Both are configurable on /settings. `httpx2` is a new runtime
+  dependency for the outbound HTTP of http-01, alongside `dnspython`. The
+  certbot client drives trigger, validation and polling to a valid
+  authorization end to end in the interop test.

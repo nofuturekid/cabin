@@ -19,6 +19,8 @@ dependencies = [
     "python-multipart>=0.0.32",
     "pydantic>=2.11",
     "josepy>=2.2.0",
+    "dnspython>=2.8.0",
+    "httpx2>=2.9.1",
 ]
 
 [project.scripts]
@@ -29,7 +31,6 @@ dev = [
     "pytest>=8.4",
     "ruff>=0.12",
     "mypy>=1.17",
-    "httpx2>=2.9.1",
     "acme>=5.7.0",
 ]
 
