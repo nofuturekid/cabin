@@ -22,6 +22,7 @@
         <span class="nav-group">Certificates</span>
         {{ nav_link("/certs", "certs", "Inventory") }}
         {% if nav.issue %}{{ nav_link("/certs/new", "issue", "Issue") }}{% endif %}
+        {% if nav.issue %}{{ nav_link("/certs/sign", "sign", "Sign a CSR") }}{% endif %}
         <span class="nav-group">Access</span>
         {% if nav.acme %}{{ nav_link("/acme/admin", "acme", "ACME") }}{% endif %}
         {% if nav.tokens %}{{ nav_link("/tokens", "tokens", "API tokens") }}{% endif %}

@@ -1,0 +1,55 @@
+{% extends "layout.html" %}
+{% set nav_current = "sign" %}
+{% block title %}Sign a CSR — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Sign a CSR</h1>
+    <p class="sub">
+      The private key never leaves the system that made the request. To have
+      cabin generate the key instead, <a href="/certs/new">issue a certificate</a>.
+    </p>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="section">
+  <div>
+    <h2>Request</h2>
+    <p class="help">
+      Paste a certificate signing request from another system. Only the CSR's
+      public key, common name and SANs are used — any other extension it
+      requests is ignored.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/certs/sign">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="csr_pem">Certificate signing request (PEM)</label>
+        <textarea id="csr_pem" name="csr_pem" rows="10" required></textarea>
+      </div>
+      <div class="field">
+        <label for="sign_profile">Profile</label>
+        <select id="sign_profile" name="profile">
+          {% for profile in profiles %}
+          <option value="{{ profile }}" {% if loop.first %}selected{% endif %}>{{ profile }}</option>
+          {% endfor %}
+        </select>
+        <span class="hint">server = serverAuth, client = clientAuth</span>
+      </div>
+      <div class="field">
+        <label for="sans_override">SAN override</label>
+        <textarea id="sans_override" name="sans_override" rows="3"></textarea>
+        <span class="hint">One per line; leave empty to keep the CSR's SANs.</span>
+      </div>
+      <div class="field">
+        <label for="sign_days">Validity (days)</label>
+        <input id="sign_days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ default_days }}" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Sign CSR</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

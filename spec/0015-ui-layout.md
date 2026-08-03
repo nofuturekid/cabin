@@ -58,7 +58,11 @@ asset wiring for the two vendored fonts.
   version, the nav grouped under "Overview" / "Certificates" / "Access", and
   a footer with the current user, their role and the logout form. Entries are
   gated by the same `nav.*` flags as today — no route gains or loses
-  visibility.
+  visibility. The rail is sticky and one viewport tall, scrolling within
+  itself if it has to: it is the only way off a page, so on a long one — a
+  certificate with its PEM blocks, a full audit log — it may not scroll away
+  and take the logout button with it. Stacked above the content below 60rem
+  it is short, and scrolls with the page again.
 - FR-2: The current page's rail entry carries `aria-current="page"`. Templates
   set it by declaring `{% set nav_current = "certs" %}`; the rail compares
   against that name. Every content template sets exactly one.
@@ -98,6 +102,13 @@ dark)`; every token used in light mode has a dark counterpart.
   the content, `.section` collapses to one column, and the filter rows wrap.
   Interactive controls keep a visible `:focus-visible` outline in both
   schemes.
+- FR-10: Issuing and CSR signing become two pages with two rail entries.
+  `/certs/new` keeps only the generate-a-key form; a new `GET /certs/sign`
+  renders the CSR form, beside the `POST /certs/sign` that already existed.
+  Both require admin, as the single page did, and each links to the other so
+  the choice — who holds the private key — stays visible from either side.
+  Errors from `POST /certs/sign` re-render the CSR page rather than the issue
+  page, which is where they used to land.
 
 ## Acceptance Criteria
 
@@ -111,6 +122,9 @@ clientWidth`, and no element's right edge extends past its container's.
 - AC-4: Every template that renders a `<table>` wraps it in `.scroller`; no
   template references `card`, `card-wide` or `badge-`; every content template
   sets exactly one `nav_current`.
+- AC-5b: On a certificate detail page scrolled to its end at 1440x700, the
+  rail's logout button is still inside the viewport; with the rail not sticky
+  the same measurement puts it 428px above it.
 - AC-5: The rail marks exactly one entry with `aria-current="page"` per page,
   and it is the page being viewed. A viewer sees the same rail minus the
   entries their role never had.
@@ -120,6 +134,9 @@ clientWidth`, and no element's right edge extends past its container's.
   stylesheet.
 - AC-7: Auth, authorisation, CSRF and redirect behaviour are unchanged: the
   spec 0003–0014 test suite passes untouched.
+- AC-8: `GET /certs/sign` returns 200 for an admin and 403 for a viewer; the
+  viewer's rail contains neither `/certs/new` nor `/certs/sign`. A CSR that
+  fails to parse re-renders `/certs/sign` with the error, not `/certs/new`.
 
 ## Test list
 
@@ -127,6 +144,7 @@ test_layout_has_rail_and_main, test_nav_current_marked_once_per_page,
 test_nav_entries_still_role_gated, test_every_table_is_wrapped_in_scroller,
 test_no_template_uses_card_or_badge_classes,
 test_every_content_template_sets_nav_current, test_login_and_setup_use_narrow,
+test_rail_stays_in_view_on_a_long_page (headless Chrome),
 test_fonts_served_with_woff2_content_type,
 test_fonts_are_vendored_with_their_licences, test_css_has_no_external_urls,
 test_css_defines_dark_counterpart_for_every_token,
@@ -140,8 +158,12 @@ keeps the pager outside the empty-state branch.
 
 ## Out of Scope
 
-Wording, page copy and field labels. New pages, new columns, new filters or
-sorting. Any change to routes, permissions, CSRF or data. Client-side
+Wording, page copy and field labels beyond the two cross-links FR-10 adds.
+New columns, new filters or sorting. Any change to permissions, CSRF or data.
+One route is added — `GET /certs/sign` — and it is the only one: splitting the
+issue page in two was requested while this spec was being implemented, and
+folding it in here was the honest option, since it is the same page chrome
+being rebuilt and it changes which entries the rail carries. Client-side
 interactivity beyond the htmx already in use. A dark/light toggle — the
 scheme follows the operating system. Swagger UI's own stylesheet, which is
 vendored upstream and left alone.

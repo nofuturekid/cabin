@@ -103,7 +103,16 @@ body.with-rail {
 
 /* ---- navigation rail ---- */
 
+/* The rail stays put while the content scrolls: on a long page — a
+   certificate with its PEM blocks, a full audit log — a rail that scrolled
+   away would take the logout button and every other destination with it.
+   align-self keeps the grid from stretching it, which sticky needs. */
 .rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
   border-right: 1px solid var(--line);
   background: var(--panel);
   padding: var(--pad) 0;
@@ -585,7 +594,11 @@ footer {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Stacked above the content, the rail is short and scrolls away with it. */
   .rail {
+    position: static;
+    height: auto;
+    overflow-y: visible;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     padding: var(--space-3) 0;

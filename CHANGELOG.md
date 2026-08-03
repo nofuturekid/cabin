@@ -294,8 +294,12 @@ All notable changes to cabin are documented here. The format is based on
   `.field` and `.tag`. `form` is no longer a layout, so buttons are sized by
   their text instead of stretching across the page, and settings and ACME
   read as sections rather than one flat form. Both colour schemes are
-  complete, the rail collapses to a wrapping nav strip below 60rem, and the
-  current page is marked with `aria-current`. Two SIL OFL fonts are vendored
+  complete, the rail is sticky so it cannot scroll away and take the logout
+  button with it, it collapses to a wrapping nav strip below 60rem, and the
+  current page is marked with `aria-current`. Issuing and CSR signing are now two pages with two rail entries — the
+  choice of who holds the private key is the whole point of the difference,
+  and it was buried in the second half of one page (new `GET /certs/sign`;
+  the `POST` of the same path is unchanged). Two SIL OFL fonts are vendored
   (Public Sans and IBM Plex Mono, 57 KB of woff2 with their licences) — cabin
   still fetches nothing from a CDN. Verified by rendering all ten
   authenticated pages in headless Chrome with a 60-character common name and
