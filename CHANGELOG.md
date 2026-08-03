@@ -6,6 +6,14 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-03
+
+First release. cabin is an all-in-one internal certificate authority in one
+container: a web interface, a REST API, an RFC 8555 ACME server
+(http-01/dns-01/tls-alpn-01, external account binding), direct issuance and
+CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
+0001–0016.
+
 ### Added
 
 - Spec 0001 (foundation): project skeleton, config (flag > env > default),
