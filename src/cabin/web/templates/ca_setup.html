@@ -1,63 +1,79 @@
-{% extends "layout.html" %} {% block title %}CA Setup — cabin{% endblock %} {%
-block content %}
-<div class="card card-wide">
-  <h1>Set up your CA</h1>
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %}
+{% extends "layout.html" %}
+{% set nav_current = "ca" %}
+{% block title %}CA Setup — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Set up your CA</h1>
+    <p class="sub">Generate a new hierarchy, or bring one you already have.</p>
+  </div>
+</div>
 
-  <h2>Create a new CA</h2>
-  <p>Generates a root and intermediate certificate authority.</p>
-  <form method="post" action="/ca/create">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="name">CA name</label>
-    <input id="name" type="text" name="name" placeholder="cabin" required />
-    <label for="key_type">Key type</label>
-    <select id="key_type" name="key_type">
-      <option value="ecdsa-p256" selected>ECDSA P-256</option>
-      <option value="ecdsa-p384">ECDSA P-384</option>
-      <option value="rsa-4096">RSA 4096</option>
-      <option value="ed25519">Ed25519</option>
-    </select>
-    <label for="root_years">Root validity (years)</label>
-    <input
-      id="root_years"
-      type="number"
-      name="root_years"
-      min="1"
-      max="50"
-      value="20"
-      required
-    />
-    <label for="intermediate_years">Intermediate validity (years)</label>
-    <input
-      id="intermediate_years"
-      type="number"
-      name="intermediate_years"
-      min="1"
-      max="50"
-      value="10"
-      required
-    />
-    <button type="submit">Create CA</button>
-  </form>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
 
-  <h2>Import an existing CA</h2>
-  <p>
-    Import a signing CA certificate and private key (optionally
-    passphrase-protected), plus its parent/root certificate.
-  </p>
-  <form method="post" action="/ca/import">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="cert_pem">Signing CA certificate (PEM)</label>
-    <textarea id="cert_pem" name="cert_pem" rows="8" required></textarea>
-    <label for="key_pem">Signing CA private key (PEM)</label>
-    <textarea id="key_pem" name="key_pem" rows="8" required></textarea>
-    <label for="key_passphrase">Private key passphrase (if encrypted)</label>
-    <input id="key_passphrase" type="password" name="key_passphrase" />
-    <label for="chain_pem">Parent/root certificate (PEM)</label>
-    <textarea id="chain_pem" name="chain_pem" rows="8" required></textarea>
-    <button type="submit">Import CA</button>
-  </form>
+<div class="section">
+  <div>
+    <h2>Create a new CA</h2>
+    <p class="help">Generates a root and intermediate certificate authority.</p>
+  </div>
+  <div>
+    <form method="post" action="/ca/create">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="name">CA name</label>
+        <input id="name" type="text" name="name" placeholder="cabin" required />
+      </div>
+      <div class="field">
+        <label for="key_type">Key type</label>
+        <select id="key_type" name="key_type">
+          <option value="ecdsa-p256" selected>ECDSA P-256</option>
+          <option value="ecdsa-p384">ECDSA P-384</option>
+          <option value="rsa-4096">RSA 4096</option>
+          <option value="ed25519">Ed25519</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="root_years">Root validity (years)</label>
+        <input id="root_years" type="number" name="root_years" min="1" max="50" value="20" required />
+      </div>
+      <div class="field">
+        <label for="intermediate_years">Intermediate validity (years)</label>
+        <input id="intermediate_years" type="number" name="intermediate_years" min="1" max="50" value="10" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create CA</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Import an existing CA</h2>
+    <p class="help">
+      Import a signing CA certificate and private key (optionally
+      passphrase-protected), plus its parent/root certificate.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/ca/import">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="cert_pem">Signing CA certificate (PEM)</label>
+        <textarea id="cert_pem" name="cert_pem" rows="8" required></textarea>
+      </div>
+      <div class="field">
+        <label for="key_pem">Signing CA private key (PEM)</label>
+        <textarea id="key_pem" name="key_pem" rows="8" required></textarea>
+      </div>
+      <div class="field">
+        <label for="key_passphrase">Private key passphrase (if encrypted)</label>
+        <input id="key_passphrase" type="password" name="key_passphrase" />
+      </div>
+      <div class="field">
+        <label for="chain_pem">Parent/root certificate (PEM)</label>
+        <textarea id="chain_pem" name="chain_pem" rows="8" required></textarea>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Import CA</button></div>
+    </form>
+  </div>
 </div>
 {% endblock %}

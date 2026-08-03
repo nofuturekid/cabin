@@ -225,8 +225,8 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
     listing = client.get("/certs")
     assert listing.status_code == 200, listing.text
     assert "acme" in listing.text
-    assert listing.text.count("badge-source-acme") == 1
-    assert listing.text.count("badge-source-ui") == 1
+    assert listing.text.count("tag-source-acme") == 1
+    assert listing.text.count("tag-source-ui") == 1
 
     revoked = client.post(
         f"/certs/{cert_id}/revoke",

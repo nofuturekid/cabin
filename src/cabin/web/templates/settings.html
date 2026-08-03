@@ -1,125 +1,158 @@
-{% extends "layout.html" %} {% block title %}Settings — cabin{% endblock %} {%
-block content %}
-<div class="card">
-  <h1>Settings</h1>
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %}
-
-  <h2>Base URL</h2>
-  <p class="note">
-    The public address of this cabin instance, e.g.
-    <code>https://ca.example.org</code> — no trailing slash. Certificates issued
-    from now on point at <code>&lt;base URL&gt;/crl</code> so clients can find
-    the revocation list. Leave it empty to issue without a distribution point.
-  </p>
-  <form method="post" action="/settings">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="base_url">Base URL</label>
-    <input
-      id="base_url"
-      type="text"
-      name="base_url"
-      value="{{ base_url }}"
-      placeholder="https://ca.example.org"
-    />
-
-    <h2>Trust the reverse proxy</h2>
-    <p class="note">
-      Tick this only if cabin is reached exclusively through a reverse proxy you
-      control. The audit log then records the first address from the
-      <code>X-Forwarded-For</code> header instead of the address the request
-      arrived from. Without a proxy in front, anyone can send that header and
-      choose which IP the log blames.
-    </p>
-    <label class="checkbox">
-      <input id="trust_proxy" type="checkbox" name="trust_proxy" value="on" {{ "checked" if trust_proxy else "" }} />
-      Trust X-Forwarded-For from the proxy in front of cabin
-    </label>
-
-    <h2>ACME</h2>
-    <p class="note">
-      Let clients such as certbot or acme.sh request certificates from cabin
-      automatically. While this is off, every <code>/acme/…</code> address
-      answers as if it did not exist. Set a base URL above as well — that is
-      the address clients are given.
-    </p>
-    <label class="checkbox">
-      <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
-      Enable the ACME server
-    </label>
-    <p class="note">
-      The directory URL, external account keys and client setup snippets live
-      on the <a href="/acme/admin">ACME</a> page.
-    </p>
-
-    <h2>ACME validation</h2>
-    <p class="note">
-      To prove a name belongs to them, clients let cabin fetch a file over
-      HTTP, read a DNS record, or open a TLS connection — so an ACME order
-      decides where cabin connects. Cabin never connects to loopback,
-      link-local or multicast addresses; private addresses are the normal
-      case for an internal CA and are allowed unless you untick this.
-    </p>
-    <label class="checkbox">
-      <input id="allow_private_validation_targets" type="checkbox" name="allow_private_validation_targets" value="on" {{ "checked" if allow_private_validation_targets else "" }} />
-      Validate names that resolve to private addresses (192.168.x, 10.x, …)
-    </label>
-
-    <p class="note">
-      For <code>dns-01</code>, cabin asks this host's own resolver by default.
-      Name one or more resolvers here (IP addresses, comma-separated) if the
-      internal zone is only visible to a different one.
-    </p>
-    <label for="dns_resolvers">DNS resolvers</label>
-    <input
-      id="dns_resolvers"
-      type="text"
-      name="dns_resolvers"
-      value="{{ dns_resolvers }}"
-      placeholder="192.168.1.53, 10.0.0.53"
-    />
-
-    <h2>MCP</h2>
-    <p class="note">
-      Let an assistant such as Claude Code look at this CA and — with an admin
-      token — issue, sign and revoke certificates through it. While this is
-      off, <code>/mcp</code> answers as if it did not exist. Set a base URL
-      above as well; that is where clients connect.
-    </p>
-    <label class="checkbox">
-      <input id="mcp_enabled" type="checkbox" name="mcp_enabled" value="on" {{ "checked" if mcp_enabled else "" }} />
-      Enable the MCP server
-    </label>
-
-    <button type="submit">Save</button>
-  </form>
-  {% if base_url %}
-  <p class="note">CRL is served at <code>{{ base_url }}/crl</code>.</p>
-  {% endif %} {% if acme_enabled %} {% if acme_directory_url %}
-  <p class="note">
-    ACME directory: <code>{{ acme_directory_url }}</code> — hand this URL to
-    your client.
-  </p>
-  {% else %}
-  <p class="note">
-    ACME is enabled, but without a base URL there is no directory address to
-    hand out.
-  </p>
-  {% endif %} {% endif %} {% if mcp_enabled %} {% if mcp_url %}
-  <h2>MCP endpoint</h2>
-  <p class="note">
-    Every call needs an API token — create one under
-    <a href="/tokens">Tokens</a>. A viewer token may only look; issuing,
-    signing and revoking need an admin token.
-  </p>
-  <pre class="pem">claude mcp add --transport http cabin {{ mcp_url }} \
-  --header "Authorization: Bearer &lt;token&gt;"</pre>
-  {% else %}
-  <p class="note">
-    MCP is enabled, but without a base URL there is no endpoint address to
-    hand out.
-  </p>
-  {% endif %} {% endif %}
+{% extends "layout.html" %}
+{% set nav_current = "settings" %}
+{% block title %}Settings — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="sub">How this cabin is reached, and what it is allowed to do.</p>
+  </div>
 </div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<form method="post" action="/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+
+  <div class="section">
+    <div>
+      <h2>Base URL</h2>
+      <p class="help">
+        The public address of this cabin instance, e.g.
+        <code>https://ca.example.org</code> — no trailing slash. Certificates
+        issued from now on point at <code>&lt;base URL&gt;/crl</code> so clients
+        can find the revocation list. Leave it empty to issue without a
+        distribution point.
+      </p>
+    </div>
+    <div>
+      <div class="field">
+        <label for="base_url">Base URL</label>
+        <input id="base_url" type="text" name="base_url" value="{{ base_url }}" placeholder="https://ca.example.org" />
+      </div>
+      {% if base_url %}
+      <p class="note">CRL is served at <code>{{ base_url }}/crl</code>.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="section">
+    <div>
+      <h2>Trust the reverse proxy</h2>
+      <p class="help">
+        Tick this only if cabin is reached exclusively through a reverse proxy
+        you control. The audit log then records the first address from the
+        <code>X-Forwarded-For</code> header instead of the address the request
+        arrived from. Without a proxy in front, anyone can send that header and
+        choose which IP the log blames.
+      </p>
+    </div>
+    <div>
+      <label class="field-check">
+        <input id="trust_proxy" type="checkbox" name="trust_proxy" value="on" {{ "checked" if trust_proxy else "" }} />
+        Trust X-Forwarded-For from the proxy in front of cabin
+      </label>
+    </div>
+  </div>
+
+  <div class="section">
+    <div>
+      <h2>ACME</h2>
+      <p class="help">
+        Let clients such as certbot or acme.sh request certificates from cabin
+        automatically. While this is off, every <code>/acme/…</code> address
+        answers as if it did not exist. Set a base URL above as well — that is
+        the address clients are given.
+      </p>
+    </div>
+    <div>
+      <label class="field-check">
+        <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
+        Enable the ACME server
+      </label>
+      <p class="note">
+        The directory URL, external account keys and client setup snippets live
+        on the <a href="/acme/admin">ACME</a> page.
+      </p>
+      {% if acme_enabled %}
+      {% if acme_directory_url %}
+      <p class="note">
+        ACME directory: <code>{{ acme_directory_url }}</code> — hand this URL to
+        your client.
+      </p>
+      {% else %}
+      <p class="note">
+        ACME is enabled, but without a base URL there is no directory address to
+        hand out.
+      </p>
+      {% endif %}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="section">
+    <div>
+      <h2>ACME validation</h2>
+      <p class="help">
+        To prove a name belongs to them, clients let cabin fetch a file over
+        HTTP, read a DNS record, or open a TLS connection — so an ACME order
+        decides where cabin connects. Cabin never connects to loopback,
+        link-local or multicast addresses; private addresses are the normal
+        case for an internal CA and are allowed unless you untick this.
+      </p>
+    </div>
+    <div>
+      <label class="field-check">
+        <input id="allow_private_validation_targets" type="checkbox" name="allow_private_validation_targets" value="on" {{ "checked" if allow_private_validation_targets else "" }} />
+        Validate names that resolve to private addresses (192.168.x, 10.x, …)
+      </label>
+      <div class="field">
+        <label for="dns_resolvers">DNS resolvers</label>
+        <input id="dns_resolvers" type="text" name="dns_resolvers" value="{{ dns_resolvers }}" placeholder="192.168.1.53, 10.0.0.53" />
+        <span class="hint">
+          For <code>dns-01</code>, cabin asks this host's own resolver by
+          default. Name one or more resolvers here (IP addresses,
+          comma-separated) if the internal zone is only visible to a different
+          one.
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div>
+      <h2>MCP</h2>
+      <p class="help">
+        Let an assistant such as Claude Code look at this CA and — with an admin
+        token — issue, sign and revoke certificates through it. While this is
+        off, <code>/mcp</code> answers as if it did not exist. Set a base URL
+        above as well; that is where clients connect.
+      </p>
+    </div>
+    <div>
+      <label class="field-check">
+        <input id="mcp_enabled" type="checkbox" name="mcp_enabled" value="on" {{ "checked" if mcp_enabled else "" }} />
+        Enable the MCP server
+      </label>
+      {% if mcp_enabled %}
+      {% if mcp_url %}
+      <p class="note">
+        Every call needs an API token — create one under
+        <a href="/tokens">Tokens</a>. A viewer token may only look; issuing,
+        signing and revoking need an admin token.
+      </p>
+      <pre class="pem">claude mcp add --transport http cabin {{ mcp_url }} \
+  --header "Authorization: Bearer &lt;token&gt;"</pre>
+      {% else %}
+      <p class="note">
+        MCP is enabled, but without a base URL there is no endpoint address to
+        hand out.
+      </p>
+      {% endif %}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="actions"><button type="submit" class="primary">Save</button></div>
+</form>
 {% endblock %}

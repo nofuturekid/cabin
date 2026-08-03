@@ -67,7 +67,15 @@ SERIAL_CHARS = 8
 SAN_PREVIEW = 3
 
 
-def _new_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
+def _form_page(
+    request: Request,
+    user: User,
+    error: str | None,
+    template: str,
+    status_code: int = 200,
+) -> Response:
+    """The two ways to get a certificate are separate pages (spec 0015 FR-10)
+    but ask for the same things, so they share one context."""
     context = base_context(request, user)
     context.update(
         {
@@ -79,7 +87,15 @@ def _new_page(request: Request, user: User, error: str | None, status_code: int 
             "max_days": MAX_DAYS,
         }
     )
-    return templates.TemplateResponse(request, "certs_new.html", context, status_code=status_code)
+    return templates.TemplateResponse(request, template, context, status_code=status_code)
+
+
+def _new_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
+    return _form_page(request, user, error, "certs_new.html", status_code)
+
+
+def _sign_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
+    return _form_page(request, user, error, "certs_sign.html", status_code)
 
 
 def _cert_row(row: Certificate, now: datetime) -> dict[str, object]:
@@ -161,6 +177,16 @@ def certs_new(
     return _new_page(request, user, error)
 
 
+@router.get("/sign")
+def certs_sign_form(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    error = None if ca_service.get_ca(db) is not None else _NO_CA
+    return _sign_page(request, user, error)
+
+
 @router.post("/issue")
 def certs_issue(
     request: Request,
@@ -227,9 +253,9 @@ def certs_sign(
             crl_url=crl_service.distribution_url(db),
         )
     except IssueError as exc:
-        return _new_page(request, user, str(exc), status_code=400)
+        return _sign_page(request, user, str(exc), status_code=400)
     except CANotConfiguredError:
-        return _new_page(request, user, _NO_CA, status_code=400)
+        return _sign_page(request, user, _NO_CA, status_code=400)
     # The CSR itself is not recorded: it is bulky, and what it asked for is
     # already described by the certificate that came out of it (FR-3).
     audit.record(

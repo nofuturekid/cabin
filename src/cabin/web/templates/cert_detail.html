@@ -1,105 +1,128 @@
-{% extends "layout.html" %} {% block title %}{{ cert.subject_cn }} — cabin{%
-endblock %} {% block content %}
-<div class="card card-wide">
-  <h1>{{ cert.subject_cn or "(no subject)" }}</h1>
-  <table>
-    <tr>
-      <th>Serial</th>
-      <td>{{ cert.serial_hex }}</td>
-    </tr>
-    <tr>
-      <th>Profile</th>
-      <td>{{ cert.profile }}</td>
-    </tr>
-    <tr>
-      <th>SANs</th>
-      <td>{{ cert.sans | join(", ") }}</td>
-    </tr>
-    <tr>
-      <th>Valid from</th>
-      <td>{{ cert.not_before }}</td>
-    </tr>
-    <tr>
-      <th>Valid until</th>
-      <td>{{ cert.not_after }}</td>
-    </tr>
-    {% if revoked_at %}
-    <tr>
-      <th>Revoked</th>
-      <td>
-        {{ revoked_at }}
-        <span class="badge badge-revoked">{{ cert.revocation_reason }}</span>
-      </td>
-    </tr>
-    {% endif %}
-  </table>
-
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %} {% if can_revoke %}
-  <h2>Revoke</h2>
-  <p class="note">
-    Revoking publishes this certificate's serial on the CRL. It cannot be undone
-    — issue a replacement instead.
-  </p>
-  <form method="post" action="/certs/{{ cert.id }}/revoke">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="reason">Reason</label>
-    <select id="reason" name="reason">
-      {% for option in reasons %}
-      <option value="{{ option }}">{{ option }}</option>
-      {% endfor %}
-    </select>
-    <label class="checkbox">
-      <input type="checkbox" name="confirm" value="on" />
-      Yes, revoke this certificate
-    </label>
-    <button type="submit" class="danger">Revoke</button>
-  </form>
-  {% endif %}
-
-  <h2>Downloads</h2>
-  <p class="row-actions">
-    <a href="/certs/{{ cert.id }}/download/cert.pem">Certificate (PEM)</a>
-    <a href="/certs/{{ cert.id }}/download/chain.pem">Full chain (PEM)</a>
-    {% if can_download_key %}
-    <a href="/certs/{{ cert.id }}/download/key.pem">Private key (PEM)</a>
-    {% endif %}
-  </p>
-  {% if can_download_key %}
-  <h3>PKCS#12 bundle</h3>
-  <p class="note">
-    Certificate, private key and chain in one file, for import into Windows or
-    macOS. The password protects the file itself — pick one and keep it, cabin
-    does not store it.
-  </p>
-  <form method="post" action="/certs/{{ cert.id }}/download/bundle.p12">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="p12-password">Bundle password (at least 8 characters)</label>
-    <input
-      id="p12-password"
-      type="password"
-      name="password"
-      minlength="8"
-      required
-    />
-    <button type="submit">Download bundle</button>
-  </form>
-  {% endif %}
-
-  <h2>Certificate (PEM)</h2>
-  <pre class="pem">{{ cert.cert_pem }}</pre>
-
-  {% if key_error %}
-  <h2>Private key</h2>
-  <div class="error">{{ key_error }}</div>
-  {% endif %} {% if key_pem %}
-  <h2>Private key (PEM)</h2>
-  <p class="note">
-    Shown here; also stored encrypted in cabin's database, so you can come back
-    to this page for it.
-  </p>
-  <pre class="pem">{{ key_pem }}</pre>
-  {% endif %}
+{% extends "layout.html" %}
+{% set nav_current = "certs" %}
+{% block title %}{{ cert.subject_cn }} — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="sub"><a href="/certs">← Certificates</a></p>
+    <h1>{{ cert.subject_cn or "(no subject)" }}</h1>
+  </div>
 </div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="scroller">
+  <table>
+    <tbody>
+      <tr><th>Serial</th><td class="mono">{{ cert.serial_hex }}</td></tr>
+      <tr><th>Profile</th><td>{{ cert.profile }}</td></tr>
+      <tr><th>SANs</th><td>{{ cert.sans | join(", ") }}</td></tr>
+      <tr><th>Valid from</th><td class="nowrap">{{ cert.not_before }}</td></tr>
+      <tr><th>Valid until</th><td class="nowrap">{{ cert.not_after }}</td></tr>
+      {% if revoked_at %}
+      <tr>
+        <th>Revoked</th>
+        <td class="nowrap">
+          {{ revoked_at }} <span class="tag tag-revoked">{{ cert.revocation_reason }}</span>
+        </td>
+      </tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Downloads</h2>
+    <p class="help">The certificate on its own, or with everything it chains up to.</p>
+  </div>
+  <div>
+    <p class="row-actions">
+      <a href="/certs/{{ cert.id }}/download/cert.pem">Certificate (PEM)</a>
+      <a href="/certs/{{ cert.id }}/download/chain.pem">Full chain (PEM)</a>
+      {% if can_download_key %}
+      <a href="/certs/{{ cert.id }}/download/key.pem">Private key (PEM)</a>
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+{% if can_download_key %}
+<div class="section">
+  <div>
+    <h2>PKCS#12 bundle</h2>
+    <p class="help">
+      Certificate, private key and chain in one file, for import into Windows or
+      macOS. The password protects the file itself — pick one and keep it, cabin
+      does not store it.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/certs/{{ cert.id }}/download/bundle.p12">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="p12-password">Bundle password (at least 8 characters)</label>
+        <input id="p12-password" type="password" name="password" minlength="8" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Download bundle</button></div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if can_revoke %}
+<div class="section">
+  <div>
+    <h2>Revoke</h2>
+    <p class="help">
+      Revoking publishes this certificate's serial on the CRL. It cannot be undone
+      — issue a replacement instead.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/certs/{{ cert.id }}/revoke">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="reason">Reason</label>
+        <select id="reason" name="reason">
+          {% for option in reasons %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+        </select>
+      </div>
+      <label class="field-check">
+        <input type="checkbox" name="confirm" value="on" />
+        Yes, revoke this certificate
+      </label>
+      <div class="actions"><button type="submit" class="danger">Revoke</button></div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<div class="section">
+  <div>
+    <h2>Certificate (PEM)</h2>
+    <p class="help">The issued certificate itself.</p>
+  </div>
+  <div><pre class="pem">{{ cert.cert_pem }}</pre></div>
+</div>
+
+{% if key_error %}
+<div class="section">
+  <div><h2>Private key</h2></div>
+  <div><div class="error">{{ key_error }}</div></div>
+</div>
+{% endif %}
+
+{% if key_pem %}
+<div class="section">
+  <div>
+    <h2>Private key (PEM)</h2>
+    <p class="help">
+      Shown here; also stored encrypted in cabin's database, so you can come back
+      to this page for it.
+    </p>
+  </div>
+  <div><pre class="pem">{{ key_pem }}</pre></div>
+</div>
+{% endif %}
 {% endblock %}

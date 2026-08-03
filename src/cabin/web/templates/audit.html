@@ -1,29 +1,31 @@
-{% extends "layout.html" %} {% block title %}Audit — cabin{% endblock %} {%
-block content %}
-<div class="card card-wide">
-  <h1>Audit log</h1>
+{% extends "layout.html" %}
+{% set nav_current = "audit" %}
+{% block title %}Audit — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Audit log</h1>
+    <p class="sub">What happened, who did it and where from.</p>
+  </div>
+</div>
 
-  <form method="get" action="/audit" class="filters">
-    <input
-      type="search"
-      name="q"
-      value="{{ q }}"
-      placeholder="actor, action or summary"
-    />
-    <select name="action">
-      {% for option in actions %}
-      <option value="{{ option }}" {{ "selected" if option == action else "" }}>{{ option }}</option>
-      {% endfor %}
-    </select>
-    <select name="actor_kind">
-      {% for option in actor_kinds %}
-      <option value="{{ option }}" {{ "selected" if option == actor_kind else "" }}>{{ option }}</option>
-      {% endfor %}
-    </select>
-    <button type="submit" class="secondary">Filter</button>
-  </form>
+<form method="get" action="/audit" class="filters">
+  <input type="search" name="q" value="{{ q }}" placeholder="actor, action or summary" />
+  <select name="action">
+    {% for option in actions %}
+    <option value="{{ option }}" {{ "selected" if option == action else "" }}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  <select name="actor_kind">
+    {% for option in actor_kinds %}
+    <option value="{{ option }}" {{ "selected" if option == actor_kind else "" }}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Filter</button>
+</form>
 
-  {% if events %}
+{% if events %}
+<div class="scroller">
   <table>
     <thead>
       <tr>
@@ -37,10 +39,9 @@ block content %}
     <tbody>
       {% for event in events %}
       <tr>
-        <td>{{ event.occurred_at }}</td>
-        <td>
-          {{ event.actor_label }}
-          <span class="badge">{{ event.actor_kind }}</span>
+        <td class="nowrap">{{ event.occurred_at }}</td>
+        <td class="nowrap">
+          {{ event.actor_label }} <span class="tag">{{ event.actor_kind }}</span>
         </td>
         <td><code>{{ event.action }}</code></td>
         <td>
@@ -48,19 +49,22 @@ block content %}
           <a href="/certs/{{ event.cert_id }}">{{ event.summary }}</a>
           {% else %}{{ event.summary }}{% endif %}
         </td>
-        <td>{{ event.ip }}</td>
+        <td class="mono nowrap">{{ event.ip }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+</div>
 
-  <p class="note">{{ total }} event(s) — page {{ page }} of {{ pages }}</p>
-  {% else %}
-  <p class="note">No events match.</p>
-  {% endif %}
-  <p class="pager">
-    {% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %} {% if
-    next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}
-  </p>
+{% else %}
+<p class="note">No events match.</p>
+{% endif %}
+
+<div class="meta">
+  <span>{% if events %}{{ total }} event(s) — page {{ page }} of {{ pages }}{% endif %}</span>
+  <span class="pager">
+    {% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %}
+    {% if next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}
+  </span>
 </div>
 {% endblock %}

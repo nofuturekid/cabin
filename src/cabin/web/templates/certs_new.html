@@ -1,99 +1,68 @@
-{% extends "layout.html" %} {% block title %}Issue — cabin{% endblock %} {%
-block content %}
-<div class="card card-wide">
-  <h1>Issue a certificate</h1>
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %}
+{% extends "layout.html" %}
+{% set nav_current = "issue" %}
+{% block title %}Issue — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Issue a certificate</h1>
+    <p class="sub">
+      cabin generates the private key and shows it once the certificate is issued.
+      To keep the key on the machine that needs it, <a href="/certs/sign">sign a CSR</a>
+      instead.
+    </p>
+  </div>
+</div>
 
-  <p>
-    cabin generates the private key and shows it once the certificate is issued.
-  </p>
-  <form method="post" action="/certs/issue">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="subject_cn">Common name</label>
-    <input
-      id="subject_cn"
-      type="text"
-      name="subject_cn"
-      placeholder="nas.lan"
-      required
-    />
-    <label for="sans"
-      >Subject alternative names (one per line; <code>dns:</code>,
-      <code>ip:</code> and <code>email:</code> prefixes optional, bare entries
-      are detected. Empty falls back to the common name. Internationalized
-      names must be entered as A-labels, i.e. punycode such as
-      <code>xn--mnchen-3ya.lan</code>.)</label
-    >
-    <textarea
-      id="sans"
-      name="sans"
-      rows="4"
-      placeholder="nas.lan&#10;10.0.0.5"
-    ></textarea>
-    <label for="profile">Profile (server = serverAuth, client = clientAuth)</label>
-    <select id="profile" name="profile">
-      {% for profile in profiles %}
-      <option value="{{ profile }}" {% if loop.first %}selected{% endif %}>
-        {{ profile }}
-      </option>
-      {% endfor %}
-    </select>
-    <label for="key_type">Key type</label>
-    <select id="key_type" name="key_type">
-      {% for key_type in key_types %}
-      <option value="{{ key_type }}" {% if loop.first %}selected{% endif %}>
-        {{ key_type }}
-      </option>
-      {% endfor %}
-    </select>
-    <label for="days">Validity (days)</label>
-    <input
-      id="days"
-      type="number"
-      name="days"
-      min="{{ min_days }}"
-      max="{{ max_days }}"
-      value="{{ default_days }}"
-      required
-    />
-    <button type="submit">Issue certificate</button>
-  </form>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
 
-  <h2>Sign a CSR</h2>
-  <p>
-    Paste a certificate signing request from another system; its private key
-    never leaves that system. Only the CSR's public key, common name and SANs
-    are used — any other extension it requests is ignored.
-  </p>
-  <form method="post" action="/certs/sign">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="csr_pem">Certificate signing request (PEM)</label>
-    <textarea id="csr_pem" name="csr_pem" rows="8" required></textarea>
-    <label for="sign_profile">Profile (server = serverAuth, client = clientAuth)</label>
-    <select id="sign_profile" name="profile">
-      {% for profile in profiles %}
-      <option value="{{ profile }}" {% if loop.first %}selected{% endif %}>
-        {{ profile }}
-      </option>
-      {% endfor %}
-    </select>
-    <label for="sans_override"
-      >SAN override (one per line; leave empty to keep the CSR's SANs)</label
-    >
-    <textarea id="sans_override" name="sans_override" rows="3"></textarea>
-    <label for="sign_days">Validity (days)</label>
-    <input
-      id="sign_days"
-      type="number"
-      name="days"
-      min="{{ min_days }}"
-      max="{{ max_days }}"
-      value="{{ default_days }}"
-      required
-    />
-    <button type="submit">Sign CSR</button>
-  </form>
+<div class="section">
+  <div>
+    <h2>Subject</h2>
+    <p class="help">
+      What the certificate is for. The common name is what most tools show; the
+      subject alternative names are what they actually verify against.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/certs/issue">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="subject_cn">Common name</label>
+        <input id="subject_cn" type="text" name="subject_cn" placeholder="nas.lan" required />
+      </div>
+      <div class="field">
+        <label for="sans">Subject alternative names</label>
+        <textarea id="sans" name="sans" rows="4" placeholder="nas.lan&#10;10.0.0.5"></textarea>
+        <span class="hint">
+          One per line; <code>dns:</code>, <code>ip:</code> and <code>email:</code>
+          prefixes optional, bare entries are detected. Empty falls back to the
+          common name. Internationalized names must be entered as A-labels, i.e.
+          punycode such as <code>xn--mnchen-3ya.lan</code>.
+        </span>
+      </div>
+      <div class="field">
+        <label for="profile">Profile</label>
+        <select id="profile" name="profile">
+          {% for profile in profiles %}
+          <option value="{{ profile }}" {% if loop.first %}selected{% endif %}>{{ profile }}</option>
+          {% endfor %}
+        </select>
+        <span class="hint">server = serverAuth, client = clientAuth</span>
+      </div>
+      <div class="field">
+        <label for="key_type">Key type</label>
+        <select id="key_type" name="key_type">
+          {% for key_type in key_types %}
+          <option value="{{ key_type }}" {% if loop.first %}selected{% endif %}>{{ key_type }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="days">Validity (days)</label>
+        <input id="days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ default_days }}" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Issue certificate</button></div>
+    </form>
+  </div>
 </div>
 {% endblock %}

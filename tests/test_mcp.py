@@ -605,8 +605,8 @@ def test_mcp_issue_sets_source_mcp(mcp: TestClient, cfg: Config) -> None:
     _login(mcp)
     listing = mcp.get("/certs")
     assert listing.status_code == 200, listing.text
-    assert listing.text.count("badge-source-mcp") == 2
-    assert "badge-source-ui" not in listing.text
+    assert listing.text.count("tag-source-mcp") == 2
+    assert "tag-source-ui" not in listing.text
 
 
 # --- FR-3 / AC-5: CSR signing --------------------------------------------------

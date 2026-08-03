@@ -1,26 +1,34 @@
-{% extends "layout.html" %} {% block title %}API tokens — cabin{% endblock %} {%
-block content %}
-<div class="card card-wide">
-  <h1>API tokens</h1>
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %} {% if secret %}
-  <div class="card">
-    <h2>New token</h2>
-    <p class="note">
-      Copy it now: this is the only time the secret is shown. cabin stores just
-      a hash of it and cannot show it again — if it is lost, revoke the token
-      and create a new one.
-    </p>
-    <pre class="pem">{{ secret }}</pre>
-    <p class="note">
-      Use it as <code>Authorization: Bearer &lt;token&gt;</code> against
-      <code>/api/v1</code>. The API is documented at
-      <a href="/api/v1/docs">/api/v1/docs</a>.
-    </p>
+{% extends "layout.html" %}
+{% set nav_current = "tokens" %}
+{% block title %}API tokens — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>API tokens</h1>
+    <p class="sub">Bearer tokens for <code>/api/v1</code> and the MCP server.</p>
   </div>
-  {% endif %}
+</div>
 
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+{% if secret %}
+<div class="callout">
+  <h2>New token</h2>
+  <p class="note">
+    Copy it now: this is the only time the secret is shown. cabin stores just
+    a hash of it and cannot show it again — if it is lost, revoke the token
+    and create a new one.
+  </p>
+  <pre class="pem">{{ secret }}</pre>
+  <p class="note">
+    Use it as <code>Authorization: Bearer &lt;token&gt;</code> against
+    <code>/api/v1</code>. The API is documented at
+    <a href="/api/v1/docs">/api/v1/docs</a>.
+  </p>
+</div>
+{% endif %}
+
+<div class="scroller">
   <table>
     <thead>
       <tr>
@@ -37,13 +45,11 @@ block content %}
       {% for token in tokens %}
       <tr>
         <td>{{ token.label }}</td>
-        <td>{{ token.role }}</td>
-        <td>
-          <span class="badge badge-{{ token.status }}">{{ token.status }}</span>
-        </td>
-        <td>{{ token.created_at }}</td>
-        <td>{{ token.last_used_at }}</td>
-        <td>{{ token.expires_at }}</td>
+        <td><span class="tag">{{ token.role }}</span></td>
+        <td><span class="tag tag-{{ token.status }}">{{ token.status }}</span></td>
+        <td class="nowrap">{{ token.created_at }}</td>
+        <td class="nowrap">{{ token.last_used_at }}</td>
+        <td class="nowrap">{{ token.expires_at }}</td>
         <td class="row-actions">
           {% if token.can_revoke %}
           <form method="post" action="/tokens/{{ token.id }}/revoke">
@@ -56,32 +62,35 @@ block content %}
       {% endfor %}
     </tbody>
   </table>
+</div>
 
-  <h2>Create a token</h2>
-  <p class="note">
-    The token carries a role of its own — give a script the least it needs.
-    Viewer tokens can only read; admin tokens can issue, sign and revoke.
-  </p>
-  <form method="post" action="/tokens">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="label">Label</label>
-    <input
-      id="label"
-      type="text"
-      name="label"
-      maxlength="100"
-      placeholder="ansible on nas.lan"
-      required
-    />
-    <label for="role">Role</label>
-    <select id="role" name="role">
-      {% for r in roles %}
-      <option value="{{ r.value }}">{{ r.value }}</option>
-      {% endfor %}
-    </select>
-    <label for="expires_at">Expires (optional)</label>
-    <input id="expires_at" type="date" name="expires_at" />
-    <button type="submit">Create token</button>
-  </form>
+<div class="section">
+  <div>
+    <h2>Create a token</h2>
+    <p class="help">
+      The token carries a role of its own — give a script the least it needs.
+      Viewer tokens can only read; admin tokens can issue, sign and revoke.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/tokens">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="label">Label</label>
+        <input id="label" type="text" name="label" maxlength="100" placeholder="ansible on nas.lan" required />
+      </div>
+      <div class="field">
+        <label for="role">Role</label>
+        <select id="role" name="role">
+          {% for r in roles %}<option value="{{ r.value }}">{{ r.value }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="expires_at">Expires (optional)</label>
+        <input id="expires_at" type="date" name="expires_at" />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create token</button></div>
+    </form>
+  </div>
 </div>
 {% endblock %}

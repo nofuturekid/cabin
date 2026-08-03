@@ -1,19 +1,52 @@
-/* cabin — base design tokens and layout. No business logic here. */
+/* cabin — design tokens, page chrome and layout primitives. No business logic
+   here: templates compose .rail/.scroller/.section/.field/.tag, they do not
+   invent widths of their own. */
+
+@font-face {
+  font-family: "Public Sans";
+  src: url("/static/fonts/PublicSans.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/static/fonts/IBMPlexMono.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/static/fonts/IBMPlexMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
-  --color-bg: #f7f8fa;
-  --color-surface: #ffffff;
-  --color-border: #dde1e6;
-  --color-text: #1b1f24;
-  --color-text-muted: #5b6470;
-  --color-accent: #2f6feb;
-  --color-accent-contrast: #ffffff;
-  --color-danger: #c0342c;
-  --color-danger-bg: #fbeae9;
-  --color-warn: #8a6100;
-  --color-warn-bg: #fdf3d7;
-  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --radius: 6px;
+  --bg: #f2f3f4;
+  --panel: #ffffff;
+  --panel-2: #f7f8f9;
+  --line: #e0e3e6;
+  --line-strong: #c8ced4;
+  --text: #191d21;
+  --dim: #5a636d;
+  --faint: #838d98;
+  --accent: #8a5a09;
+  --accent-bg: #8a5a09;
+  --accent-ink: #ffffff;
+  --ok: #1f6b3c;
+  --warn: #8a5a09;
+  --bad: #a52c22;
+  --bad-bg: #a52c22;
+  --bad-ink: #ffffff;
+
+  --sans: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+  --radius: 4px;
+  --rail: 15rem;
+  --pad: 1.75rem;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 1rem;
@@ -22,17 +55,22 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-bg: #14171a;
-    --color-surface: #1c2024;
-    --color-border: #333a42;
-    --color-text: #e7e9ec;
-    --color-text-muted: #9aa4af;
-    --color-accent: #6b9bfa;
-    --color-accent-contrast: #0b1220;
-    --color-danger: #f28b82;
-    --color-danger-bg: #3a2020;
-    --color-warn: #f0c36d;
-    --color-warn-bg: #3a2f16;
+    --bg: #101418;
+    --panel: #161b21;
+    --panel-2: #1b2129;
+    --line: #262e37;
+    --line-strong: #38424e;
+    --text: #e4e8ed;
+    --dim: #8b96a3;
+    --faint: #5d6773;
+    --accent: #d9a441;
+    --accent-bg: #d9a441;
+    --accent-ink: #1a1204;
+    --ok: #5fb37a;
+    --warn: #d9a441;
+    --bad: #e0705f;
+    --bad-bg: #b8483a;
+    --bad-ink: #ffffff;
   }
 }
 
@@ -40,153 +78,443 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
-  font-family: var(--font-sans);
-  background: var(--color-bg);
-  color: var(--color-text);
+  /* Serials, key ids and base URLs have no natural break opportunity; without
+     this they are painted straight through their container's border. */
+  overflow-wrap: break-word;
 }
 
-.app-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface);
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 400 15px/1.5 var(--sans);
 }
 
-.app-header .brand {
-  font-weight: 600;
+/* Authenticated pages: rail + content. minmax(0,1fr) lets the content column
+   shrink below its content's intrinsic width, which is what keeps a wide
+   table inside .scroller instead of pushing the page sideways. */
+body.with-rail {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  min-height: 100vh;
 }
 
-.app-header nav {
-  display: flex;
-  gap: var(--space-3);
-}
+/* ---- navigation rail ---- */
 
-.app-header nav a {
-  color: var(--color-text-muted);
-  text-decoration: none;
-}
-
-.app-header nav a:hover {
-  color: var(--color-text);
-}
-
-.app-header .spacer {
-  flex: 1;
-}
-
-main {
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: var(--space-4);
-}
-
-.card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: var(--space-4);
-  max-width: 24rem;
-  margin: var(--space-4) auto;
-}
-
-.card-wide {
-  max-width: 48rem;
-}
-
-form {
+/* The rail stays put while the content scrolls: on a long page — a
+   certificate with its PEM blocks, a full audit log — a rail that scrolled
+   away would take the logout button and every other destination with it.
+   align-self keeps the grid from stretching it, which sticky needs. */
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: var(--pad) 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
 }
 
-label {
-  font-size: 0.875rem;
-  color: var(--color-text-muted);
+.rail .brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--pad) var(--space-4);
+  font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: 0.02em;
 }
+
+.rail .brand b {
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.rail .brand .version {
+  color: var(--faint);
+  font-size: 0.72rem;
+}
+
+.rail nav {
+  display: flex;
+  flex-direction: column;
+}
+
+.rail .nav-group {
+  padding: 1.25rem var(--pad) var(--space-1);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.rail nav a {
+  color: var(--dim);
+  text-decoration: none;
+  padding: var(--space-1) var(--pad);
+  border-left: 2px solid transparent;
+  font-size: 0.9rem;
+}
+
+.rail nav a:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.rail nav a[aria-current] {
+  color: var(--text);
+  border-left-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.rail .rail-foot {
+  margin-top: auto;
+  padding: var(--space-3) var(--pad) 0;
+  border-top: 1px solid var(--line);
+  font-size: 0.8rem;
+  color: var(--dim);
+}
+
+.rail .rail-foot form {
+  margin-top: var(--space-2);
+}
+
+/* ---- content ---- */
+
+main {
+  min-width: 0;
+  padding: var(--pad) clamp(1rem, 3vw, 2.5rem) 4rem;
+}
+
+/* Login and setup render without a rail: one centred column. */
+.card-narrow {
+  max-width: 24rem;
+  margin: 3rem auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line-strong);
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 2rem 0 var(--space-2);
+}
+
+h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+.sub {
+  color: var(--dim);
+  font-size: 0.85rem;
+  margin: var(--space-1) 0 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.note {
+  color: var(--dim);
+  font-size: 0.85rem;
+  max-width: 60ch;
+}
+
+.error {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  color: var(--bad);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.875rem;
+  margin: var(--space-3) 0;
+}
+
+/* ---- controls ---- */
 
 input,
 select,
 textarea {
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-bg);
-  color: var(--color-text);
   font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 0.45rem 0.6rem;
+  max-width: 100%;
 }
 
 textarea {
-  font-family: ui-monospace, monospace;
+  font-family: var(--mono);
+  font-size: 0.85rem;
   resize: vertical;
 }
 
 button {
-  padding: var(--space-2) var(--space-3);
-  border: none;
-  border-radius: var(--radius);
-  background: var(--color-accent);
-  color: var(--color-accent-contrast);
   font: inherit;
   cursor: pointer;
+  border-radius: var(--radius);
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-2);
+  color: var(--text);
 }
 
-button.secondary {
-  background: transparent;
-  border: 1px solid var(--color-border);
-  color: var(--color-text);
+button:hover {
+  border-color: var(--faint);
+}
+
+button.primary {
+  background: var(--accent-bg);
+  border-color: var(--accent-bg);
+  color: var(--accent-ink);
+  font-weight: 600;
 }
 
 button.danger {
-  background: var(--color-danger);
+  background: var(--bad-bg);
+  border-color: var(--bad-bg);
+  color: var(--bad-ink);
 }
 
-.error {
-  background: var(--color-danger-bg);
-  color: var(--color-danger);
+/* The old stylesheet made every form a flex column, which stretched buttons
+   to the full width and gave headings the same gap as fields. Layout is now
+   .field and .actions; the form element itself is not a layout. */
+.field {
+  display: grid;
+  gap: var(--space-1);
+  max-width: 34rem;
+  margin-bottom: var(--space-3);
+}
+
+.field label {
+  font-size: 0.8rem;
+  color: var(--dim);
+}
+
+.field .hint {
+  font-size: 0.78rem;
+  color: var(--faint);
+}
+
+.field-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: 60ch;
+  margin-bottom: var(--space-3);
+  font-size: 0.9rem;
+}
+
+.field-check input {
+  margin-top: 0.2rem;
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+}
+
+/* A link that acts as the page's main action. Anchors cannot contain buttons,
+   so the link carries the button's look itself. */
+.button-link {
+  display: inline-block;
+  text-decoration: none;
   border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
-  font-size: 0.875rem;
+  padding: 0.45rem 0.85rem;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-bg);
+  color: var(--accent-ink);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+/* Something shown exactly once and never again — a token, an HMAC key. */
+.callout {
+  margin: var(--space-4) 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+}
+
+.callout h2 {
+  margin-top: 0;
+}
+
+.filters {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: var(--space-4) 0 var(--space-3);
+}
+
+.filters input[type="search"] {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- sections (a heading plus its explanation, then its controls) ---- */
+
+.section {
+  margin-top: 2.5rem;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
+  gap: var(--space-3) 2.5rem;
+}
+
+/* The page head already draws a rule; a section right below it would draw a
+   second one a few pixels later. */
+.page-head + .section,
+.page-head + form > .section:first-of-type {
+  border-top: 0;
+  margin-top: var(--space-4);
+}
+
+.section > div:first-child h2 {
+  margin: 0;
+}
+
+.section .help {
+  color: var(--dim);
+  font-size: 0.85rem;
+  margin: var(--space-1) 0 0;
+}
+
+/* ---- tables ---- */
+
+/* The only element allowed to scroll sideways. */
+.scroller {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-}
-
-th,
-td {
-  text-align: left;
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.pem {
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: var(--space-3);
-  font-family: ui-monospace, monospace;
-  font-size: 0.8rem;
-  overflow-x: auto;
-}
-
-.note {
-  color: var(--color-text-muted);
   font-size: 0.875rem;
 }
 
-.filters {
-  flex-direction: row;
-  align-items: center;
-  margin-bottom: var(--space-3);
+thead th {
+  text-align: left;
+  background: var(--panel-2);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  font-weight: 500;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
 }
 
-.filters input[type="search"] {
-  flex: 1;
+tbody td,
+tbody th {
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  text-align: left;
+}
+
+tbody th {
+  font-weight: 500;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+tbody tr:last-child td,
+tbody tr:last-child th {
+  border-bottom: 0;
+}
+
+tbody tr:hover td {
+  background: var(--panel-2);
+}
+
+td a,
+th a {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+td a:hover,
+th a:hover {
+  border-bottom-color: var(--accent);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--dim);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.sans-list {
+  color: var(--dim);
+  font-size: 0.8rem;
+  max-width: 20rem;
+}
+
+.sans-list span {
+  display: block;
+}
+
+.sans-list .more {
+  color: var(--faint);
+}
+
+.meta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+  color: var(--faint);
+  font-size: 0.8rem;
 }
 
 .pager {
@@ -194,49 +522,120 @@ td {
   gap: var(--space-3);
 }
 
-.badge {
-  display: inline-block;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-}
-
-.badge-expiring {
-  background: var(--color-warn-bg);
-  border-color: var(--color-warn);
-  color: var(--color-warn);
-}
-
-.badge-expired,
-.badge-revoked,
-.badge-eab-revoked {
-  background: var(--color-danger-bg);
-  border-color: var(--color-danger);
-  color: var(--color-danger);
-}
-
-/* Where a certificate came from, and whether an EAB key is still spendable:
-   both are neutral facts, so neither gets an alarm colour. */
-.badge-source-acme,
-.badge-eab-bound {
-  background: var(--color-surface-alt, transparent);
-}
-
 .row-actions {
   display: flex;
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
-.row-actions form {
-  flex-direction: row;
-  gap: var(--space-1);
+/* ---- status tags ---- */
+
+.tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 2px;
+  border: 1px solid var(--line-strong);
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* Status values map to three roles. A tag whose value has no rule here —
+   a role, an actor kind, where a certificate came from — stays neutral on
+   purpose: those are facts, not alarms. */
+.tag-valid,
+.tag-active,
+.tag-bound {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+.tag-expiring {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.tag-expired,
+.tag-revoked {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+}
+
+/* ---- code and PEM ---- */
+
+code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+pre.pem {
+  margin: var(--space-2) 0;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.8rem;
+  overflow-x: auto;
+  color: var(--dim);
 }
 
 footer {
-  text-align: center;
-  color: var(--color-text-muted);
+  color: var(--faint);
   font-size: 0.8rem;
-  padding: var(--space-4);
+  padding: var(--space-4) 0 0;
+}
+
+@media (max-width: 60rem) {
+  body.with-rail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Stacked above the content, the rail is short and scrolls away with it. */
+  .rail {
+    position: static;
+    height: auto;
+    overflow-y: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: var(--space-3) 0;
+  }
+
+  .rail .brand {
+    padding-bottom: var(--space-2);
+  }
+
+  .rail nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    padding: 0 var(--pad);
+  }
+
+  .rail .nav-group {
+    display: none;
+  }
+
+  .rail nav a {
+    padding: 0.3rem 0.5rem;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .rail nav a[aria-current] {
+    border-left: 0;
+    border-bottom-color: var(--accent);
+  }
+
+  .rail .rail-foot {
+    margin-top: var(--space-3);
+    padding-top: var(--space-2);
+  }
+
+  .section {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
