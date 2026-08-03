@@ -47,7 +47,7 @@ def test_healthz_ok(tmp_path: Path) -> None:
     The container build stamps the release version into the wheel it installs
     (`ARG VERSION` -> `uv version`), so `importlib.metadata` is the single
     source of truth -- there is no environment override that could let
-    /healthz and the UI footer drift apart, and a plain source checkout
+    /healthz and the UI drift apart, and a plain source checkout
     reports what pyproject.toml declares.
     """
     declared = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())

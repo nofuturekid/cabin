@@ -1,11 +1,15 @@
-{% extends "layout.html" %} {% block title %}Dashboard — cabin{% endblock %} {%
-block content %}
-<div class="card">
-  <h1>Dashboard</h1>
-  <p>Logged in as <strong>{{ user.username }}</strong> ({{ user.role }}).</p>
-  {% if not ca_configured %}
-  <p class="error"><a href="/ca">CA: not set up</a></p>
-  {% endif %}
-  <p>cabin version {{ version }}.</p>
+{% extends "layout.html" %}
+{% set nav_current = "dashboard" %}
+{% block title %}Dashboard — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="sub">Logged in as {{ user.username }} ({{ user.role }}).</p>
+  </div>
 </div>
+{% if not ca_configured %}
+<div class="error"><a href="/ca">CA: not set up</a></div>
+{% endif %}
+<p class="note">cabin version {{ version }}.</p>
 {% endblock %}

@@ -73,10 +73,12 @@ asset wiring for the two vendored fonts.
   content column can shrink below its content's intrinsic width.
 - FR-5: Cells opt into their treatment: `.mono` for identifiers (serial, key
   id, account id), `.nowrap` for dates and short enumerations, `.sans-list`
-  for the SAN column (one name per line, capped at 26rem). Status badges
-  become `.tag` with the modifiers `ok` / `warn` / `bad`, replacing
-  `.badge-*`; the mapping from status to modifier lives in the template, as
-  the badge class does today.
+  for the SAN column (one name per line, capped at 20rem). `.badge-*` becomes
+  `.tag`, keeping the value in the class name — `tag-valid`, `tag-revoked`,
+  `tag-source-acme` — so a value can still be styled and asserted on
+  individually. The stylesheet maps those values onto three roles (ok / warn /
+  bad); a value with no rule stays neutral, which is what "where did this come
+  from" and "which role" should be.
 - FR-6: Forms stop being the layout. `form` is no longer a flex column;
   labelled inputs are wrapped in `.field` (a grid of label + control, max
   34rem) and buttons sit in `.actions`, so a button is sized by its text.
@@ -125,10 +127,16 @@ test_layout_has_rail_and_main, test_nav_current_marked_once_per_page,
 test_nav_entries_still_role_gated, test_every_table_is_wrapped_in_scroller,
 test_no_template_uses_card_or_badge_classes,
 test_every_content_template_sets_nav_current, test_login_and_setup_use_narrow,
-test_fonts_served_with_woff2_content_type, test_css_has_no_external_urls,
+test_fonts_served_with_woff2_content_type,
+test_fonts_are_vendored_with_their_licences, test_css_has_no_external_urls,
 test_css_defines_dark_counterpart_for_every_token,
-test_no_horizontal_overflow_at_1440 (headless Chrome, all pages),
-test_no_horizontal_overflow_at_390 (headless Chrome, all pages)
+test_no_horizontal_overflow[1440-1150] and [390-900] (headless Chrome, all
+ten pages, skipped where Chrome is absent)
+
+The existing suite carries the rest: the badge assertions in
+`test_web_certs_inventory`, `test_web_acme_ui` and `test_mcp` are renamed to
+the `tag-*` classes, and `test_list_page_absurd_page_is_empty_not_an_error`
+keeps the pager outside the empty-state branch.
 
 ## Out of Scope
 

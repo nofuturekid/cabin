@@ -199,8 +199,8 @@ def test_list_page_shows_certificates(client: TestClient, cfg: Config) -> None:
     assert "printer.lan" in resp.text
     assert "10.0.0.5" in resp.text  # SANs are visible without opening a row
     assert 'href="/certs"' in resp.text  # FR-6: nav entry
-    assert "badge-valid" in resp.text  # FR-1: expiry status per row
-    assert "badge-expired" not in resp.text
+    assert "tag-valid" in resp.text  # FR-1: expiry status per row
+    assert "tag-expired" not in resp.text
     # FR-1: an expiry an operator can read at a glance, not a raw timestamp
     assert " UTC" in resp.text
     assert "+00:00" not in resp.text
@@ -287,7 +287,7 @@ def test_inventory_revoked_badge_and_filter(client: TestClient, cfg: Config) -> 
 
     listing = client.get("/certs")
     assert listing.status_code == 200
-    assert "badge-revoked" in listing.text
+    assert "tag-revoked" in listing.text
     assert 'value="revoked"' in listing.text  # the filter offers it
 
     only_revoked = client.get("/certs", params={"status": "revoked"})

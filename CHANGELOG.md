@@ -281,3 +281,24 @@ All notable changes to cabin are documented here. The format is based on
   the 0600 `secret.key` it created. README rewritten around what cabin is,
   what it can do, the two ways to install it, the five environment variables
   and what to back up.
+- Spec 0015 (ui-layout): the page chrome is rebuilt around one layout. The UI
+  had three competing content widths (`main` 60rem, `.card` 24rem,
+  `.card-wide` 48rem), so settings rendered at half the width of the
+  inventory; tables had no scroll container, so `/certs` drew its last three
+  columns 275px outside the card and off the screen; serials, key ids and
+  base URLs had no break opportunity and were painted through their
+  container's border; and nothing was responsive. Pages now compose from a
+  grouped navigation rail plus a content column that uses the window, and
+  from four primitives — `.scroller` (the only element allowed to scroll
+  sideways), `.section` (a heading and its explanation beside its controls),
+  `.field` and `.tag`. `form` is no longer a layout, so buttons are sized by
+  their text instead of stretching across the page, and settings and ACME
+  read as sections rather than one flat form. Both colour schemes are
+  complete, the rail collapses to a wrapping nav strip below 60rem, and the
+  current page is marked with `aria-current`. Two SIL OFL fonts are vendored
+  (Public Sans and IBM Plex Mono, 57 KB of woff2 with their licences) — cabin
+  still fetches nothing from a CDN. Verified by rendering all ten
+  authenticated pages in headless Chrome with a 60-character common name and
+  five SANs and measuring every element against its container at 1440px and
+  390px; the same probe reports the pre-0015 pages as broken, which is what
+  makes the green result mean anything.

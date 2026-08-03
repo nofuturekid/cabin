@@ -1,65 +1,86 @@
-{% extends "layout.html" %} {% block title %}ACME — cabin{% endblock %} {% block
-content %}
-<div class="card card-wide">
-  <h1>ACME</h1>
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %}
-
-  <p class="note">
-    Clients such as certbot and acme.sh can request certificates from cabin on
-    their own: they prove they control a name, and cabin issues for it. While
-    the server is off, every <code>/acme/…</code> address answers as if it did
-    not exist.
-  </p>
-
-  <form method="post" action="/acme/admin">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label class="checkbox">
-      <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
-      Enable the ACME server
-    </label>
-    <label class="checkbox">
-      <input id="acme_require_eab" type="checkbox" name="acme_require_eab" value="on" {{ "checked" if acme_require_eab else "" }} />
-      Require external account binding (clients must present a key below)
-    </label>
-    <button type="submit">Save</button>
-  </form>
-  <p class="note">
-    The base URL and the validation settings live on
-    <a href="/settings">Settings</a>; the switch above is the same one.
-  </p>
-
-  <h2>Directory URL</h2>
-  {% if acme_directory_url %}
-  <p class="note">Hand this address to a client — it is all it needs to start.</p>
-  <pre class="pem">{{ acme_directory_url }}</pre>
-  {% else %}
-  <p class="note">
-    No base URL is set, so there is no directory address to hand out. Set one
-    under <a href="/settings">Settings</a> first.
-  </p>
-  {% endif %} {% if secret %}
-  <div class="card">
-    <h2>New external account key</h2>
-    <p class="note">
-      Copy the HMAC key now: this is the only time it is shown. cabin stores it
-      encrypted and cannot show it again — if it is lost, revoke this key and
-      create another.
-    </p>
-    <p>Key ID</p>
-    <pre class="pem">{{ secret_key_id }}</pre>
-    <p>HMAC key (base64url)</p>
-    <pre class="pem">{{ secret }}</pre>
+{% extends "layout.html" %}
+{% set nav_current = "acme" %}
+{% block title %}ACME — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>ACME</h1>
+    <p class="sub">Let clients request certificates on their own.</p>
   </div>
-  {% endif %}
+</div>
 
-  <h2>External account keys</h2>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="section">
+  <div>
+    <h2>Server</h2>
+    <p class="help">
+      Clients such as certbot and acme.sh can request certificates from cabin on
+      their own: they prove they control a name, and cabin issues for it. While
+      the server is off, every <code>/acme/…</code> address answers as if it did
+      not exist.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/acme/admin">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label class="field-check">
+        <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
+        Enable the ACME server
+      </label>
+      <label class="field-check">
+        <input id="acme_require_eab" type="checkbox" name="acme_require_eab" value="on" {{ "checked" if acme_require_eab else "" }} />
+        Require external account binding (clients must present a key below)
+      </label>
+      <div class="actions"><button type="submit" class="primary">Save</button></div>
+    </form>
+    <p class="note">
+      The base URL and the validation settings live on
+      <a href="/settings">Settings</a>; the switch above is the same one.
+    </p>
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Directory URL</h2>
+    <p class="help">Hand this address to a client — it is all it needs to start.</p>
+  </div>
+  <div>
+    {% if acme_directory_url %}
+    <pre class="pem">{{ acme_directory_url }}</pre>
+    {% else %}
+    <p class="note">
+      No base URL is set, so there is no directory address to hand out. Set one
+      under <a href="/settings">Settings</a> first.
+    </p>
+    {% endif %}
+  </div>
+</div>
+
+{% if secret %}
+<div class="callout">
+  <h2>New external account key</h2>
   <p class="note">
-    One key, one account: once a client has registered with it, it cannot be
-    used again. Create one per host you want to let in.
+    Copy the HMAC key now: this is the only time it is shown. cabin stores it
+    encrypted and cannot show it again — if it is lost, revoke this key and
+    create another.
   </p>
-  {% if keys %}
+  <p class="note">Key ID</p>
+  <pre class="pem">{{ secret_key_id }}</pre>
+  <p class="note">HMAC key (base64url)</p>
+  <pre class="pem">{{ secret }}</pre>
+</div>
+{% endif %}
+
+<h2>External account keys</h2>
+<p class="note">
+  One key, one account: once a client has registered with it, it cannot be
+  used again. Create one per host you want to let in.
+</p>
+
+{% if keys %}
+<div class="scroller">
   <table>
     <thead>
       <tr>
@@ -75,15 +96,15 @@ content %}
       {% for key in keys %}
       <tr>
         <td>{{ key.label }}</td>
-        <td><code>{{ key.id }}</code></td>
+        <td class="mono">{{ key.id }}</td>
+        <td><span class="tag tag-{{ key.status }}">{{ key.status }}</span></td>
         <td>
-          <span class="badge badge-eab-{{ key.status }}">{{ key.status }}</span>
+          {% if key.bound_account_id %}
+          <span class="mono">{{ key.bound_account_id }}</span>
+          <span class="nowrap">({{ key.bound_at }})</span>
+          {% else %}—{% endif %}
         </td>
-        <td>
-          {% if key.bound_account_id %}<code>{{ key.bound_account_id }}</code>
-          ({{ key.bound_at }}){% else %}—{% endif %}
-        </td>
-        <td>{{ key.created_at }}</td>
+        <td class="nowrap">{{ key.created_at }}</td>
         <td class="row-actions">
           {% if key.can_revoke %}
           <form method="post" action="/acme/admin/eab-keys/{{ key.id }}/revoke">
@@ -96,48 +117,55 @@ content %}
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
-  <p class="note">No external account keys yet.</p>
-  {% endif %}
+</div>
+{% else %}
+<p class="note">No external account keys yet.</p>
+{% endif %}
 
-  <h3>Create a key</h3>
-  <form method="post" action="/acme/admin/eab-keys">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="label">Label</label>
-    <input
-      id="label"
-      type="text"
-      name="label"
-      maxlength="100"
-      placeholder="nas.lan"
-      required
-    />
-    <button type="submit">Create key</button>
-  </form>
+<div class="section">
+  <div>
+    <h2>Create a key</h2>
+    <p class="help">One key per host you want to let in.</p>
+  </div>
+  <div>
+    <form method="post" action="/acme/admin/eab-keys">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="label">Label</label>
+        <input id="label" type="text" name="label" maxlength="100" placeholder="nas.lan" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create key</button></div>
+    </form>
+  </div>
+</div>
 
-  <h2>Client setup</h2>
-  <p class="note">
-    The <code>--eab-*</code> flags are only needed while external account
-    binding is required; without it, drop those two lines.
-  </p>
-
-  <h3>certbot</h3>
-  <pre class="pem">certbot certonly --standalone \
+<div class="section">
+  <div>
+    <h2>Client setup</h2>
+    <p class="help">
+      The <code>--eab-*</code> flags are only needed while external account
+      binding is required; without it, drop those two lines.
+    </p>
+  </div>
+  <div>
+    <h3>certbot</h3>
+    <pre class="pem">certbot certonly --standalone \
   --server {{ snippet_directory }} \
   --eab-kid {{ snippet_kid }} \
   --eab-hmac-key {{ snippet_hmac }} \
   -d nas.lan</pre>
 
-  <h3>acme.sh</h3>
-  <pre class="pem">acme.sh --register-account \
+    <h3>acme.sh</h3>
+    <pre class="pem">acme.sh --register-account \
   --server {{ snippet_directory }} \
   --eab-kid {{ snippet_kid }} \
   --eab-hmac-key {{ snippet_hmac }}
 acme.sh --issue --standalone --server {{ snippet_directory }} -d nas.lan</pre>
 
-  <p class="note">
-    cabin's root certificate has to be in the trust store of whatever will
-    talk to the issued certificate — download it from <a href="/ca">CA</a>.
-  </p>
+    <p class="note">
+      cabin's root certificate has to be in the trust store of whatever will
+      talk to the issued certificate — download it from <a href="/ca">CA</a>.
+    </p>
+  </div>
 </div>
 {% endblock %}

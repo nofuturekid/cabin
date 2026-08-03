@@ -1,27 +1,31 @@
-{% extends "layout.html" %} {% block title %}Users — cabin{% endblock %} {%
-block content %}
-<div class="card card-wide">
-  <h1>Users</h1>
-  {% if error %}
-  <div class="error">{{ error }}</div>
-  {% endif %}
+{% extends "layout.html" %}
+{% set nav_current = "users" %}
+{% block title %}Users — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Users</h1>
+    <p class="sub">Who can sign in to this cabin, and what they may do.</p>
+  </div>
+</div>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="scroller">
   <table>
     <thead>
       <tr>
         <th>Username</th>
         <th>Role</th>
         <th>Created</th>
-        {% if can_manage %}
-        <th>Actions</th>
-        {% endif %}
+        {% if can_manage %}<th>Actions</th>{% endif %}
       </tr>
     </thead>
     <tbody>
       {% for row in users %}
       <tr>
         <td>{{ row.username }}</td>
-        <td>{{ row.role }}</td>
-        <td>{{ row.created_at }}</td>
+        <td><span class="tag">{{ row.role }}</span></td>
+        <td class="nowrap">{{ row.created_at }}</td>
         {% if can_manage %}
         <td class="row-actions">
           <form method="post" action="/users/{{ row.id }}/role">
@@ -31,18 +35,12 @@ block content %}
               <option value="{{ r.value }}" {{ "selected" if r.value == row.role else "" }}>{{ r.value }}</option>
               {% endfor %}
             </select>
-            <button type="submit" class="secondary">Set role</button>
+            <button type="submit">Set role</button>
           </form>
           <form method="post" action="/users/{{ row.id }}/password">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <input
-              type="password"
-              name="password"
-              minlength="12"
-              placeholder="new password"
-              required
-            />
-            <button type="submit" class="secondary">Reset password</button>
+            <input type="password" name="password" minlength="12" placeholder="new password" required />
+            <button type="submit">Reset password</button>
           </form>
           <form method="post" action="/users/{{ row.id }}/delete">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -54,29 +52,34 @@ block content %}
       {% endfor %}
     </tbody>
   </table>
-
-  {% if can_manage %}
-  <h2>Add user</h2>
-  <form method="post" action="/users">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label for="new-username">Username</label>
-    <input id="new-username" type="text" name="username" required />
-    <label for="new-password">Password</label>
-    <input
-      id="new-password"
-      type="password"
-      name="password"
-      minlength="12"
-      required
-    />
-    <label for="new-role">Role</label>
-    <select id="new-role" name="role">
-      {% for r in roles %}
-      <option value="{{ r.value }}">{{ r.value }}</option>
-      {% endfor %}
-    </select>
-    <button type="submit">Create user</button>
-  </form>
-  {% endif %}
 </div>
+
+{% if can_manage %}
+<div class="section">
+  <div>
+    <h2>Add user</h2>
+    <p class="help">Passwords are at least 12 characters and stored with argon2.</p>
+  </div>
+  <div>
+    <form method="post" action="/users">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="new-username">Username</label>
+        <input id="new-username" type="text" name="username" required />
+      </div>
+      <div class="field">
+        <label for="new-password">Password</label>
+        <input id="new-password" type="password" name="password" minlength="12" required />
+      </div>
+      <div class="field">
+        <label for="new-role">Role</label>
+        <select id="new-role" name="role">
+          {% for r in roles %}<option value="{{ r.value }}">{{ r.value }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create user</button></div>
+    </form>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
