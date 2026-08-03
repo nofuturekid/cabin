@@ -306,3 +306,18 @@ All notable changes to cabin are documented here. The format is based on
   five SANs and measuring every element against its container at 1440px and
   390px; the same probe reports the pre-0015 pages as broken, which is what
   makes the green result mean anything.
+- Spec 0016 (dashboard): `/` stops being the stub spec 0003 called it and
+  becomes the page an operator opens first. Four counts (valid / expiring /
+  expired / revoked), each linking to the inventory filtered to it and backed
+  by a new `status_counts` that runs the *same* filters the inventory runs, so
+  a tile and the page behind it cannot disagree. The certificates expiring
+  within 30 days, soonest first. The CA's own expiry — flagged a year ahead,
+  because replacing an intermediate means touching every trust store it lives
+  in, and nothing surfaced that before. Whether the published CRL is still
+  inside its validity window, which is the difference between clients seeing a
+  revocation and clients silently trusting a revoked certificate. Which
+  services are on, for the roles that may see `/settings` — the dashboard
+  aggregates pages with different roles attached and keeps each one, so it
+  cannot become a way around authorisation. And the last five audit entries.
+  No new table, no background job, no new dependency: every figure is read
+  from what the database already holds, off one clock taken per request.

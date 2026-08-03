@@ -63,12 +63,14 @@ number is something the operator could already have found by hand.
   clients hold is then stale and revocations are not reaching them. Also shows
   the distribution URL, or says that none is published because no base URL is
   set. When no CRL has been generated yet, says that instead.
-- FR-6: **Services.** Whether ACME and MCP are enabled and whether a base URL
-  is set, with an explicit warning for the combination "enabled but no base
-  URL", which is the one that silently does not work. **This section is
-  rendered only for roles that may see `/settings`** — the same
-  `nav.settings` flag the rail uses. A viewer must not learn the
-  configuration from the dashboard that they are refused on the settings page.
+- FR-6: **Services.** Whether ACME and MCP are enabled, and the base URL they
+  depend on. No "enabled but no base URL" warning: spec 0010 FR-5 and spec
+  0013 FR-4 already refuse to store that combination, so the state cannot
+  exist and a warning for it would be code that never runs. The section says
+  so instead. **It is rendered only for roles that may see `/settings`** —
+  the same `nav.settings` flag the rail uses. A viewer must not learn the
+  configuration from the dashboard that they are refused on the settings
+  page.
 - FR-7: **Recent activity.** The five newest audit events (actor, action,
   summary, time) via the existing `audit.list_events(db, page=1, per_page=5)`,
   linking to `/audit`. Shown to any authenticated user, because `/audit` is
@@ -98,8 +100,10 @@ number is something the operator could already have found by hand.
   state, not the MCP state, not the base URL — while an admin's does. A viewer
   still sees expiring certificates, the counts, the CA expiry and recent
   activity.
-- AC-7: With ACME enabled and no base URL, the services section warns; with
-  both set, it does not.
+- AC-7: `POST /settings` with ACME enabled and an empty base URL is rejected
+  with 400 and stores nothing, so the dashboard cannot show that combination.
+  With both set, the services section reports ACME as enabled and shows the
+  URL.
 - AC-8: With no CA configured, `/` shows the setup prompt and none of the
   sections, and does not raise.
 - AC-9: `status_counts` agrees with `list_certificates` for every status at
@@ -111,10 +115,11 @@ test_dashboard_lists_expiring_soonest_first,
 test_dashboard_counts_match_inventory, test_status_counts_boundary_30d,
 test_status_counts_agree_with_list_certificates,
 test_dashboard_caps_expiring_list_at_ten,
-test_dashboard_empty_expiring_says_so, test_dashboard_ca_expiry_warning,
-test_dashboard_ca_expired_is_danger, test_dashboard_crl_stale_is_danger,
+test_dashboard_empty_expiring_says_so, test_dashboard_ca_expiry_is_shown,
+test_dashboard_ca_expiry_warns_within_a_year,
+test_dashboard_ca_far_out_is_not_warned, test_dashboard_crl_stale_is_danger,
 test_dashboard_crl_absent_says_so, test_dashboard_hides_services_from_viewer,
-test_dashboard_warns_acme_enabled_without_base_url,
+test_settings_refuses_acme_without_base_url_so_dashboard_cannot_show_it,
 test_dashboard_without_ca_shows_setup_prompt,
 test_dashboard_recent_activity_lists_five
 

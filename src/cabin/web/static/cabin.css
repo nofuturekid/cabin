@@ -545,6 +545,7 @@ th a:hover {
 /* Status values map to three roles. A tag whose value has no rule here —
    a role, an actor kind, where a certificate came from — stays neutral on
    purpose: those are facts, not alarms. */
+.tag-ok,
 .tag-valid,
 .tag-active,
 .tag-bound {
@@ -552,11 +553,13 @@ th a:hover {
   border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
+.tag-warn,
 .tag-expiring {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 45%, transparent);
 }
 
+.tag-bad,
 .tag-expired,
 .tag-revoked {
   color: var(--bad);
@@ -638,4 +641,36 @@ footer {
   .section {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ---- dashboard tiles ---- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+  padding: var(--space-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--text);
+}
+
+.tile:hover {
+  border-color: var(--line-strong);
+}
+
+.tile-count {
+  font-size: 1.75rem;
+  font-weight: 600;
+  line-height: 1;
 }
