@@ -5,11 +5,203 @@
 <div class="page-head">
   <div>
     <h1>Dashboard</h1>
-    <p class="sub">Logged in as {{ user.username }} ({{ user.role }}).</p>
+    <p class="sub">What needs attention, and what happened last.</p>
   </div>
 </div>
+
 {% if not ca_configured %}
 <div class="error"><a href="/ca">CA: not set up</a></div>
+<p class="note">
+  Create or import a certificate authority and this page will summarise it.
+</p>
+{% else %}
+
+<div class="tiles">
+  {% for name, count in [("valid", counts.valid), ("expiring", counts.expiring),
+                         ("expired", counts.expired), ("revoked", counts.revoked)] %}
+  <a class="tile" href="/certs?status={{ name }}">
+    <span class="tile-count">{{ count }}</span>
+    <span class="tile-label tag tag-{{ name }}">{{ name }}</span>
+  </a>
+  {% endfor %}
+</div>
+
+<div class="section">
+  <div>
+    <h2>Expiring soon</h2>
+    <p class="help">
+      Certificates whose validity ends within the next 30 days, soonest first.
+    </p>
+  </div>
+  <div>
+    {% if expiring %}
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr>
+            <th>Common name</th>
+            <th>SANs</th>
+            <th>Expires</th>
+            <th>Days left</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for cert in expiring %}
+          <tr>
+            <td><a href="/certs/{{ cert.id }}">{{ cert.subject_cn or "(no subject)" }}</a></td>
+            <td class="nowrap">{{ cert.sans }}</td>
+            <td class="nowrap">{{ cert.not_after }}</td>
+            <td class="nowrap"><span class="tag tag-expiring">{{ cert.days }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if expiring_more %}
+    <p class="note"><a href="/certs?status=expiring">See all expiring certificates</a></p>
+    {% endif %}
+    {% else %}
+    <p class="note">Nothing expires in the next 30 days.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>The CA itself</h2>
+    <p class="help">
+      Replacing a CA means touching every trust store it is installed in, so
+      its expiry is flagged a year ahead.
+    </p>
+  </div>
+  <div>
+    <div class="scroller">
+      <table>
+        <tbody>
+          {% for ca in ca_certs %}
+          <tr>
+            <th>{{ ca.kind | capitalize }}</th>
+            <td class="nowrap">{{ ca.not_after }}</td>
+            <td class="nowrap">
+              <span class="tag {{ ca.tag }}">
+                {% if ca.days <= 0 %}expired{% else %}{{ ca.days }} days{% endif %}
+              </span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Revocation</h2>
+    <p class="help">
+      Clients only learn about a revocation if the CRL they fetch is still
+      inside its validity window.
+    </p>
+  </div>
+  <div>
+    {% if crl %}
+    <div class="scroller">
+      <table>
+        <tbody>
+          <tr><th>CRL number</th><td class="mono">{{ crl.number }}</td></tr>
+          <tr><th>Generated</th><td class="nowrap">{{ crl.generated_at }}</td></tr>
+          <tr>
+            <th>Next update</th>
+            <td class="nowrap">
+              {{ crl.next_update }}
+              {% if crl.stale %}<span class="tag tag-bad">stale</span>{% endif %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    {% if crl.stale %}
+    <p class="note">
+      This CRL is past its next update, so clients holding it no longer see
+      recent revocations. It is rebuilt on the next revocation or restart.
+    </p>
+    {% endif %}
+    {% else %}
+    <p class="note">No CRL has been generated yet — nothing has been revoked.</p>
+    {% endif %}
+    {% if crl_url %}
+    <p class="note">Published at <code>{{ crl_url }}</code>.</p>
+    {% else %}
+    <p class="note">
+      No base URL is set, so no distribution point is published and newly
+      issued certificates do not point at one.
+    </p>
+    {% endif %}
+  </div>
+</div>
+
+{% if services %}
+<div class="section">
+  <div>
+    <h2>Services</h2>
+    <p class="help">What this cabin exposes beyond the web interface.</p>
+  </div>
+  <div>
+    <div class="scroller">
+      <table>
+        <tbody>
+          <tr>
+            <th>ACME</th>
+            <td>
+              <span class="tag {{ 'tag-active' if services.acme else '' }}">
+                {{ "enabled" if services.acme else "off" }}
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>MCP</th>
+            <td>
+              <span class="tag {{ 'tag-active' if services.mcp else '' }}">
+                {{ "enabled" if services.mcp else "off" }}
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>Base URL</th>
+            <td class="mono">{{ services.base_url or "—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Both need a base URL, and settings refuses to enable either without one
+      — so an enabled service here always has an address to hand out.
+    </p>
+  </div>
+</div>
 {% endif %}
-<p class="note">cabin version {{ version }}.</p>
+
+<div class="section">
+  <div>
+    <h2>Recent activity</h2>
+    <p class="help">The last five entries of the <a href="/audit">audit log</a>.</p>
+  </div>
+  <div>
+    <div class="scroller">
+      <table>
+        <tbody>
+          {% for event in events %}
+          <tr>
+            <td class="nowrap">{{ event.occurred_at }}</td>
+            <td class="nowrap">{{ event.actor_label }}</td>
+            <td><code>{{ event.action }}</code></td>
+            <td>{{ event.summary }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endblock %}

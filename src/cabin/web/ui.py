@@ -5,17 +5,23 @@ Server-rendered Jinja2 + plain form posts (FR-6/FR-7). All routes except
 user exists.
 """
 
+import json
 import threading
+from datetime import UTC, datetime
 
+from cryptography import x509
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import audit, sessions, users
+from cabin import audit, sessions, settings, users
 from cabin.audit import Actor, ActorKind, AuditAction
+from cabin.ca import certs as certs_service
+from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
+from cabin.ca.service import CACertificate
 from cabin.users import (
     InvalidCredentialsError,
     LastSuperadminError,
@@ -40,6 +46,13 @@ from cabin.web.deps import (
 )
 
 router = APIRouter()
+
+#: How many expiring certificates the dashboard lists before deferring to the
+#: inventory, and how many audit events it shows (spec 0016 FR-2/FR-7).
+EXPIRING_SHOWN = 10
+RECENT_EVENTS = 5
+#: A CA replacement needs planning, so its warning starts a year out (FR-4).
+CA_WARN_DAYS = 365
 
 require_superadmin = require_role(Role.superadmin)
 
@@ -205,14 +218,106 @@ def logout(
 # --- dashboard ---------------------------------------------------------------
 
 
+def _days_until(moment: datetime) -> int:
+    """Whole days from now until ``moment``, negative once it is past."""
+    return (moment - datetime.now(UTC)).days
+
+
+def _ca_expiry(row: CACertificate, now: datetime) -> dict[str, object]:
+    """One CA certificate as the dashboard states it (spec 0016 FR-4)."""
+    cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    not_after = cert.not_valid_after_utc
+    days = (not_after - now).days
+    return {
+        "kind": row.kind,
+        "not_after": not_after.replace(microsecond=0).isoformat(),
+        "days": days,
+        # Replacing a CA is not a five-minute job, so the warning comes a
+        # year out rather than at the 30 days a leaf gets.
+        "tag": "tag-bad" if days <= 0 else ("tag-warn" if days <= CA_WARN_DAYS else ""),
+    }
+
+
 @router.get("/")
 def dashboard(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
+    """FR-1: what an operator needs to see first — what expires, whether
+    revocation is being published, and what happened last.
+
+    One clock is taken here and passed to every figure on the page, so a
+    count, a badge and a "days remaining" on the same render cannot straddle
+    a tick (FR-8, the rule spec 0006 set for the inventory).
+    """
+    now = datetime.now(UTC)
+    hierarchy = ca_service.get_ca(db)
     context = base_context(request, user)
-    context["ca_configured"] = ca_service.get_ca(db) is not None
+    context["ca_configured"] = hierarchy is not None
+    if hierarchy is None:
+        # Nothing to summarise before there is a CA (AC-8).
+        return templates.TemplateResponse(request, "dashboard.html", context)
+
+    expiring = certs_service.expiring_soon(db, now, limit=EXPIRING_SHOWN)
+    counts = certs_service.status_counts(db, now)
+    crl_state = crl_service.stored_crl(db)
+    events, _ = audit.list_events(db, page=1, per_page=RECENT_EVENTS)
+    context.update(
+        {
+            "expiring": [
+                {
+                    "id": row.id,
+                    "subject_cn": row.subject_cn,
+                    "sans": len(json.loads(row.sans_json or "[]")),
+                    "not_after": row.not_after,
+                    "days": _days_until(datetime.fromisoformat(row.not_after)),
+                }
+                for row in expiring
+            ],
+            "expiring_more": counts["expiring"] > len(expiring),
+            "counts": counts,
+            "ca_certs": [
+                _ca_expiry(hierarchy.intermediate, now),
+                _ca_expiry(hierarchy.root, now),
+            ],
+            "crl": (
+                {
+                    "number": crl_state.crl_number,
+                    "generated_at": crl_state.generated_at.replace(
+                        tzinfo=UTC, microsecond=0
+                    ).isoformat(),
+                    "next_update": crl_state.next_update.replace(microsecond=0).isoformat(),
+                    "stale": crl_state.next_update <= now,
+                }
+                if crl_state is not None
+                else None
+            ),
+            "crl_url": crl_service.distribution_url(db),
+            "events": [
+                {
+                    "occurred_at": event.occurred_at,
+                    "actor_label": event.actor_label,
+                    "action": event.action,
+                    "summary": event.summary,
+                }
+                for event in events
+            ],
+        }
+    )
+    # FR-6: the services section repeats what /settings says, so it keeps
+    # /settings' role. Aggregating must not hand a viewer configuration they
+    # are refused one page over.
+    may_see_settings = bool(context["nav"]["settings"])  # type: ignore[index]
+    context["services"] = (
+        {
+            "base_url": settings.get_setting(db, settings.BASE_URL) or "",
+            "acme": settings.get_flag(db, settings.ACME_ENABLED),
+            "mcp": settings.get_flag(db, settings.MCP_ENABLED),
+        }
+        if may_see_settings
+        else None
+    )
     return templates.TemplateResponse(request, "dashboard.html", context)
 
 

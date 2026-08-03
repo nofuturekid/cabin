@@ -396,3 +396,43 @@ def list_certificates(
         .offset((page - 1) * per_page)
     ).all()
     return list(rows), total
+
+
+def status_counts(db: Session, now: datetime | None = None) -> dict[str, int]:
+    """How many certificates are in each state at ``now`` (spec 0016 FR-3).
+
+    Every count runs the same :func:`_filters` the inventory runs, so a
+    dashboard tile and the page it links to cannot disagree -- the alternative,
+    a second expression of "what expiring means", is exactly the kind of
+    duplicate that drifts.
+    """
+    moment = now or datetime.now(UTC)
+    return {
+        status.value: db.scalar(
+            select(sa.func.count()).select_from(Certificate).where(*_filters("", status, moment))
+        )
+        or 0
+        for status in (
+            CertStatus.valid,
+            CertStatus.expiring,
+            CertStatus.expired,
+            CertStatus.revoked,
+        )
+    }
+
+
+def expiring_soon(db: Session, now: datetime | None = None, limit: int = 10) -> list[Certificate]:
+    """The certificates about to lapse, soonest first (FR-2).
+
+    Ordered by expiry rather than by creation, which is what the inventory
+    does: on this page the question is what runs out next, not what was made
+    last.
+    """
+    moment = now or datetime.now(UTC)
+    rows = db.scalars(
+        select(Certificate)
+        .where(*_filters("", CertStatus.expiring, moment))
+        .order_by(Certificate.not_after.asc(), Certificate.id.asc())
+        .limit(limit)
+    ).all()
+    return list(rows)
