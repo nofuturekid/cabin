@@ -327,7 +327,16 @@ def create_order(
 ) -> AcmeOrder:
     """One order, one authorization per identifier, and the challenges that
     could prove it -- written in a single transaction, so a client never sees
-    an order whose authorizations are still being built."""
+    an order whose authorizations are still being built.
+
+    The ``db.flush()`` calls below are load-bearing, not cleanup: order,
+    authorization and challenge are plain ``ForeignKey`` columns with no
+    ``relationship()`` between them, so the unit of work has no dependency
+    edge telling it a child must be inserted after its parent -- it is free
+    to emit the INSERT statements in whatever order the identity map happens
+    to iterate. Flushing the parent before constructing its children forces
+    the correct order deterministically instead of by accident.
+    """
     moment = now or datetime.now(UTC)
     order = AcmeOrder(
         id=new_id(),
@@ -340,6 +349,7 @@ def create_order(
         created_at=_iso(moment),
     )
     db.add(order)
+    db.flush()
     for identifier in identifiers:
         authz = AcmeAuthorization(
             id=new_id(),
@@ -351,6 +361,7 @@ def create_order(
             wildcard=identifier.wildcard,
         )
         db.add(authz)
+        db.flush()
         for challenge_type in challenge_types_for(identifier):
             db.add(
                 AcmeChallenge(

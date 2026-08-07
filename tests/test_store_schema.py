@@ -16,6 +16,7 @@ from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from cabin.ca.certs import Certificate
 from cabin.store import create_session_factory, run_migrations
 
 
@@ -72,3 +73,67 @@ def test_certificate_without_issuer_is_rejected_by_the_database(db: Session) -> 
             )
         )
         db.commit()
+
+
+def test_orm_session_rejects_a_certificate_with_no_such_issuer(db: Session) -> None:
+    """SQLite ignores every ``FOREIGN KEY`` in the schema unless
+    ``PRAGMA foreign_keys=ON`` is set on the connection actually in use, and
+    that pragma is not on by default. This goes red if
+    ``create_session_factory``'s ``connect`` listener (``cabin/store/
+    __init__.py``) is ever removed: the row below is well-formed and would
+    silently insert. Uses the ORM session the application actually issues
+    certificates through -- a raw ``sqlite3`` connection would prove nothing
+    about *this* pragma state, since it is set per connection.
+    """
+    db.add(
+        Certificate(
+            issuer_id=99999,  # no ca_certificates row has this id
+            serial_hex="ab12",
+            subject_cn="orphan.lan",
+            sans_json="[]",
+            profile="server",
+            not_before="2026-01-01T00:00:00+00:00",
+            not_after="2027-01-01T00:00:00+00:00",
+            cert_pem="stub",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+
+
+def test_foreign_keys_enforced_on_a_second_pooled_connection(tmp_path: Path) -> None:
+    """The pragma is set per connection, not per database, so a listener
+    wired to only the pool's first ``connect`` event would leave every later
+    connection unenforced. Keeping ``first`` open across an execute forces
+    SQLAlchemy's ``QueuePool`` to hand ``second`` a genuinely new DBAPI
+    connection rather than reuse the first one -- exactly the connection a
+    once-only listener would miss.
+    """
+    db_url = f"sqlite:///{tmp_path}/cabin.db"
+    run_migrations(db_url)
+    factory = create_session_factory(db_url)
+
+    first = factory()
+    try:
+        first.execute(sa.text("SELECT 1"))  # checks out the pool's first connection
+
+        second = factory()
+        try:
+            second.add(
+                Certificate(
+                    issuer_id=99999,
+                    serial_hex="cd34",
+                    subject_cn="orphan2.lan",
+                    sans_json="[]",
+                    profile="server",
+                    not_before="2026-01-01T00:00:00+00:00",
+                    not_after="2027-01-01T00:00:00+00:00",
+                    cert_pem="stub",
+                )
+            )
+            with pytest.raises(IntegrityError):
+                second.commit()
+        finally:
+            second.close()
+    finally:
+        first.close()
