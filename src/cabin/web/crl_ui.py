@@ -11,15 +11,15 @@ dependency, not middleware, so it does not apply here).
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
 from cabin.ca import crl as crl_service
 from cabin.ca.crl import CRL_MAX_AGE
 from cabin.ca.service import CACertificate, CANotConfiguredError, UnknownIssuerError, get_ca
-from cabin.secrets import SecretsError
-from cabin.web.deps import get_db
+from cabin.secrets import SecretsError, SecretStore
+from cabin.web.deps import get_db, get_secrets
 
 router = APIRouter()
 
@@ -45,10 +45,10 @@ def _intermediate_or_404(db: Session, issuer_id: int) -> CACertificate:
     return row
 
 
-def _current_der(request: Request, db: Session, issuer_id: int) -> bytes:
+def _current_der(secrets: SecretStore, db: Session, issuer_id: int) -> bytes:
     _intermediate_or_404(db, issuer_id)
     try:
-        return crl_service.current_crl(db, request.app.state.secrets, issuer_id).crl_der
+        return crl_service.current_crl(db, secrets, issuer_id).crl_der
     except (CANotConfiguredError, SecretsError) as exc:
         # The signing key is unusable -- wrong master key, a damaged sealed
         # column, or (CANotConfiguredError) no key stored for this issuer at
@@ -62,17 +62,25 @@ def _current_der(request: Request, db: Session, issuer_id: int) -> bytes:
 
 
 @router.get("/crl/{issuer_id:int}")
-def crl_der(issuer_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+def crl_der(
+    issuer_id: int,
+    db: Session = Depends(get_db),
+    secrets: SecretStore = Depends(get_secrets),
+) -> Response:
     return Response(
-        content=_current_der(request, db, issuer_id),
+        content=_current_der(secrets, db, issuer_id),
         media_type="application/pkix-crl",
         headers={"Cache-Control": _CACHE_CONTROL},
     )
 
 
 @router.get("/crl/{issuer_id:int}.pem")
-def crl_pem(issuer_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
-    body = x509.load_der_x509_crl(_current_der(request, db, issuer_id)).public_bytes(
+def crl_pem(
+    issuer_id: int,
+    db: Session = Depends(get_db),
+    secrets: SecretStore = Depends(get_secrets),
+) -> Response:
+    body = x509.load_der_x509_crl(_current_der(secrets, db, issuer_id)).public_bytes(
         serialization.Encoding.PEM
     )
     return Response(

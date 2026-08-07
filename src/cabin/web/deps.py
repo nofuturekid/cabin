@@ -15,6 +15,7 @@ from starlette.responses import Response
 from cabin import sessions, users
 from cabin.audit import Actor, user_actor
 from cabin.ca.certs import Certificate, get_certificate
+from cabin.secrets import SecretStore
 from cabin.sessions import SESSION_LIFETIME, UserSession
 from cabin.settings import TRUST_PROXY, get_flag
 from cabin.users import Role, User
@@ -94,6 +95,15 @@ def get_db(request: Request) -> Generator[Session]:
         yield db
     finally:
         db.close()
+
+
+def get_secrets(request: Request) -> SecretStore:
+    """Spec 0022 FR-10: the accessor `crl_ui` uses in place of reading
+    `request.app.state.secrets` directly, so the plaintext PKI listener's
+    application (`server.create_public_app`, which has no secret store of
+    its own) can override this dependency to reach the main app's instead.
+    """
+    return request.app.state.secrets  # type: ignore[no-any-return]
 
 
 def redirect_if_no_users(db: Session = Depends(get_db)) -> None:

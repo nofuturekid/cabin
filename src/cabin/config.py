@@ -8,6 +8,9 @@ from pathlib import Path
 
 DEFAULT_PORT = 8080
 DEFAULT_DATA_DIR = "data"
+#: Spec 0022 FR-12: the plaintext PKI listener's port, used only when
+#: ``tls`` is on.
+DEFAULT_HTTP_PORT = 8081
 
 
 class ConfigError(Exception):
@@ -56,6 +59,13 @@ class Config:
     db_url: str
     master_passphrase: str | None = field(default=None, repr=False)
     cookie_secure: bool = False
+    #: Spec 0022 FR-1/FR-12. Reading and enforcing what follows from this
+    #: (forcing ``cookie_secure``, refusing an equal ``http_port``, the
+    #: multi-worker refusal) is later spec-0022 work, not Phase 0's -- these
+    #: two fields exist here only so ``cabin.server`` has something typed to
+    #: build against.
+    tls: bool = False
+    http_port: int = DEFAULT_HTTP_PORT
 
     @classmethod
     def load(
@@ -78,10 +88,14 @@ class Config:
             "true",
             "1",
         )
+        tls = (env.get("CABIN_TLS") or "").strip().lower() in ("true", "1")
+        http_port = _parse_port(env.get("CABIN_HTTP_PORT") or str(DEFAULT_HTTP_PORT))
         return cls(
             port=port,
             data_dir=data_dir,
             db_url=db_url,
             master_passphrase=master_passphrase,
             cookie_secure=cookie_secure,
+            tls=tls,
+            http_port=http_port,
         )

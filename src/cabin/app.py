@@ -17,6 +17,7 @@ from cabin.config import Config
 from cabin.mcp import create_mcp_app
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
+from cabin.tls import TlsManager
 from cabin.web import STATIC_DIR
 from cabin.web.acme_ui import router as acme_ui_router
 from cabin.web.audit_ui import router as audit_router
@@ -30,13 +31,20 @@ from cabin.web.tokens_ui import router as tokens_router
 from cabin.web.ui import router as ui_router
 
 
-def create_app(config: Config) -> FastAPI:
+def create_app(config: Config, tls: TlsManager | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if not config.data_dir.exists():
             config.data_dir.mkdir(parents=True, mode=0o700)
         run_migrations(config.db_url)
         app.state.config = config
+        # Spec 0022, Interface Contract: `None` is a supported value meaning
+        # TLS is off. Only `server.run` passes a manager; every other caller
+        # (the whole existing test suite included) gets `None` here, which
+        # is what keeps `request.app.state.tls` safe to read unguarded from
+        # FR-14's templates without an AttributeError on ~36 call sites that
+        # build an app without going through `server.run` (see R1).
+        app.state.tls = tls
         app.state.secrets = SecretStore.open(config.data_dir, config.master_passphrase)
         app.state.db = create_session_factory(config.db_url)
         # Spec 0013 FR-1: the MCP endpoint's streamable-HTTP session manager
