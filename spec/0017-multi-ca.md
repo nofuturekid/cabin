@@ -316,8 +316,12 @@ hands to a relying party says another. One name, read off the certificate.
 
 ### `cabin.ca.service`
 
-- `create_hierarchy(db, secrets, name, key_type="ecdsa-p256", root_years=20, intermediate_years=10) -> CAHierarchy`
-  — unchanged apart from the deleted guards (FR-2).
+- `create_hierarchy(db, secrets, name, key_type="ecdsa-p256", root_years=20, intermediate_years=10, path_length=1) -> CAHierarchy`
+  — unchanged apart from the deleted guards (FR-2) and the addition of
+  `path_length` (FR-13): this is the only function that ever builds a root
+  during hierarchy creation, so the create form's `path_length` field
+  (default 1, server-validated 1..4) has no other way to reach
+  `x509.create_root`. Forwarded through as-is; this layer does not bound it.
 - `import_hierarchy(db, secrets, cert_pem, key_pem, key_passphrase, chain_pem) -> CAHierarchy`
   — unchanged signature; see the naming rule above for why it gains no
   `name`.

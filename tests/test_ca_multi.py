@@ -267,8 +267,11 @@ def test_rotation_leaves_old_certs_valid(db: Session, secrets: SecretStore, tmp_
         sans=["DNS:a.lan"],
         issuer_id=i1.id,
     )
-    retire(db, i1.id)
+    # FR-4: the last active intermediate cannot be retired, so the
+    # replacement is created before the old one is retired -- the rotation
+    # order the spec's own user story describes.
     i2 = create_intermediate_under(db, secrets, hierarchy.root.id, "Rotate II", years=8)
+    retire(db, i1.id)
     leaf_b = issue_and_store(
         db,
         secrets,
@@ -303,8 +306,11 @@ def test_crl_per_issuer_partitions_revocations(
         sans=["DNS:a.lan"],
         issuer_id=i1.id,
     )
-    retire(db, i1.id)
+    # FR-4: the last active intermediate cannot be retired, so the
+    # replacement is created before the old one is retired -- the rotation
+    # order the spec's own user story describes.
     i2 = create_intermediate_under(db, secrets, hierarchy.root.id, "Rotate II", years=8)
+    retire(db, i1.id)
     leaf_b = issue_and_store(
         db,
         secrets,

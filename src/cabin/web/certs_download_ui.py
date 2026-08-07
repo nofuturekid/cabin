@@ -20,6 +20,7 @@ from starlette.responses import Response
 from cabin.ca import certs as certs_service
 from cabin.ca import service as ca_service
 from cabin.ca.certs import Certificate
+from cabin.ca.service import UnknownIssuerError
 from cabin.users import User
 from cabin.web.certs_ui import SERIAL_CHARS
 from cabin.web.deps import (
@@ -66,15 +67,16 @@ def _attachment(body: bytes, media_type: str, filename: str) -> Response:
     )
 
 
-def _chain(db: Session) -> list[x509.Certificate]:
-    """Issuer chain for a leaf, nearest issuer first."""
-    hierarchy = ca_service.get_ca(db)
-    if hierarchy is None:
-        raise HTTPException(status_code=404, detail=_NO_CA)
-    return [
-        x509.load_pem_x509_certificate(hierarchy.intermediate.cert_pem.encode("ascii")),
-        x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii")),
-    ]
+def _chain(db: Session, row: Certificate) -> list[x509.Certificate]:
+    """Issuer chain for a leaf, nearest issuer first -- built from the
+    leaf's own issuer (spec 0017 FR-8), not from a single instance-wide
+    hierarchy: with several hierarchies side by side, a certificate's chain
+    is whichever one actually signed it."""
+    try:
+        chain = ca_service.chain_for(db, row.issuer_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=_NO_CA) from exc
+    return [x509.load_pem_x509_certificate(ca.cert_pem.encode("ascii")) for ca in chain]
 
 
 def _key_pem(request: Request, row: Certificate) -> str:
@@ -111,7 +113,7 @@ def download_chain_pem(
 ) -> Response:
     row = certificate_or_404(db, cert_id)
     body = row.cert_pem + "".join(
-        cert.public_bytes(serialization.Encoding.PEM).decode("ascii") for cert in _chain(db)
+        cert.public_bytes(serialization.Encoding.PEM).decode("ascii") for cert in _chain(db, row)
     )
     return _attachment(body.encode("ascii"), "application/x-pem-file", _filename(row, "-chain.pem"))
 
@@ -161,7 +163,7 @@ def download_bundle_p12(
             # key it cannot carry into a clean 400.
             key=cast(pkcs12.PKCS12PrivateKeyTypes, key),
             cert=x509.load_pem_x509_certificate(row.cert_pem.encode("ascii")),
-            cas=_chain(db),
+            cas=_chain(db, row),
             # PBES2/AES-256, i.e. whatever the library considers current --
             # not the legacy RC2/3DES profile (FR-5).
             encryption_algorithm=serialization.BestAvailableEncryption(password.encode("utf-8")),

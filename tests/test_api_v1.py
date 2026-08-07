@@ -30,6 +30,9 @@ from cabin.store import create_session_factory
 from cabin.users import Role
 
 BASE_URL = "https://ca.example.org"
+# FR-12: CDP/AIA URLs baked into a certificate are always http://, even when
+# the configured base_url is https://ca.example.org.
+HTTP_BASE_URL = "http://ca.example.org"
 
 
 @pytest.fixture
@@ -345,7 +348,12 @@ def test_api_issue_certificate(api: TestClient, cfg: Config) -> None:
     cdp = cert.extensions.get_extension_for_class(x509.CRLDistributionPoints).value
     assert cdp[0].full_name is not None
     cdp_url = cdp[0].full_name[0].value
-    assert cdp_url.startswith(BASE_URL)
+    # FR-12: the CRL URL baked into the certificate is always http://, never
+    # https://, even though the configured base_url is https -- otherwise
+    # validating a cabin certificate would require fetching its CRL over
+    # TLS, which would require validating that certificate.
+    assert cdp_url.startswith(HTTP_BASE_URL)
+    assert not cdp_url.startswith("https"), cdp_url
     assert f"/crl/{issuer_id}" in cdp_url
 
     listing = api.get("/api/v1/certificates", headers=admin).json()
@@ -618,7 +626,10 @@ def test_api_revoke_updates_crl(api: TestClient, cfg: Config) -> None:
     assert body["reason"] == "key_compromise"
     assert body["revoked_at"]
     assert body["crl_url"] is not None
-    assert body["crl_url"].startswith(BASE_URL)
+    # FR-12: always http://, never https://, same reasoning as
+    # test_api_issue_certificate above.
+    assert body["crl_url"].startswith(HTTP_BASE_URL)
+    assert not body["crl_url"].startswith("https"), body["crl_url"]
     assert "/crl/" in body["crl_url"]
 
     db = _db(cfg)

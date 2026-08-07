@@ -17,11 +17,11 @@ from cryptography import x509
 from sqlalchemy.orm import Session
 
 from cabin.api.models import (
-    CACertificateInfo,
     CAInfo,
     CertificateList,
     CertificatePem,
     CertificateSummary,
+    IssuerInfo,
     RevocationInfo,
 )
 from cabin.ca import crl as crl_service
@@ -36,30 +36,40 @@ from cabin.settings import BASE_URL, get_setting
 NO_CA = "no CA has been created or imported yet"
 
 
-def hierarchy(db: Session) -> ca_service.CAHierarchy:
-    """The CA, or :class:`CANotConfiguredError` -- so that "cabin is not set
-    up yet" is one sentence, raised in one place, and each front door only
-    has to decide how to *report* it."""
-    found = ca_service.get_ca(db)
-    if found is None:
-        raise CANotConfiguredError(NO_CA)
-    return found
+def issuer_info(db: Session, row: CACertificate) -> IssuerInfo:
+    """One ``ca_certificates`` row, described the way ``GET /ca`` and the
+    MCP ``get_ca_info`` tool both report it (spec 0017 FR-15).
 
-
-def ca_certificate_info(row: CACertificate) -> CACertificateInfo:
+    ``crl_url`` is ``None`` for a root -- no CRL route answers for one
+    (FR-10) -- while ``ca_url`` is set for every row, since ``/ca/{id}.cer``
+    serves both kinds.
+    """
     described = describe_certificate(x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8")))
-    return CACertificateInfo.model_validate({**described, "kind": row.kind})
+    return IssuerInfo.model_validate(
+        {
+            **described,
+            "id": row.id,
+            "name": row.name,
+            "kind": row.kind,
+            "status": row.status,
+            "parent_id": row.parent_id,
+            "crl_url": crl_service.distribution_url(db, row.id)
+            if row.kind == "intermediate"
+            else None,
+            "ca_url": crl_service.ca_issuers_url(db, row.id),
+        }
+    )
 
 
 def ca_info(db: Session) -> CAInfo:
-    """Subjects, fingerprints, validity and the URLs this instance
-    publishes. Raises CANotConfiguredError while there is no CA."""
-    found = hierarchy(db)
+    """Every CA row this instance holds, with its own URLs (spec 0017
+    FR-15). Raises CANotConfiguredError while there is no CA at all."""
+    rows = ca_service.list_cas(db)
+    if not rows:
+        raise CANotConfiguredError(NO_CA)
     return CAInfo(
-        root=ca_certificate_info(found.root),
-        intermediate=ca_certificate_info(found.intermediate),
+        issuers=[issuer_info(db, row) for row in rows],
         base_url=get_setting(db, BASE_URL),
-        crl_url=crl_service.distribution_url(db),
     )
 
 
@@ -101,20 +111,37 @@ def certificate_list(
     )
 
 
-def chain_pem(db: Session) -> str:
+def chain_pem_for_issuer(db: Session, issuer_id: int) -> str:
     """The issuer chain, nearest issuer first -- the same order
-    /certs/{id}/download/chain.pem serves."""
-    found = hierarchy(db)
-    return found.intermediate.cert_pem + found.root.cert_pem
+    /certs/{id}/download/chain.pem serves.
+
+    Built from the *leaf's own* issuer (spec 0017 FR-8) rather than from a
+    single instance-wide hierarchy: with several hierarchies side by side,
+    which chain is right depends on who actually signed the certificate.
+    """
+    return "".join(row.cert_pem for row in ca_service.chain_for(db, issuer_id))
 
 
-def certificate_pem(db: Session, row: Certificate, now: datetime) -> CertificatePem:
-    """One certificate and its chain, with no room for a private key."""
+def certificate_pem(
+    db: Session,
+    row: Certificate,
+    now: datetime,
+    *,
+    validity_capped_from: datetime | None = None,
+) -> CertificatePem:
+    """One certificate and its chain, with no room for a private key.
+
+    ``validity_capped_from`` (spec 0017 FR-7) is set only by an issuance
+    call site, from the ``Issued.capped_from`` it just got back -- a lookup
+    never passes it, so a later ``GET`` cannot claim a clamp that has not
+    just happened.
+    """
     return CertificatePem.model_validate(
         {
             **certificate_fields(row, now),
             "cert_pem": row.cert_pem,
-            "chain_pem": chain_pem(db),
+            "chain_pem": chain_pem_for_issuer(db, row.issuer_id),
+            "validity_capped_from": validity_capped_from,
         }
     )
 
@@ -132,5 +159,5 @@ def revocation_info(db: Session, row: Certificate) -> RevocationInfo:
         status=CertStatus.revoked,
         revoked_at=revoked_at,
         reason=RevocationReason(row.revocation_reason or RevocationReason.unspecified),
-        crl_url=crl_service.distribution_url(db),
+        crl_url=crl_service.distribution_url(db, row.issuer_id),
     )

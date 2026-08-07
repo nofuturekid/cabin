@@ -200,7 +200,6 @@ def test_import_hierarchy_can_add_a_further_hierarchy(db: Session, secrets: Secr
     imported = import_hierarchy(
         db,
         secrets,
-        "cabin-two",
         _pem_cert_bytes(intermediate_cert).decode("ascii"),
         _pem_key_str(intermediate_key),
         None,
@@ -211,6 +210,10 @@ def test_import_hierarchy_can_add_a_further_hierarchy(db: Session, secrets: Secr
     assert imported.intermediate.key_sealed is not None
     rows = list(db.scalars(select(CACertificate)))
     assert len(rows) == 4
+    # Naming rule: import_hierarchy takes no name -- the row's name is read
+    # off the imported certificate's own subject, not a cabin-local label.
+    assert imported.root.name == "Other Root CA"
+    assert imported.intermediate.name == "Other Intermediate CA"
 
 
 # --- AC-5: import stores the PARSED parent, not the raw submitted chain_pem -
@@ -236,7 +239,6 @@ def test_import_stores_only_direct_parent_from_multi_cert_chain(
     hierarchy = import_hierarchy(
         db,
         secrets,
-        "Chain",
         _pem_cert_bytes(intermediate_cert).decode("ascii"),
         _pem_key_str(intermediate_key),
         None,
@@ -246,6 +248,8 @@ def test_import_stores_only_direct_parent_from_multi_cert_chain(
     stored_certs = x509.load_pem_x509_certificates(hierarchy.root.cert_pem.encode("ascii"))
     assert len(stored_certs) == 1
     assert stored_certs[0].subject.rfc4514_string() == "CN=Chain Root CA"
+    # Naming rule: the row's name is read off the certificate's subject.
+    assert hierarchy.root.name == "Chain Root CA"
 
 
 # --- FR-4: signing_credentials with no CA configured -------------------------
@@ -276,8 +280,11 @@ def test_list_cas_orders_by_id(db: Session, secrets: SecretStore) -> None:
 
 def test_list_cas_filters_by_status_and_kind(db: Session, secrets: SecretStore) -> None:
     hierarchy = create_hierarchy(db, secrets, "cabin")
-    retire(db, hierarchy.intermediate.id)
+    # FR-4: the last active intermediate cannot be retired, so the
+    # replacement must exist before the old one is retired (the rotation
+    # order the spec's own user story describes).
     create_intermediate_under(db, secrets, hierarchy.root.id, "cabin second", years=5)
+    retire(db, hierarchy.intermediate.id)
 
     assert {row.id for row in list_cas(db, kind="root")} == {hierarchy.root.id}
     assert {row.id for row in list_cas(db, status="retired")} == {hierarchy.intermediate.id}
@@ -326,6 +333,10 @@ def test_get_ca_unknown_id_raises(db: Session, secrets: SecretStore) -> None:
 
 def test_get_ca_returns_row_regardless_of_status(db: Session, secrets: SecretStore) -> None:
     hierarchy = create_hierarchy(db, secrets, "cabin")
+    # FR-4: the last active intermediate cannot be retired, so create the
+    # replacement first (the rotation order the spec's own user story
+    # describes).
+    create_intermediate_under(db, secrets, hierarchy.root.id, "cabin second", years=5)
     retire(db, hierarchy.intermediate.id)
 
     row = get_ca(db, hierarchy.intermediate.id)

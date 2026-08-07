@@ -471,7 +471,7 @@ def test_ca_cer_endpoint_public_der(client: TestClient, cfg: Config) -> None:
         )
     finally:
         db.close()
-    leaf_cert, _key = leaf.issue_certificate(
+    leaf_cert, _key, _capped_from = leaf.issue_certificate(
         issuer_cert, issuer_key, leaf.Profile.server, "cer.lan", ["DNS:cer.lan"]
     )
 

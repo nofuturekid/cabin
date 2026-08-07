@@ -198,7 +198,15 @@ def test_issuance_entry_points_use_the_forced_http_origin(client: TestClient, cf
     # make_ready() marks the authorization valid directly in the database
     # rather than re-proving an http-01 challenge -- spec 0011's subject,
     # not this file's (same shortcut acme_orders.py documents for itself).
-    acme = Acme(client)
+    #
+    # cabin's ACME JWS validation binds every request to the URL it
+    # publishes for that route -- always the configured base_url, never the
+    # request's own Host (RFC 8555 6.4; see cabin.acme.http.origin's
+    # docstring). This suite configures base_url = HTTPS_BASE_URL, so the
+    # client has to sign its JWS "url" headers against that same origin
+    # instead of Acme's "http://testserver" default, or every request 403s
+    # before it gets near issuance.
+    acme = Acme(client, base=HTTPS_BASE_URL)
     flow = Flow(acme, cfg, "acme-door.example.lan")
     flow.make_ready()
     flow.finalize_ok(csr_der("acme-door.example.lan"))

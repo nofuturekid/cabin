@@ -85,7 +85,12 @@ from cabin.ca.certs import (
 from cabin.ca.crl import RevocationError
 from cabin.ca.leaf import DEFAULT_DAYS, IssueError, Profile
 from cabin.ca.revocation import RevocationReason
-from cabin.ca.service import CANotConfiguredError
+from cabin.ca.service import (
+    CANotConfiguredError,
+    IssuerRequiredError,
+    IssuerRetiredError,
+    UnknownIssuerError,
+)
 from cabin.mcp.auth import CabinTokenVerifier, current_token
 from cabin.secrets import SecretsError, SecretStore
 from cabin.settings import ACME_ENABLED, BASE_URL, MCP_ENABLED, get_flag, get_setting
@@ -239,7 +244,15 @@ def _readable_errors() -> Iterator[None]:
         yield
     except ValidationError:
         raise
-    except (IssueError, ValueError, RevocationError, CANotConfiguredError) as exc:
+    except (
+        IssueError,
+        ValueError,
+        RevocationError,
+        CANotConfiguredError,
+        UnknownIssuerError,
+        IssuerRetiredError,
+        IssuerRequiredError,
+    ) as exc:
         raise ToolError(str(exc)) from exc
     except SecretsError as exc:
         raise ToolError(KEY_UNAVAILABLE) from exc
@@ -335,16 +348,22 @@ def create_mcp_app(
     def get_ca_info() -> McpCAInfo:
         """Describe this cabin instance's certificate authority.
 
-        Returns the root and intermediate CA certificates -- subject, issuer,
-        serial, validity, SHA-256 fingerprint and key type -- together with
-        the address cabin publishes itself at, where it publishes its CRL,
+        Returns one entry per CA row this instance holds -- subject, issuer,
+        serial, validity, SHA-256 fingerprint, key type, status and where
+        each row's own certificate and (for an intermediate) CRL are
+        published -- together with the address cabin publishes itself at,
         and the ACME directory URL if the ACME server is switched on.
 
         Any live API token may call this.
         """
         with _session() as db, _readable_errors():
+            info = views.ca_info(db)
+            # Named field by field rather than **info.model_dump(), so that a
+            # future shape change to CAInfo is a type error here rather than
+            # a pydantic failure discovered inside a live tool call.
             return McpCAInfo(
-                **views.ca_info(db).model_dump(),
+                issuers=info.issuers,
+                base_url=info.base_url,
                 acme_directory_url=(directory_url(db) if get_flag(db, ACME_ENABLED) else None),
             )
 
@@ -406,6 +425,7 @@ def create_mcp_app(
         profile: Profile = Profile.server,
         key_type: KeyType = "ecdsa-p256",
         days: int = DEFAULT_DAYS,
+        issuer_id: int | None = None,
     ) -> CertificateDetail:
         """Issue a certificate with a freshly generated private key.
 
@@ -415,7 +435,11 @@ def create_mcp_app(
         it parses as one, an email address if it contains `@`, and a hostname
         otherwise. Leaving `sans` empty falls back to the common name.
         `profile` picks server or client authentication, and `days` is the
-        validity, between 1 and 3650.
+        validity, between 1 and 3650. `issuer_id` names which active
+        intermediate signs this leaf; omit it with exactly one active issuer
+        and it resolves to that one, omit it with several and the call is
+        refused rather than guessing, and naming a retired issuer is refused
+        too.
 
         This is the one tool that returns a private key (`key_pem`), because
         there is no other way for the caller to obtain it -- cabin keeps its
@@ -433,9 +457,10 @@ def create_mcp_app(
                 profile=profile,
                 key_type=key_type,
                 days=days,
+                issuer_id=issuer_id,
             )
             with _readable_errors():
-                row = certs_service.issue_and_store(
+                result = certs_service.issue_and_store(
                     db,
                     secrets(),
                     profile=request.profile,
@@ -443,12 +468,15 @@ def create_mcp_app(
                     sans=request.sans,
                     days=request.days,
                     key_type=request.key_type,
-                    crl_url=crl_service.distribution_url(db),
+                    issuer_id=request.issuer_id,
                     source=CertSource.mcp,
                 )
+                row = result.row
                 issued = CertificateDetail.model_validate(
                     {
-                        **views.certificate_pem(db, row, datetime.now(UTC)).model_dump(),
+                        **views.certificate_pem(
+                            db, row, datetime.now(UTC), validity_capped_from=result.capped_from
+                        ).model_dump(),
                         "key_pem": certs_service.key_pem(secrets(), row),
                     }
                 )
@@ -458,7 +486,12 @@ def create_mcp_app(
                 AuditAction.cert_issued,
                 summary=audit.issued_summary(row),
                 target_id=row.id,
-                detail=audit.certificate_detail(row, key_type=request.key_type),
+                detail=audit.certificate_detail(
+                    row,
+                    key_type=request.key_type,
+                    days_requested=request.days if result.capped_from is not None else None,
+                    validity_capped_from=result.capped_from,
+                ),
             )
             return issued
 
@@ -468,13 +501,16 @@ def create_mcp_app(
         profile: Profile = Profile.server,
         days: int = DEFAULT_DAYS,
         sans: Sequence[str] | None = None,
+        issuer_id: int | None = None,
     ) -> CertificatePem:
         """Sign a certificate signing request.
 
         The CSR contributes its public key, its common name and -- unless
         `sans` overrides them -- its subject alternative names. It never
         contributes its extensions: a CSR asking to be a CA is signed as an
-        ordinary leaf. `days` is the validity, between 1 and 3650.
+        ordinary leaf. `days` is the validity, between 1 and 3650. `issuer_id`
+        names which active intermediate signs this leaf -- see
+        `issue_certificate` for the resolution rule.
 
         No private key is involved: cabin never sees the requester's. So
         `has_key` on the result is false and the key can never be downloaded
@@ -489,19 +525,23 @@ def create_mcp_app(
                 profile=profile,
                 days=days,
                 sans=list(sans or []),
+                issuer_id=issuer_id,
             )
             with _readable_errors():
-                row = certs_service.sign_csr_and_store(
+                result = certs_service.sign_csr_and_store(
                     db,
                     secrets(),
                     csr_pem=request.csr_pem,
                     profile=request.profile,
                     days=request.days,
                     sans_override=request.sans or None,
-                    crl_url=crl_service.distribution_url(db),
+                    issuer_id=request.issuer_id,
                     source=CertSource.mcp,
                 )
-                signed = views.certificate_pem(db, row, datetime.now(UTC))
+                row = result.row
+                signed = views.certificate_pem(
+                    db, row, datetime.now(UTC), validity_capped_from=result.capped_from
+                )
             # The CSR body stays out of the log, here as everywhere else.
             _record(
                 db,
@@ -509,7 +549,11 @@ def create_mcp_app(
                 AuditAction.cert_signed,
                 summary=audit.signed_summary(row),
                 target_id=row.id,
-                detail=audit.certificate_detail(row),
+                detail=audit.certificate_detail(
+                    row,
+                    days_requested=request.days if result.capped_from is not None else None,
+                    validity_capped_from=result.capped_from,
+                ),
             )
             return signed
 

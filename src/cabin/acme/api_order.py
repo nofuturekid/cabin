@@ -54,13 +54,16 @@ def new_order(
     identifiers = service.parse_identifiers(payload.get("identifiers"))
     not_before = service.parse_timestamp(payload.get("notBefore"), "notBefore")
     not_after = service.parse_timestamp(payload.get("notAfter"), "notAfter")
-    if ca_service.get_ca(db) is None:
-        # FR-5: the directory still answers without a CA, but an order that
-        # could never become a certificate is refused with a reason an
-        # operator can act on rather than accepted and left to rot.
+    if not ca_service.active_issuers(db):
+        # FR-5, updated for spec 0017: the directory still answers with no
+        # active issuer, but an order that could never become a certificate
+        # is refused with a reason an operator can act on rather than
+        # accepted and left to rot. A CA that exists but is entirely retired
+        # is "no CA" for this purpose just as much as no CA at all.
         raise AcmeError(
             ErrorType.server_internal,
-            "no CA is configured on this cabin instance, so it cannot issue certificates yet",
+            "no active CA issuer is configured on this cabin instance, so it cannot issue "
+            "certificates yet",
         )
 
     order = service.create_order(

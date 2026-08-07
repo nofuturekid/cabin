@@ -200,10 +200,8 @@ def certificate_detail(
     row: "Certificate",
     *,
     key_type: str | None = None,
-    # Spec 0017 FR-7: accepted here so the seven issuance entry points can
-    # pass them once the clamp is wired up. Not yet used in the body --
-    # threading them into the detail dict is Backend/Security's job in a
-    # later phase.
+    # Spec 0017 FR-7: set by an issuance entry point only when the
+    # requested validity got clamped to the issuer's remaining life.
     days_requested: int | None = None,
     validity_capped_from: datetime | None = None,
 ) -> dict[str, Any]:
@@ -221,6 +219,12 @@ def certificate_detail(
     }
     if key_type is not None:
         detail["key_type"] = key_type
+    # AC-7: present only when the clamp actually fired, not `null`-and-present
+    # -- an issuance the issuer could fully grant must say nothing about a
+    # request it was never short on.
+    if validity_capped_from is not None:
+        detail["days_requested"] = days_requested
+        detail["validity_capped_from"] = validity_capped_from.isoformat()
     return detail
 
 

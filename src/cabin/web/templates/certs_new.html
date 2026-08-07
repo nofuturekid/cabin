@@ -28,11 +28,11 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
         <label for="subject_cn">Common name</label>
-        <input id="subject_cn" type="text" name="subject_cn" placeholder="nas.lan" required />
+        <input id="subject_cn" type="text" name="subject_cn" placeholder="nas.lan" value="{{ values.get('subject_cn', '') }}" required />
       </div>
       <div class="field">
         <label for="sans">Subject alternative names</label>
-        <textarea id="sans" name="sans" rows="4" placeholder="nas.lan&#10;10.0.0.5"></textarea>
+        <textarea id="sans" name="sans" rows="4" placeholder="nas.lan&#10;10.0.0.5">{{ values.get('sans', '') }}</textarea>
         <span class="hint">
           One per line; <code>dns:</code>, <code>ip:</code> and <code>email:</code>
           prefixes optional, bare entries are detected. Empty falls back to the
@@ -40,11 +40,23 @@
           punycode such as <code>xn--mnchen-3ya.lan</code>.
         </span>
       </div>
+      {% if show_issuer_select %}
+      <div class="field">
+        <label for="issuer_id">Issuer</label>
+        <select id="issuer_id" name="issuer_id" required>
+          <option disabled {% if not values.get('issuer_id') %}selected{% endif %}>choose an issuer</option>
+          {% for issuer in issuers %}
+          <option value="{{ issuer.id }}" {% if values.get('issuer_id')|string == issuer.id|string %}selected{% endif %}>{{ issuer.name }}</option>
+          {% endfor %}
+        </select>
+        <span class="hint">More than one issuer is active; pick which one signs this certificate.</span>
+      </div>
+      {% endif %}
       <div class="field">
         <label for="profile">Profile</label>
         <select id="profile" name="profile">
           {% for profile in profiles %}
-          <option value="{{ profile }}" {% if loop.first %}selected{% endif %}>{{ profile }}</option>
+          <option value="{{ profile }}" {% if values.get('profile', profiles[0]) == profile %}selected{% endif %}>{{ profile }}</option>
           {% endfor %}
         </select>
         <span class="hint">server = serverAuth, client = clientAuth</span>
@@ -53,13 +65,13 @@
         <label for="key_type">Key type</label>
         <select id="key_type" name="key_type">
           {% for key_type in key_types %}
-          <option value="{{ key_type }}" {% if loop.first %}selected{% endif %}>{{ key_type }}</option>
+          <option value="{{ key_type }}" {% if values.get('key_type', key_types[0]) == key_type %}selected{% endif %}>{{ key_type }}</option>
           {% endfor %}
         </select>
       </div>
       <div class="field">
         <label for="days">Validity (days)</label>
-        <input id="days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ default_days }}" required />
+        <input id="days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ values.get('days', default_days) }}" required />
       </div>
       <div class="actions"><button type="submit" class="primary">Issue certificate</button></div>
     </form>

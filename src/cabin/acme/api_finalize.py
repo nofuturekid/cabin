@@ -50,10 +50,10 @@ from cabin.audit import AuditAction, acme_actor
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
-from cabin.ca.certs import Certificate, CertSource
-from cabin.ca.leaf import MAX_CN_LENGTH, IssueError, Profile
+from cabin.ca.certs import Certificate, CertSource, Issued
+from cabin.ca.leaf import DEFAULT_DAYS, MAX_CN_LENGTH, IssueError, Profile
 from cabin.ca.revocation import RevocationReason
-from cabin.ca.service import CANotConfiguredError
+from cabin.ca.service import CANotConfiguredError, IssuerRequiredError
 from cabin.secrets import SecretsError
 from cabin.web.deps import client_ip, get_db
 
@@ -153,7 +153,8 @@ def finalize_order(
         processing.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
         return processing
 
-    row = _issue(request, db, order, der)
+    issued = _issue(request, db, order, der)
+    row = issued.row
     # Two commits, and a crash between them leaves the order ``processing``
     # with a certificate nobody can reach: it exists in the inventory (where
     # an operator can see and revoke it), but the order never names it and
@@ -173,8 +174,17 @@ def finalize_order(
         target_id=row.id,
         # The CSR itself stays out of the log, as it does for the UI and the
         # API (spec 0009 FR-3): it is bulky, and what it asked for is already
-        # described by the certificate that came out of it.
-        detail={**audit.certificate_detail(row), "order": order.id},
+        # described by the certificate that came out of it. Spec 0017 FR-7:
+        # ACME requests no explicit validity, so DEFAULT_DAYS is what was
+        # implicitly asked for when the clamp fired.
+        detail={
+            **audit.certificate_detail(
+                row,
+                days_requested=DEFAULT_DAYS if issued.capped_from is not None else None,
+                validity_capped_from=issued.capped_from,
+            ),
+            "order": order.id,
+        },
         ip=client_ip(request, db),
     )
     return json_response(order_json(db, order))
@@ -202,7 +212,7 @@ def _subject_cn(identifiers: list[dict[str, str]]) -> str | None:
     return None
 
 
-def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certificate:
+def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Issued:
     """Sign the CSR through the spec-0005 path, or give the order back.
 
     The SANs are taken from the *order*, not from the CSR: they are the
@@ -211,6 +221,12 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certi
     issued certificate. They are equal by the time this runs -- that is what
     :func:`cabin.acme.csr.check_identifiers` established -- so this is
     belt and braces, and cheap.
+
+    No ``issuer_id`` is passed: spec 0017 FR-6 leaves ACME on the default
+    rule (a directory per issuer is spec 0019's gap to close), so this either
+    resolves the instance's one active issuer or -- with more than one --
+    fails as :class:`~cabin.ca.service.IssuerRequiredError`, handled below
+    like any other issuance failure.
     """
     identifiers = service.order_identifiers(order)
     sans = [
@@ -225,7 +241,6 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certi
             csr_pem=pem,
             profile=ACME_PROFILE,
             sans_override=sans,
-            crl_url=crl_service.distribution_url(db),
             subject_cn_fallback=_subject_cn(identifiers),
             # ...and if none of them fits, no subject at all rather than no
             # certificate; see :func:`_subject_cn`.
@@ -243,7 +258,10 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certi
         # nothing about the request was wrong.
         db.rollback()
         service.release_claim(db, order)
-        if isinstance(exc, IssueError | CANotConfiguredError | SecretsError | ValueError):
+        if isinstance(
+            exc,
+            IssueError | CANotConfiguredError | SecretsError | ValueError | IssuerRequiredError,
+        ):
             raise AcmeError(
                 ErrorType.server_internal,
                 f"this certificate could not be issued: {exc}"[:400],
@@ -305,17 +323,21 @@ def _certificate_of(db: Session, raw_id: str, account_id: str) -> Certificate:
 
 
 def chain_pem(db: Session, row: Certificate) -> str:
-    """FR-2: leaf, then intermediate, then root.
+    """FR-2/FR-8: leaf, then the chain of *its own* issuer, nearest first,
+    root last.
 
     The root is included. For a public CA it would be redundant, but cabin's
     root is exactly what a client's trust store may not have yet, and an
     operator pointing a service at ``fullchain.pem`` should not have to go
     and fetch it separately.
     """
-    hierarchy = ca_service.get_ca(db)
-    if hierarchy is None:  # pragma: no cover - a certificate implies a CA
-        raise AcmeError(ErrorType.server_internal, "no CA is configured on this cabin instance")
-    return row.cert_pem + hierarchy.intermediate.cert_pem + hierarchy.root.cert_pem
+    try:
+        chain = ca_service.chain_for(db, row.issuer_id)
+    except ca_service.UnknownIssuerError as exc:  # pragma: no cover - FK guarantees the row
+        raise AcmeError(
+            ErrorType.server_internal, "no CA is configured on this cabin instance"
+        ) from exc
+    return row.cert_pem + "".join(ca.cert_pem for ca in chain)
 
 
 @router.post("/cert/{cert_id}")

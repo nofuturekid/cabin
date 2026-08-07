@@ -11,6 +11,7 @@ import re
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from urllib.parse import urlsplit, urlunsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.types import (
     CertificateIssuerPrivateKeyTypes,
     CertificatePublicKeyTypes,
 )
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
 
 from cabin.ca.x509 import (
     KEY_TYPES,
@@ -26,6 +27,41 @@ from cabin.ca.x509 import (
     generate_key,
     signing_algorithm,
 )
+
+
+def public_http_origin(base_url: str) -> str:
+    """The public HTTP origin a CDP/AIA URL is built on top of (spec 0017
+    FR-12): scheme forced to ``http``, an explicit ``:443`` dropped,
+    everything else -- host, any other port, path -- left exactly as
+    configured.
+
+    A relying party validating a cabin certificate would otherwise need to
+    fetch its CRL over TLS, which needs a certificate that has already been
+    validated. Forcing the scheme here, in the one place both
+    ``crl.distribution_url`` and ``crl.ca_issuers_url`` call, is what keeps
+    that from happening -- rather than each of them reimplementing it and
+    the two answers drifting apart.
+    """
+    parts = urlsplit(base_url)
+    netloc = parts.netloc
+    if netloc.endswith(":443"):
+        netloc = netloc[: -len(":443")]
+    return urlunsplit(("http", netloc, parts.path, "", ""))
+
+
+def _authority_information_access(ca_issuers_url: str) -> x509.AuthorityInformationAccess:
+    """FR-11: one non-critical AIA extension with exactly one ``caIssuers``
+    access description, built the same way :func:`_crl_distribution_points`
+    (below) builds the CDP."""
+    return x509.AuthorityInformationAccess(
+        [
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.CA_ISSUERS,
+                x509.UniformResourceIdentifier(ca_issuers_url),
+            )
+        ]
+    )
+
 
 #: NotBefore is backdated so a certificate issued "now" isn't rejected by a
 #: relying party whose clock is slightly behind ours (FR-1).
@@ -267,25 +303,40 @@ def _build_leaf(
     profile: Profile,
     days: int,
     crl_url: str | None = None,
-) -> x509.Certificate:
+    ca_issuers_url: str | None = None,
+) -> tuple[x509.Certificate, datetime | None]:
     """The single place a leaf certificate is assembled: both flows build
     the same extension set from scratch, which is what keeps CSR extensions
     from leaking into an issued certificate (FR-1/FR-2).
 
-    ``crl_url`` adds a CRL distribution point (spec 0007 FR-6); without one
-    the extension is left out entirely rather than pointing somewhere that
-    does not answer.
+    ``crl_url`` adds a CRL distribution point (spec 0007 FR-6); ``ca_issuers_url``
+    adds an AIA ``caIssuers`` access description the same way (spec 0017
+    FR-11). Without one, the corresponding extension is left out entirely
+    rather than pointing somewhere that does not answer.
 
     ``subject_cn=None`` builds an empty subject, for a name too long to be a
     common name (see :func:`sign_csr`). RFC 5280 4.2.1.6 then requires the
     subjectAltName to be critical -- with no subject it is the only name the
     certificate has, so a relying party that skipped it would be trusting a
-    certificate that says nothing about who it is for."""
+    certificate that says nothing about who it is for.
+
+    Returns ``(certificate, capped_from)`` -- spec 0017 FR-7. ``capped_from``
+    is the ``not_after`` that was asked for but not granted because the
+    issuer's own expiry was sooner, and ``None`` when the full request was
+    met. This is the only place that holds both the requested ``days`` and
+    the ``now`` the clamp is measured against, so it is also the only place
+    that can answer "was this clamped" -- callers must not re-derive it from
+    ``cert.not_valid_after_utc == issuer_cert.not_valid_after_utc``, which
+    would silently go wrong the moment the issuer itself is renewed to a
+    later expiry (spec 0017 FR-5).
+    """
     now = datetime.now(UTC)
+    requested_not_after = now + timedelta(days=days)
     # FR-4: a leaf must never outlive the CA that signed it.
-    not_after = min(now + timedelta(days=days), issuer_cert.not_valid_after_utc)
+    not_after = min(requested_not_after, issuer_cert.not_valid_after_utc)
     if not_after <= now:
         raise IssueError("the signing CA certificate has expired")
+    capped_from = requested_not_after if requested_not_after > not_after else None
 
     subject = [] if subject_cn is None else [x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)]
     builder = (
@@ -308,7 +359,12 @@ def _build_leaf(
     )
     if crl_url:
         builder = builder.add_extension(_crl_distribution_points(crl_url), critical=False)
-    return builder.sign(issuer_key, algorithm=signing_algorithm(issuer_key))
+    if ca_issuers_url:
+        builder = builder.add_extension(
+            _authority_information_access(ca_issuers_url), critical=False
+        )
+    cert = builder.sign(issuer_key, algorithm=signing_algorithm(issuer_key))
+    return cert, capped_from
 
 
 def issue_certificate(
@@ -320,11 +376,13 @@ def issue_certificate(
     days: int = DEFAULT_DAYS,
     key_type: str = "ecdsa-p256",
     crl_url: str | None = None,
-) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes]:
+    ca_issuers_url: str | None = None,
+) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes, datetime | None]:
     """Generate a key server-side and issue a leaf for it (FR-2).
 
-    Returns ``(certificate, private_key)``; the caller is responsible for
-    sealing the key before it touches any storage.
+    Returns ``(certificate, private_key, capped_from)`` -- see
+    :func:`_build_leaf` for ``capped_from`` (spec 0017 FR-7). The caller is
+    responsible for sealing the key before it touches any storage.
     """
     cn = _validate_cn(subject_cn)
     _validate_days(days)
@@ -332,10 +390,18 @@ def issue_certificate(
         raise IssueError(f"unsupported key type: {key_type!r}")
     resolved = _resolve_sans([_normalize_san(san) for san in sans], [], cn)
     key = generate_key(key_type)
-    cert = _build_leaf(
-        issuer_cert, issuer_key, key.public_key(), cn, resolved, profile, days, crl_url
+    cert, capped_from = _build_leaf(
+        issuer_cert,
+        issuer_key,
+        key.public_key(),
+        cn,
+        resolved,
+        profile,
+        days,
+        crl_url,
+        ca_issuers_url,
     )
-    return cert, key
+    return cert, key, capped_from
 
 
 def sign_csr(
@@ -346,9 +412,10 @@ def sign_csr(
     days: int = DEFAULT_DAYS,
     sans_override: Sequence[str] | None = None,
     crl_url: str | None = None,
+    ca_issuers_url: str | None = None,
     subject_cn_fallback: str | None = None,
     allow_empty_subject: bool = False,
-) -> x509.Certificate:
+) -> tuple[x509.Certificate, datetime | None]:
     """Sign a pasted CSR (FR-2).
 
     The CSR contributes exactly three things: its public key, its subject
@@ -369,6 +436,9 @@ def sign_csr(
     what a relying party checks -- and it is the only way to certify a name
     longer than a common name's 64 characters, which ACME can order and a
     subject cannot hold.
+
+    Returns ``(certificate, capped_from)`` -- see :func:`_build_leaf` for
+    ``capped_from`` (spec 0017 FR-7).
     """
     _validate_days(days)
     try:
@@ -392,5 +462,13 @@ def sign_csr(
     explicit = [_normalize_san(san) for san in sans_override] if sans_override else []
     resolved = _resolve_sans(explicit, _csr_sans(csr), cn)
     return _build_leaf(
-        issuer_cert, issuer_key, csr.public_key(), cn, resolved, profile, days, crl_url
+        issuer_cert,
+        issuer_key,
+        csr.public_key(),
+        cn,
+        resolved,
+        profile,
+        days,
+        crl_url,
+        ca_issuers_url,
     )

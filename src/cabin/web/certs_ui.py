@@ -4,9 +4,15 @@ carries both issuance forms (server-generated key | pasted CSR) and is
 admin-only because it exists solely to mutate; /certs/{id} shows one
 certificate to any logged-in user, but the private key block only to
 admins. The download routes live in :mod:`cabin.web.certs_download_ui`.
+
+Spec 0017 FR-6/FR-14 adds an issuer selector to both issuance forms,
+rendered only when more than one issuer is active (a single-CA install sees
+no new field), and FR-7 makes a clamped validity visible on the result page.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from threading import Lock
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -36,7 +42,13 @@ from cabin.ca.leaf import (
     parse_san_lines,
 )
 from cabin.ca.revocation import RevocationReason
-from cabin.ca.service import CANotConfiguredError
+from cabin.ca.service import (
+    CACertificate,
+    CANotConfiguredError,
+    IssuerRequiredError,
+    IssuerRetiredError,
+    UnknownIssuerError,
+)
 from cabin.ca.x509 import KEY_TYPES
 from cabin.users import Role, User
 from cabin.web import templates
@@ -65,6 +77,16 @@ _UNKNOWN_REASON = "unknown revocation reason: {!r}"
 SERIAL_CHARS = 8
 #: SANs shown per row before collapsing the rest into "+N more" (FR-1).
 SAN_PREVIEW = 3
+#: Domain failures that mean "the issuer choice was missing, ambiguous or
+#: unusable" (spec 0017 FR-6/AC-2/AC-3) -- the same 400 an unusable CSR or an
+#: out-of-range days value gets, with the form re-rendered rather than
+#: thrown away. CANotConfiguredError is handled separately: its message does
+#: not name "CA" the way the wizard's own wording does.
+_ISSUER_ERRORS = (IssuerRequiredError, IssuerRetiredError, UnknownIssuerError)
+
+
+def _issuer_options(db: Session) -> list[CACertificate]:
+    return ca_service.active_issuers(db)
 
 
 def _form_page(
@@ -72,10 +94,18 @@ def _form_page(
     user: User,
     error: str | None,
     template: str,
+    *,
+    issuers: Sequence[CACertificate] = (),
+    values: dict[str, object] | None = None,
     status_code: int = 200,
 ) -> Response:
     """The two ways to get a certificate are separate pages (spec 0015 FR-10)
-    but ask for the same things, so they share one context."""
+    but ask for the same things, so they share one context.
+
+    ``values`` carries back whatever the operator typed on a rejected POST
+    (spec 0017 AC-2): losing it on a 400 would be its own bug, so every
+    error path re-renders the form with the submitted values intact.
+    """
     context = base_context(request, user)
     context.update(
         {
@@ -85,17 +115,54 @@ def _form_page(
             "default_days": DEFAULT_DAYS,
             "min_days": MIN_DAYS,
             "max_days": MAX_DAYS,
+            "issuers": issuers,
+            # FR-14/AC-12: hidden entirely with zero or one active issuer --
+            # a single-CA install must not see a new field.
+            "show_issuer_select": len(issuers) > 1,
+            "values": values or {},
         }
     )
     return templates.TemplateResponse(request, template, context, status_code=status_code)
 
 
-def _new_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
-    return _form_page(request, user, error, "certs_new.html", status_code)
+def _new_page(
+    request: Request,
+    user: User,
+    error: str | None,
+    *,
+    issuers: Sequence[CACertificate] = (),
+    values: dict[str, object] | None = None,
+    status_code: int = 200,
+) -> Response:
+    return _form_page(
+        request,
+        user,
+        error,
+        "certs_new.html",
+        issuers=issuers,
+        values=values,
+        status_code=status_code,
+    )
 
 
-def _sign_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
-    return _form_page(request, user, error, "certs_sign.html", status_code)
+def _sign_page(
+    request: Request,
+    user: User,
+    error: str | None,
+    *,
+    issuers: Sequence[CACertificate] = (),
+    values: dict[str, object] | None = None,
+    status_code: int = 200,
+) -> Response:
+    return _form_page(
+        request,
+        user,
+        error,
+        "certs_sign.html",
+        issuers=issuers,
+        values=values,
+        status_code=status_code,
+    )
 
 
 def _cert_row(row: Certificate, now: datetime) -> dict[str, object]:
@@ -173,8 +240,9 @@ def certs_new(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
-    error = None if ca_service.get_ca(db) is not None else _NO_CA
-    return _new_page(request, user, error)
+    issuers = _issuer_options(db)
+    error = None if issuers else _NO_CA
+    return _new_page(request, user, error, issuers=issuers)
 
 
 @router.get("/sign")
@@ -183,8 +251,34 @@ def certs_sign_form(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
-    error = None if ca_service.get_ca(db) is not None else _NO_CA
-    return _sign_page(request, user, error)
+    issuers = _issuer_options(db)
+    error = None if issuers else _NO_CA
+    return _sign_page(request, user, error, issuers=issuers)
+
+
+#: spec 0017 FR-7: the result page names both the requested and the granted
+#: expiry. There is no session-scoped flash mechanism in this codebase and
+#: the redirect target is a plain "/certs/{id}" (matched by the API/MCP
+#: response shape and by every existing caller of the location header), so
+#: the one issuance response that knows ``capped_from`` hands it off here,
+#: keyed by the certificate id, for the *next* GET of that same certificate
+#: to pick up and discard. Never recomputed from stored state -- a later,
+#: unrelated visit to the same page reads nothing back.
+_pending_capped: dict[int, tuple[int, datetime]] = {}
+_pending_capped_lock = Lock()
+
+
+def _remember_capped(cert_id: int, days: int, capped_from: datetime | None) -> None:
+    if capped_from is None:
+        return
+    with _pending_capped_lock:
+        _pending_capped[cert_id] = (days, capped_from)
+
+
+def _take_capped(cert_id: int) -> tuple[int | None, datetime | None]:
+    with _pending_capped_lock:
+        pending = _pending_capped.pop(cert_id, None)
+    return pending if pending is not None else (None, None)
 
 
 @router.post("/issue")
@@ -195,13 +289,23 @@ def certs_issue(
     profile: str = Form("server"),
     key_type: str = Form("ecdsa-p256"),
     days: int = Form(DEFAULT_DAYS),
+    issuer_id: int | None = Form(None),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
+    issuers = _issuer_options(db)
+    values = {
+        "subject_cn": subject_cn,
+        "sans": sans,
+        "profile": profile,
+        "key_type": key_type,
+        "days": days,
+        "issuer_id": issuer_id,
+    }
     try:
-        row = certs_service.issue_and_store(
+        issued = certs_service.issue_and_store(
             db,
             request.app.state.secrets,
             profile=parse_profile(profile),
@@ -209,12 +313,15 @@ def certs_issue(
             sans=parse_san_lines(sans),
             days=days,
             key_type=key_type,
-            crl_url=crl_service.distribution_url(db),
+            issuer_id=issuer_id,
         )
     except IssueError as exc:
-        return _new_page(request, user, str(exc), status_code=400)
+        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     except CANotConfiguredError:
-        return _new_page(request, user, _NO_CA, status_code=400)
+        return _new_page(request, user, _NO_CA, issuers=issuers, values=values, status_code=400)
+    except _ISSUER_ERRORS as exc:
+        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
+    row, capped_from = issued.row, issued.capped_from
     audit.record(
         db,
         actor,
@@ -222,9 +329,15 @@ def certs_issue(
         summary=audit.issued_summary(row),
         target_type="certificate",
         target_id=row.id,
-        detail=audit.certificate_detail(row, key_type=key_type),
+        detail=audit.certificate_detail(
+            row,
+            key_type=key_type,
+            days_requested=days if capped_from is not None else None,
+            validity_capped_from=capped_from,
+        ),
         ip=client_ip(request, db),
     )
+    _remember_capped(row.id, days, capped_from)
     # The key is never carried in the redirect: the result page re-derives
     # it from the sealed column for whoever is authorized to see it (FR-6).
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
@@ -237,27 +350,39 @@ def certs_sign(
     profile: str = Form("server"),
     days: int = Form(DEFAULT_DAYS),
     sans_override: str = Form(""),
+    issuer_id: int | None = Form(None),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
+    issuers = _issuer_options(db)
+    values = {
+        "csr_pem": csr_pem,
+        "profile": profile,
+        "days": days,
+        "sans_override": sans_override,
+        "issuer_id": issuer_id,
+    }
     try:
-        row = certs_service.sign_csr_and_store(
+        issued = certs_service.sign_csr_and_store(
             db,
             request.app.state.secrets,
             csr_pem=csr_pem,
             profile=parse_profile(profile),
             days=days,
             sans_override=parse_san_lines(sans_override),
-            crl_url=crl_service.distribution_url(db),
+            issuer_id=issuer_id,
         )
     except IssueError as exc:
-        return _sign_page(request, user, str(exc), status_code=400)
+        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     except CANotConfiguredError:
-        return _sign_page(request, user, _NO_CA, status_code=400)
+        return _sign_page(request, user, _NO_CA, issuers=issuers, values=values, status_code=400)
+    except _ISSUER_ERRORS as exc:
+        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     # The CSR itself is not recorded: it is bulky, and what it asked for is
     # already described by the certificate that came out of it (FR-3).
+    row, capped_from = issued.row, issued.capped_from
     audit.record(
         db,
         actor,
@@ -265,9 +390,14 @@ def certs_sign(
         summary=audit.signed_summary(row),
         target_type="certificate",
         target_id=row.id,
-        detail=audit.certificate_detail(row),
+        detail=audit.certificate_detail(
+            row,
+            days_requested=days if capped_from is not None else None,
+            validity_capped_from=capped_from,
+        ),
         ip=client_ip(request, db),
     )
+    _remember_capped(row.id, days, capped_from)
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
 
 
@@ -277,6 +407,9 @@ def _detail_page(
     row: Certificate,
     error: str | None = None,
     status_code: int = 200,
+    *,
+    days_requested: int | None = None,
+    capped_from: datetime | None = None,
 ) -> Response:
     context = base_context(request, user)
     context["cert"] = row
@@ -301,6 +434,10 @@ def _detail_page(
     context["can_revoke"] = is_admin and revoked_at is None
     context["reasons"] = list(RevocationReason)
     context["error"] = error
+    # Spec 0017 FR-7/AC-7: present only right after an issuance that was
+    # capped -- handed off by the issuance route, not stored or recomputed.
+    context["days_requested"] = days_requested
+    context["capped_from"] = capped_from.isoformat() if capped_from is not None else None
     response = templates.TemplateResponse(
         request, "cert_detail.html", context, status_code=status_code
     )
@@ -318,7 +455,14 @@ def cert_detail(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
-    return _detail_page(request, user, certificate_or_404(db, cert_id))
+    days_requested, capped_from = _take_capped(cert_id)
+    return _detail_page(
+        request,
+        user,
+        certificate_or_404(db, cert_id),
+        days_requested=days_requested,
+        capped_from=capped_from,
+    )
 
 
 @router.post("/{cert_id}/revoke")

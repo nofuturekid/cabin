@@ -48,6 +48,9 @@ SPEC_ACTIONS = {
     "acme_certificate_revoked",
     "acme_eab_key_created",
     "acme_eab_key_revoked",
+    # spec 0017 FR-15: renewing or retiring a CA hierarchy row
+    "ca_renewed",
+    "ca_retired",
 }
 
 

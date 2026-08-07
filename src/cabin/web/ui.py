@@ -224,17 +224,30 @@ def _days_until(moment: datetime) -> int:
 
 
 def _ca_expiry(row: CACertificate, now: datetime) -> dict[str, object]:
-    """One CA certificate as the dashboard states it (spec 0016 FR-4)."""
+    """One CA certificate as the dashboard states it (spec 0016 FR-4; spec
+    0017 FR-14: per issuer, not "the" CA).
+
+    A retired row is flagged only once it has actually expired: its
+    remaining job is signing its CRL, and a year's notice on something
+    already stood down is noise -- so ``CA_WARN_DAYS`` only applies while
+    the row is still active.
+    """
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     not_after = cert.not_valid_after_utc
     days = (not_after - now).days
-    return {
-        "kind": row.kind,
-        "not_after": not_after.replace(microsecond=0).isoformat(),
-        "days": days,
+    if row.status == "retired":
+        tag = "tag-bad" if days <= 0 else ""
+    else:
         # Replacing a CA is not a five-minute job, so the warning comes a
         # year out rather than at the 30 days a leaf gets.
-        "tag": "tag-bad" if days <= 0 else ("tag-warn" if days <= CA_WARN_DAYS else ""),
+        tag = "tag-bad" if days <= 0 else ("tag-warn" if days <= CA_WARN_DAYS else "")
+    return {
+        "name": row.name,
+        "kind": row.kind,
+        "status": row.status,
+        "not_after": not_after.replace(microsecond=0).isoformat(),
+        "days": days,
+        "tag": tag,
     }
 
 
@@ -252,17 +265,38 @@ def dashboard(
     a tick (FR-8, the rule spec 0006 set for the inventory).
     """
     now = datetime.now(UTC)
-    hierarchy = ca_service.get_ca(db)
+    rows = ca_service.list_cas(db)
     context = base_context(request, user)
-    context["ca_configured"] = hierarchy is not None
-    if hierarchy is None:
+    context["ca_configured"] = bool(rows)
+    if not rows:
         # Nothing to summarise before there is a CA (AC-8).
         return templates.TemplateResponse(request, "dashboard.html", context)
 
     expiring = certs_service.expiring_soon(db, now, limit=EXPIRING_SHOWN)
     counts = certs_service.status_counts(db, now)
-    crl_state = crl_service.stored_crl(db)
     events, _ = audit.list_events(db, page=1, per_page=RECENT_EVENTS)
+    # Spec 0017 FR-14: one CRL block per issuer, not "the" CRL -- every
+    # intermediate signs and serves its own.
+    crls = [
+        {
+            "issuer_name": intermediate.name,
+            "state": (
+                {
+                    "number": state.crl_number,
+                    "generated_at": state.generated_at.replace(
+                        tzinfo=UTC, microsecond=0
+                    ).isoformat(),
+                    "next_update": state.next_update.replace(microsecond=0).isoformat(),
+                    "stale": state.next_update <= now,
+                }
+                if (state := crl_service.stored_crl(db, intermediate.id)) is not None
+                else None
+            ),
+            "url": crl_service.distribution_url(db, intermediate.id),
+        }
+        for intermediate in rows
+        if intermediate.kind == "intermediate"
+    ]
     context.update(
         {
             "expiring": [
@@ -277,23 +311,10 @@ def dashboard(
             ],
             "expiring_more": counts["expiring"] > len(expiring),
             "counts": counts,
-            "ca_certs": [
-                _ca_expiry(hierarchy.intermediate, now),
-                _ca_expiry(hierarchy.root, now),
-            ],
-            "crl": (
-                {
-                    "number": crl_state.crl_number,
-                    "generated_at": crl_state.generated_at.replace(
-                        tzinfo=UTC, microsecond=0
-                    ).isoformat(),
-                    "next_update": crl_state.next_update.replace(microsecond=0).isoformat(),
-                    "stale": crl_state.next_update <= now,
-                }
-                if crl_state is not None
-                else None
-            ),
-            "crl_url": crl_service.distribution_url(db),
+            # Spec 0017 FR-14: one entry per ca_certificates row, not the
+            # pair [intermediate, root] of a single hierarchy.
+            "ca_certs": [_ca_expiry(row, now) for row in rows],
+            "crls": crls,
             "events": [
                 {
                     "occurred_at": event.occurred_at,

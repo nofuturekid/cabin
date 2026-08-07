@@ -7,6 +7,7 @@ FR-2/FR-3).
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from cabin.ca import leaf
 from cabin.ca.leaf import DEFAULT_DAYS, Profile
-from cabin.ca.service import signing_credentials
+from cabin.ca.service import resolve_issuer, signing_credentials
 from cabin.secrets import SecretsError, SecretStore
 from cabin.store import Base
 
@@ -113,6 +114,23 @@ class Certificate(Base):
         return datetime.fromisoformat(self.revoked_at) if self.revoked_at else None
 
 
+@dataclass(frozen=True)
+class Issued:
+    """A stored certificate plus what the validity clamp did, if anything
+    (spec 0017 FR-7).
+
+    ``capped_from`` is the ``not_after`` that was requested but not granted
+    -- ``None`` when the full request was met. Carried alongside the row
+    rather than folded into a column: the requested validity is never
+    stored, and re-deriving "was this clamped" later from
+    ``leaf.not_after == issuer.not_after`` would silently go wrong the
+    moment :func:`cabin.ca.service.renew_in_place` extends the issuer.
+    """
+
+    row: Certificate
+    capped_from: datetime | None
+
+
 def _store(
     db: Session,
     cert: x509.Certificate,
@@ -120,9 +138,12 @@ def _store(
     sans: Sequence[str],
     key_sealed: str | None,
     source: CertSource,
+    *,
+    issuer_id: int,
 ) -> Certificate:
     common_names = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
     row = Certificate(
+        issuer_id=issuer_id,
         source=str(source),
         serial_hex=format(cert.serial_number, "x"),
         # Empty for a certificate issued with no subject at all (see
@@ -169,23 +190,34 @@ def issue_and_store(
     sans: Sequence[str],
     days: int = DEFAULT_DAYS,
     key_type: str = "ecdsa-p256",
-    crl_url: str | None = None,
+    issuer_id: int | None = None,
     source: CertSource = CertSource.ui,
-) -> Certificate:
+) -> Issued:
     """Issue a leaf with a server-generated key and store it, sealing the
     key before it touches the DB (FR-5).
 
-    ``crl_url`` (spec 0007 FR-6) is passed in rather than read from the
-    settings table here, so this module keeps knowing nothing about where
-    cabin itself is published. ``source`` (spec 0012 FR-7) is which front
-    door asked; it defaults to the UI so that no caller can accidentally
-    record nothing.
+    ``issuer_id`` picks the signing issuer via
+    :func:`cabin.ca.service.resolve_issuer` (spec 0017 FR-6): given, it must
+    name an active intermediate; omitted, it resolves to the sole active
+    issuer, or raises when that is ambiguous. The CDP and AIA URLs are built
+    here, for the issuer this function just resolved, rather than accepted
+    as a parameter -- with the issuer resolved inside, no caller could
+    otherwise know which issuer's URLs belong on the certificate.
 
-    Raises CANotConfiguredError if no CA exists, IssueError for invalid
-    input.
+    ``source`` (spec 0012 FR-7) is which front door asked; it defaults to
+    the UI so that no caller can accidentally record nothing.
+
+    Raises CANotConfiguredError/IssuerRequiredError/IssuerRetiredError/
+    UnknownIssuerError per FR-6, IssueError for invalid input.
     """
-    issuer_cert, issuer_key = signing_credentials(db, secrets)
-    cert, key = leaf.issue_certificate(
+    # Imported inside the function rather than at module level: cabin.ca.crl
+    # imports Certificate from this module, so a top-level import here would
+    # make the two modules import each other circularly.
+    from cabin.ca import crl
+
+    issuer = resolve_issuer(db, issuer_id)
+    issuer_cert, issuer_key = signing_credentials(db, secrets, issuer.id)
+    cert, key, capped_from = leaf.issue_certificate(
         issuer_cert,
         issuer_key,
         profile,
@@ -193,9 +225,19 @@ def issue_and_store(
         sans,
         days=days,
         key_type=key_type,
-        crl_url=crl_url,
+        crl_url=crl.distribution_url(db, issuer.id),
+        ca_issuers_url=crl.ca_issuers_url(db, issuer.id),
     )
-    return _store(db, cert, profile, _cert_sans(cert), _sealed_key(secrets, key), source)
+    row = _store(
+        db,
+        cert,
+        profile,
+        _cert_sans(cert),
+        _sealed_key(secrets, key),
+        source,
+        issuer_id=issuer.id,
+    )
+    return Issued(row, capped_from)
 
 
 def sign_csr_and_store(
@@ -206,30 +248,39 @@ def sign_csr_and_store(
     profile: Profile,
     days: int = DEFAULT_DAYS,
     sans_override: Sequence[str] | None = None,
-    crl_url: str | None = None,
     subject_cn_fallback: str | None = None,
     allow_empty_subject: bool = False,
+    issuer_id: int | None = None,
     source: CertSource = CertSource.ui,
-) -> Certificate:
+) -> Issued:
     """Sign a pasted CSR and store the result. There is no key to seal --
     cabin never sees the requester's private key (FR-5).
 
     ``subject_cn_fallback`` names the subject for a CSR that carries none,
     and ``allow_empty_subject`` issues without one when there is no name
-    short enough to be a CN; see :func:`cabin.ca.leaf.sign_csr`."""
-    issuer_cert, issuer_key = signing_credentials(db, secrets)
-    cert = leaf.sign_csr(
+    short enough to be a CN; see :func:`cabin.ca.leaf.sign_csr`. ``issuer_id``
+    and the return value follow :func:`issue_and_store` -- see its
+    docstring for the issuer-selection and URL-building rules (spec 0017
+    FR-6/FR-7).
+    """
+    from cabin.ca import crl
+
+    issuer = resolve_issuer(db, issuer_id)
+    issuer_cert, issuer_key = signing_credentials(db, secrets, issuer.id)
+    cert, capped_from = leaf.sign_csr(
         issuer_cert,
         issuer_key,
         csr_pem.encode("utf-8"),
         profile,
         days=days,
         sans_override=sans_override,
-        crl_url=crl_url,
+        crl_url=crl.distribution_url(db, issuer.id),
+        ca_issuers_url=crl.ca_issuers_url(db, issuer.id),
         subject_cn_fallback=subject_cn_fallback,
         allow_empty_subject=allow_empty_subject,
     )
-    return _store(db, cert, profile, _cert_sans(cert), None, source)
+    row = _store(db, cert, profile, _cert_sans(cert), None, source, issuer_id=issuer.id)
+    return Issued(row, capped_from)
 
 
 def get_certificate(db: Session, cert_id: int) -> Certificate | None:

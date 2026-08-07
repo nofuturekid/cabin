@@ -39,6 +39,9 @@ from cabin.store import create_session_factory
 from cabin.users import Role
 
 BASE = "https://ca.example.org"
+# FR-12: URLs baked into a certificate (e.g. the CRL URL) are always
+# http://, never https://, regardless of the configured (https) base_url.
+HTTP_BASE = "http://ca.example.org"
 
 #: What the streamable-HTTP transport requires a client to accept.
 _ACCEPT = "application/json, text/event-stream"
@@ -339,8 +342,19 @@ def test_mcp_lists_tools(mcp: TestClient, cfg: Config) -> None:
     assert isinstance(issue, dict)
     properties = issue["properties"]
     assert isinstance(properties, dict)
-    assert set(properties) == {"subject_cn", "sans", "profile", "key_type", "days"}
+    # FR-6: an MCP client must be able to select an issuer, or MCP can issue
+    # nothing at all from the moment a second issuer exists -- optional, so
+    # a single-issuer instance is unaffected and the FR-6 default still
+    # applies when it is omitted.
+    assert set(properties) == {"subject_cn", "sans", "profile", "key_type", "days", "issuer_id"}
     assert issue["required"] == ["subject_cn"]
+
+    sign = by_name["sign_csr"]["inputSchema"]
+    assert isinstance(sign, dict)
+    sign_properties = sign["properties"]
+    assert isinstance(sign_properties, dict)
+    assert set(sign_properties) == {"csr_pem", "profile", "days", "sans", "issuer_id"}
+    assert sign["required"] == ["csr_pem"]
 
 
 # --- FR-2 / AC-3: tokens and roles ---------------------------------------------
@@ -709,7 +723,12 @@ def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
     )
     assert revoked["status"] == "revoked"
     assert revoked["reason"] == "key_compromise"
-    assert str(revoked["crl_url"]).startswith(BASE)
+    # FR-12: the CRL URL is always http://, never https://, even though the
+    # configured base_url is https:// -- otherwise validating a cabin
+    # certificate would require fetching its CRL over TLS, which would
+    # require validating that certificate.
+    assert str(revoked["crl_url"]).startswith(HTTP_BASE)
+    assert not str(revoked["crl_url"]).startswith("https"), revoked["crl_url"]
     assert "/crl/" in str(revoked["crl_url"])
 
     # The route that serves /crl/{issuer_id} is Security's (spec 0017 work

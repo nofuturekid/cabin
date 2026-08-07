@@ -71,7 +71,9 @@
     <h2>The CA itself</h2>
     <p class="help">
       Replacing a CA means touching every trust store it is installed in, so
-      its expiry is flagged a year ahead.
+      an active issuer's expiry is flagged a year ahead. A retired row's only
+      remaining job is signing its CRL, so it is flagged only once it has
+      actually expired.
     </p>
   </div>
   <div>
@@ -80,7 +82,11 @@
         <tbody>
           {% for ca in ca_certs %}
           <tr>
-            <th>{{ ca.kind | capitalize }}</th>
+            <th>{{ ca.name }}</th>
+            <td class="nowrap">
+              <span class="tag">{{ ca.kind }}</span>
+              <span class="tag">{{ ca.status }}</span>
+            </td>
             <td class="nowrap">{{ ca.not_after }}</td>
             <td class="nowrap">
               <span class="tag {{ ca.tag }}">
@@ -100,43 +106,48 @@
     <h2>Revocation</h2>
     <p class="help">
       Clients only learn about a revocation if the CRL they fetch is still
-      inside its validity window.
+      inside its validity window. Each issuer signs and serves its own.
     </p>
   </div>
   <div>
-    {% if crl %}
+    {% for c in crls %}
     <div class="scroller">
       <table>
         <tbody>
-          <tr><th>CRL number</th><td class="mono">{{ crl.number }}</td></tr>
-          <tr><th>Generated</th><td class="nowrap">{{ crl.generated_at }}</td></tr>
+          <tr><th>Issuer</th><td>{{ c.issuer_name }}</td></tr>
+          {% if c.state %}
+          <tr><th>CRL number</th><td class="mono">{{ c.state.number }}</td></tr>
+          <tr><th>Generated</th><td class="nowrap">{{ c.state.generated_at }}</td></tr>
           <tr>
             <th>Next update</th>
             <td class="nowrap">
-              {{ crl.next_update }}
-              {% if crl.stale %}<span class="tag tag-bad">stale</span>{% endif %}
+              {{ c.state.next_update }}
+              {% if c.state.stale %}<span class="tag tag-bad">stale</span>{% endif %}
             </td>
           </tr>
+          {% else %}
+          <tr><td colspan="2">No CRL has been generated yet — nothing has been revoked.</td></tr>
+          {% endif %}
         </tbody>
       </table>
     </div>
-    {% if crl.stale %}
+    {% if c.state and c.state.stale %}
     <p class="note">
       This CRL is past its next update, so clients holding it no longer see
       recent revocations. It is rebuilt on the next revocation or restart.
     </p>
     {% endif %}
-    {% else %}
-    <p class="note">No CRL has been generated yet — nothing has been revoked.</p>
-    {% endif %}
-    {% if crl_url %}
-    <p class="note">Published at <code>{{ crl_url }}</code>.</p>
+    {% if c.url %}
+    <p class="note">Published at <code>{{ c.url }}</code>.</p>
     {% else %}
     <p class="note">
       No base URL is set, so no distribution point is published and newly
       issued certificates do not point at one.
     </p>
     {% endif %}
+    {% else %}
+    <p class="note">No intermediate is configured yet to sign a CRL.</p>
+    {% endfor %}
   </div>
 </div>
 

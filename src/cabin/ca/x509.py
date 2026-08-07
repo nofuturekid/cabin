@@ -113,13 +113,15 @@ def _public_key_der(public_key: CertificatePublicKeyTypes) -> bytes:
 
 
 def create_root(
-    subject_cn: str, key_type: str, years: int = 20
+    subject_cn: str, key_type: str, years: int = 20, path_length: int = 1
 ) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes]:
     """Self-signed root CA.
 
-    Extensions: ``BasicConstraints(ca=True, path_length=1)`` and
+    Extensions: ``BasicConstraints(ca=True, path_length=path_length)`` and
     ``KeyUsage(key_cert_sign, crl_sign)``, both critical, plus a
-    ``SubjectKeyIdentifier``.
+    ``SubjectKeyIdentifier``. ``path_length`` (spec 0017 FR-13) is the one
+    decision about a root that cannot be corrected afterwards; this layer
+    does not bound it -- the 1..4 policy range is the form's job (AC-11).
     """
     key = generate_key(key_type)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)])
@@ -133,7 +135,7 @@ def create_root(
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - _BACKDATE)
         .not_valid_after(now + timedelta(days=_DAYS_PER_YEAR * years))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
         .add_extension(_ca_key_usage(), critical=True)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
     )
@@ -181,6 +183,65 @@ def create_intermediate(
     )
     cert = builder.sign(root_key, algorithm=signing_algorithm(root_key))
     return cert, key
+
+
+def renew_certificate(
+    cert: x509.Certificate,
+    key: CertificateIssuerPrivateKeyTypes,
+    parent_cert: x509.Certificate,
+    parent_key: CertificateIssuerPrivateKeyTypes,
+    years: int,
+) -> x509.Certificate:
+    """Re-sign ``cert`` for the same key, subject and row (spec 0017 FR-5) --
+    rotation without a rekey.
+
+    ``parent_cert``/``parent_key`` do the signing: for a root, the
+    certificate's own cert/key (self-signed); for an intermediate, its
+    parent's. The public key, subject, SubjectKeyIdentifier, BasicConstraints
+    (including ``path_length``) and KeyUsage are carried over from ``cert``
+    unchanged -- only the serial number and ``not_after`` actually move. That
+    is what keeps every certificate issued under the old ``cert`` valid
+    against the renewed one: its AuthorityKeyIdentifier still matches the
+    unchanged SubjectKeyIdentifier.
+
+    The AuthorityKeyIdentifier is not "carried over" but re-derived from
+    ``parent_cert``/``parent_key`` the normal way, and only added at all if
+    ``cert`` already carried one -- mirroring :func:`create_root` (no AKI, a
+    self-signed cert doesn't need one) and :func:`create_intermediate` (AKI
+    from the parent's SKI). Since a renewal never changes any key, this
+    lands on the same bytes an unrenewed AKI would already have carried.
+
+    This is a pure primitive: it clamps nothing. Cutting ``years`` back to
+    the parent's remaining validity is ``ca.service.renew_in_place``'s job,
+    the same way choosing which issuer to call this with is.
+    """
+    ski = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    basic_constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    key_usage = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+    try:
+        cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+        needs_aki = True
+    except x509.ExtensionNotFound:
+        needs_aki = False
+
+    now = datetime.now(UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(cert.subject)
+        .issuer_name(parent_cert.subject)
+        .public_key(cert.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - _BACKDATE)
+        .not_valid_after(now + timedelta(days=_DAYS_PER_YEAR * years))
+        .add_extension(basic_constraints, critical=True)
+        .add_extension(key_usage, critical=True)
+        .add_extension(ski, critical=False)
+    )
+    if needs_aki:
+        builder = builder.add_extension(
+            authority_key_identifier(parent_cert, parent_key), critical=False
+        )
+    return builder.sign(parent_key, algorithm=signing_algorithm(parent_key))
 
 
 def load_import(

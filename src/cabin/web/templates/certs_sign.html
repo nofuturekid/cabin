@@ -28,25 +28,37 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
         <label for="csr_pem">Certificate signing request (PEM)</label>
-        <textarea id="csr_pem" name="csr_pem" rows="10" required></textarea>
+        <textarea id="csr_pem" name="csr_pem" rows="10" required>{{ values.get('csr_pem', '') }}</textarea>
       </div>
+      {% if show_issuer_select %}
+      <div class="field">
+        <label for="sign_issuer_id">Issuer</label>
+        <select id="sign_issuer_id" name="issuer_id" required>
+          <option disabled {% if not values.get('issuer_id') %}selected{% endif %}>choose an issuer</option>
+          {% for issuer in issuers %}
+          <option value="{{ issuer.id }}" {% if values.get('issuer_id')|string == issuer.id|string %}selected{% endif %}>{{ issuer.name }}</option>
+          {% endfor %}
+        </select>
+        <span class="hint">More than one issuer is active; pick which one signs this certificate.</span>
+      </div>
+      {% endif %}
       <div class="field">
         <label for="sign_profile">Profile</label>
         <select id="sign_profile" name="profile">
           {% for profile in profiles %}
-          <option value="{{ profile }}" {% if loop.first %}selected{% endif %}>{{ profile }}</option>
+          <option value="{{ profile }}" {% if values.get('profile', profiles[0]) == profile %}selected{% endif %}>{{ profile }}</option>
           {% endfor %}
         </select>
         <span class="hint">server = serverAuth, client = clientAuth</span>
       </div>
       <div class="field">
         <label for="sans_override">SAN override</label>
-        <textarea id="sans_override" name="sans_override" rows="3"></textarea>
+        <textarea id="sans_override" name="sans_override" rows="3">{{ values.get('sans_override', '') }}</textarea>
         <span class="hint">One per line; leave empty to keep the CSR's SANs.</span>
       </div>
       <div class="field">
         <label for="sign_days">Validity (days)</label>
-        <input id="sign_days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ default_days }}" required />
+        <input id="sign_days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ values.get('days', default_days) }}" required />
       </div>
       <div class="actions"><button type="submit" class="primary">Sign CSR</button></div>
     </form>
