@@ -35,8 +35,12 @@
 <div class="ca-row">
 <p><b>{{ i.name }}</b> <span class="tag">intermediate</span> <span class="tag{% if i.status == "retired" %} tag-bad{% endif %}">{{ i.status }}</span> <span class="nowrap">until {{ i.not_valid_after }}</span></p>
 {% if i.can_renew or i.can_retire %}<form method="post" class="inline-form"><input type=hidden name=csrf_token value="{{ csrf_token }}">{% if i.can_renew %}<input type=number name=years value=10 min=1 max=50 size=2><button formaction="/ca/{{ i.id }}/renew">Renew</button>{% endif %}{% if i.can_retire %}<button formaction="/ca/{{ i.id }}/retire" class=danger>Retire</button>{% endif %}</form>{% endif %}
-<p><a href="/ca/{{ i.id }}.pem">cert.pem</a> <a href="/ca/{{ i.id }}/chain.pem">chain.pem</a> {% if i.crl_url %}<a href="{{ i.crl_url }}">crl</a>{% endif %} <span class="help mono">{{ i.subject }} · {{ i.fingerprint }}</span></p>
-{% if not i.crl_url %}<p class="note">No base URL is set, so this issuer publishes no CRL distribution point. Set one under <a href="/settings">Settings</a>.</p>{% endif %}
+<p><a href="/ca/{{ i.id }}.pem">cert.pem</a> <a href="/ca/{{ i.id }}/chain.pem">chain.pem</a> <span class="help mono">{{ i.subject }} · {{ i.fingerprint }}</span></p>
+{% if i.crl_url %}
+<p class="help mono">CRL: <a href="{{ i.crl_url }}">{{ i.crl_url }}</a><br>AIA: <a href="{{ i.ca_url }}">{{ i.ca_url }}</a></p>
+{% else %}
+<p class="note">No base URL is set, so this issuer publishes no CRL distribution point or CA issuer URL. Set one under <a href="/settings">Settings</a>.</p>
+{% endif %}
 </div>
 {% endfor %}
 </div>

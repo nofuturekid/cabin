@@ -11,6 +11,14 @@
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+{% if tls_self_signed %}
+<p id="tls-setup-note" class="note">
+  cabin is serving a self-signed TLS certificate right now, so your browser
+  shows a warning -- that is expected. It stops once a CA exists: cabin then
+  issues and switches to its own certificate automatically, with no restart.
+</p>
+{% endif %}
+
 <div class="section">
   <div>
     <h2>Create a new CA</h2>

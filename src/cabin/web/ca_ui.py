@@ -26,6 +26,7 @@ from cabin.ca.service import (
 )
 from cabin.ca.x509 import CAImportError
 from cabin.settings import ACME_ENABLED, get_flag
+from cabin.tls import TlsMode
 from cabin.users import User
 from cabin.web import templates
 from cabin.web.deps import (
@@ -91,14 +92,27 @@ def _subject(hierarchy: CAHierarchy) -> str:
     return str(_cert_info(hierarchy.intermediate)["subject"])
 
 
+def _tls_self_signed(request: Request) -> bool:
+    """Spec 0022 FR-14: whether ca_setup.html's first-run warning note
+    belongs on this page -- only while cabin is currently serving a
+    self-signed certificate. `app.state.tls` is `None` with TLS off, and
+    `.mode` is `None` before the first `ensure_current`; both mean "no".
+    """
+    tls = request.app.state.tls
+    return tls is not None and tls.mode == TlsMode.self_signed
+
+
 def _row_view(db: Session, row: CACertificate, *, parent_has_key: bool) -> dict[str, object]:
     """One ``/ca`` row: identity, status, which actions are safe to offer
     (AC-13, an imported root has no stored key so creating an intermediate
     under it or renewing it would only ever 500), and -- for an intermediate
-    -- where its CRL is published (spec 0007 FR-6, so an operator can see
-    why a certificate carries no CDP)."""
+    -- where its CRL and its AIA `caIssuers` document are published (spec
+    0007 FR-6, spec 0022 FR-16: the exact URLs embedded in certificates that
+    issuer signs, so an operator can see why a certificate carries none, or
+    click through to check a wrong port mapping)."""
     has_key = row.key_sealed is not None
     signing_key_available = has_key if row.kind == "root" else parent_has_key
+    is_intermediate = row.kind == "intermediate"
     return {
         **_cert_info(row),
         "id": row.id,
@@ -108,7 +122,8 @@ def _row_view(db: Session, row: CACertificate, *, parent_has_key: bool) -> dict[
         "can_create_intermediate": row.kind == "root" and has_key,
         "can_renew": signing_key_available,
         "can_retire": row.status == "active",
-        "crl_url": crl_service.distribution_url(db, row.id) if row.kind == "intermediate" else None,
+        "crl_url": crl_service.distribution_url(db, row.id) if is_intermediate else None,
+        "ca_url": crl_service.ca_issuers_url(db, row.id) if is_intermediate else None,
     }
 
 
@@ -144,6 +159,9 @@ def _list_page(
     rows = ca_service.list_cas(db)
     context = base_context(request, user)
     context["error"] = error
+    # Spec 0022 FR-14: ca_setup.html's first-run warning note is read from
+    # this key regardless of which template ends up rendering below.
+    context["tls_self_signed"] = _tls_self_signed(request)
     if not rows:
         return templates.TemplateResponse(
             request, "ca_setup.html", context, status_code=status_code
@@ -191,6 +209,7 @@ def ca_create(
     if form_error is not None:
         context = base_context(request, user)
         context["error"] = form_error
+        context["tls_self_signed"] = _tls_self_signed(request)
         return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
     hierarchy = ca_service.create_hierarchy(
         db,
@@ -218,6 +237,15 @@ def ca_create(
         },
         ip=client_ip(request, db),
     )
+    # Spec 0022 FR-6: a freshly created CA can now sign cabin's own
+    # certificate, so the swap is offered the chance to happen immediately
+    # rather than waiting for the hourly check. A failure here is logged and
+    # audited by `ensure_current` itself and never turned into a 5xx -- the
+    # CA *was* created, and losing that outcome over a certificate swap
+    # would be the worse error.
+    tls_manager = request.app.state.tls
+    if tls_manager is not None:
+        tls_manager.ensure_current(db, request.app.state.secrets)
     return RedirectResponse("/ca", status_code=303)
 
 
@@ -245,6 +273,7 @@ def ca_import(
     except CAImportError as exc:
         context = base_context(request, user)
         context["error"] = str(exc)
+        context["tls_self_signed"] = _tls_self_signed(request)
         return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
     # The subject only -- neither the submitted key nor its passphrase has any
     # business in a log (spec 0004 FR-3).
@@ -259,6 +288,11 @@ def ca_import(
         detail={"subject": subject},
         ip=client_ip(request, db),
     )
+    # Spec 0022 FR-6: same as ca_create above -- an imported CA is just as
+    # eligible to sign cabin's own certificate as a freshly generated one.
+    tls_manager = request.app.state.tls
+    if tls_manager is not None:
+        tls_manager.ensure_current(db, request.app.state.secrets)
     return RedirectResponse("/ca", status_code=303)
 
 

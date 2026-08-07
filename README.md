@@ -61,18 +61,23 @@ open the WebUI, complete the wizard.
 
 ## Configuration
 
-Five environment variables, all optional. Everything else — CA, profiles,
+Seven environment variables, all optional. Everything else — CA, profiles,
 base URL, ACME, MCP, users, tokens — is configured in the UI and stored in
 the database. Flags (`--port`, `--data-dir`) beat environment variables,
-which beat the defaults.
+which beat the defaults. Two of the seven exist only for native TLS
+(`CABIN_TLS`, `CABIN_HTTP_PORT`) — see
+[`docs/adr/0002-tls-environment-variables.md`](docs/adr/0002-tls-environment-variables.md)
+for why they had to leave the database and land here instead.
 
-| Variable                  | Default                        | What it does                                                                                           |
-| ------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `PORT`                    | `8080`                         | Listen port. One port serves the UI, the API, ACME, MCP and the CRL.                                   |
-| `DATA_DIR`                | `data` (`/data` in the image)  | Holds `cabin.db` and `secret.key`.                                                                     |
-| `CABIN_DB_URL`            | `sqlite:///$DATA_DIR/cabin.db` | SQLAlchemy URL. SQLite is the tested default; PostgreSQL needs a driver the image does not bundle yet. |
-| `COOKIE_SECURE`           | `false`                        | Send session cookies only over HTTPS. Turn on behind a TLS proxy.                                      |
-| `CABIN_MASTER_PASSPHRASE` | unset                          | Wraps the master key in `secret.key` with a scrypt-derived KEK. Set it **before** the first start.     |
+| Variable                  | Default                        | What it does                                                                                                     |
+| ------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `PORT`                    | `8080`                         | Listen port. Serves the UI, the API, ACME, MCP and the CRL — over HTTPS instead of HTTP when TLS is on.          |
+| `DATA_DIR`                | `data` (`/data` in the image)  | Holds `cabin.db`, `secret.key` and, with TLS on, `tls/`.                                                         |
+| `CABIN_DB_URL`            | `sqlite:///$DATA_DIR/cabin.db` | SQLAlchemy URL. SQLite is the tested default; PostgreSQL needs a driver the image does not bundle yet.           |
+| `COOKIE_SECURE`           | `false`                        | Send session cookies only over HTTPS. Turn on behind a TLS proxy; forced on automatically when TLS is on.        |
+| `CABIN_MASTER_PASSPHRASE` | unset                          | Wraps the master key in `secret.key` with a scrypt-derived KEK. Set it **before** the first start.               |
+| `CABIN_TLS`               | `false`                        | Terminate TLS in cabin itself instead of behind a reverse proxy. See Security notes below.                       |
+| `CABIN_HTTP_PORT`         | `8081`                         | Port of the plaintext listener serving only the CRL and CA-certificate routes. Used only when `CABIN_TLS` is on. |
 
 The version cabin reports at `/healthz` and in the UI footer is the version of
 the installed wheel: the release build stamps the git tag into it
@@ -86,9 +91,31 @@ the installed wheel: the release build stamps the git tag into it
 - **`CABIN_MASTER_PASSPHRASE`** adds a passphrase-derived KEK around the
   master key, so a stolen `secret.key` alone is not enough. It cannot be
   added or changed after the first start without discarding the sealed keys.
-- **Put TLS in front.** cabin speaks plain HTTP; terminate TLS in a reverse
-  proxy and set `COOKIE_SECURE=true`. ACME `http-01` validation is outbound,
-  so it works either way.
+- **Terminate TLS — in a reverse proxy, or in cabin itself.** The default is
+  still plain HTTP behind a reverse proxy: terminate TLS there and set
+  `COOKIE_SECURE=true`. ACME `http-01` validation is outbound, so it works
+  either way.
+
+  Set `CABIN_TLS=true` and cabin terminates TLS itself, in three stages, no
+  restart between them: it serves a self-signed certificate the moment it
+  starts (expect one browser warning — the UI says so before and after it
+  happens); the instant a CA exists it issues and serves a certificate from
+  it, hot-swapped into the running listener; once you install cabin's root
+  certificate in your trust store, the warning is gone for good and `curl`
+  without `--cacert` fails, which is how you know the trust is real.
+  `COOKIE_SECURE` is forced on automatically the moment TLS is on — there is
+  no deployment where an explicit `COOKIE_SECURE=false` should win.
+  Certificates need a plaintext CRL/CA-certificate listener to stay
+  fetchable (spec 0022 FR-10): cabin binds a second port
+  (`CABIN_HTTP_PORT`, default `8081`) that serves only those two routes and
+  nothing else. If `base_url` names this host, publish that port on host
+  port **80** — that is where every certificate cabin issues says its CRL
+  and CA certificate are, and `base_url` must not name any other explicit
+  port while TLS is on, or those URLs would point at the TLS listener
+  instead and be unfetchable. cabin's own TLS private key is sealed at rest
+  exactly like every other key it holds — `DATA_DIR/tls/cabin.key.sealed`,
+  same treatment as `secret.key`, no exception carved out for it.
+
 - **Do not expose it to the internet.** An internal CA is trusted by every
   machine that installs its root; treat the admin UI accordingly.
 

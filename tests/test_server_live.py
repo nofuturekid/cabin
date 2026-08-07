@@ -25,9 +25,11 @@ docstring says explicitly.
 """
 
 import os
+import re
 import signal
 from pathlib import Path
 
+import pytest
 from live_server import LiveClient, live_cabin, plain_get
 
 from cabin.app import create_app
@@ -159,3 +161,49 @@ def test_sigterm_stops_both_listeners(tmp_path: Path) -> None:
             except OSError:
                 continue
             raise AssertionError(f"port {port} still answers after SIGTERM")
+
+
+def test_multi_worker_with_tls_refuses_to_start(tmp_path: Path) -> None:
+    """FR-8/AC-9: a real child started with `WEB_CONCURRENCY=2` and TLS on
+    must never reach a listening socket at all -- this is the actual defect
+    FR-8 exists to prevent, so the test drives a real subprocess rather than
+    calling a validation function directly.
+
+    `live_server._wait_ready` checks `proc.poll()` on every iteration
+    *before* attempting a connection, so a child that exits during startup
+    surfaces as a `TimeoutError` naming its exit code and its captured
+    stdout/stderr (`live_cabin`'s child runs with stderr merged into
+    stdout) -- that message is the evidence this test inspects: a non-zero
+    exit, reached quickly rather than at the 15s readiness timeout, whose
+    text names the certificate swap as the reason. A plausible wrong
+    implementation -- one that merely logs a warning and starts anyway, or
+    validates `WEB_CONCURRENCY` without checking `config.tls` -- would
+    leave the child answering `/healthz`, and `live_cabin` would return a
+    working handle instead of raising, which is exactly what the final
+    `pytest.raises` block below is there to catch.
+    """
+    with (
+        pytest.raises(TimeoutError) as exc_info,
+        live_cabin(data_dir=tmp_path / "instance", tls=True, env={"WEB_CONCURRENCY": "2"}),
+    ):
+        pass  # pragma: no cover -- reaching this body is itself a failure
+
+    message = str(exc_info.value)
+    assert "exited during startup" in message
+    match = re.search(r"\(code (-?\d+)\)", message)
+    assert match is not None, message
+    assert int(match.group(1)) != 0
+    assert "certificate" in message.lower()
+    assert "WEB_CONCURRENCY" in message
+
+
+def test_multi_worker_without_tls_starts(tmp_path: Path) -> None:
+    """FR-8's counter-check (AC-9): the identical `WEB_CONCURRENCY=2` does
+    not stop cabin from starting when TLS is off -- `run` never hands a
+    worker count to anything that would spawn a second process either way,
+    so there is nothing for FR-8 to refuse, and an operator not using
+    cabin's TLS must not be obstructed by a guard that exists for it."""
+    with live_cabin(
+        data_dir=tmp_path / "instance", tls=False, env={"WEB_CONCURRENCY": "2"}
+    ) as handle:
+        assert plain_get("127.0.0.1", handle.port, "/healthz").status == 200

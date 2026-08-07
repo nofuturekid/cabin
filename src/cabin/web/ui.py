@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from cryptography import x509
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
@@ -21,7 +22,9 @@ from cabin.audit import Actor, ActorKind, AuditAction
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
+from cabin.ca.certs import Certificate
 from cabin.ca.service import CACertificate
+from cabin.tls import TlsMode
 from cabin.users import (
     InvalidCredentialsError,
     LastSuperadminError,
@@ -82,12 +85,52 @@ def _login_and_redirect(request: Request, db: Session, user: User, to: str) -> R
     return resp
 
 
-def _anon_context(error: str | None) -> dict[str, object]:
+def _tls_mode(request: Request) -> TlsMode | None:
+    """Spec 0022 FR-14 / Interface Contract R1: `app.state.tls` is `None`
+    when TLS is off, and its own `.mode` is `None` before the first
+    `ensure_current` has decided anything -- both collapse to "nothing to
+    show" for the pages that read this.
+    """
+    tls = request.app.state.tls
+    return tls.mode if tls is not None else None
+
+
+def _tls_banner(request: Request, db: Session) -> dict[str, object] | None:
+    """Spec 0022 FR-14: what the dashboard's TLS banner says, or None when
+    there is nothing to say (TLS off, or no material decided yet).
+
+    Self-signed and CA-issued must read differently -- a banner identical in
+    both states is worse than none. For CA-issued, the root to link is read
+    off the most recently issued ``source == "system"`` certificate (FR-6's
+    ``CertSource.system``) rather than assumed to be "the" CA, since an
+    instance can hold more than one hierarchy.
+    """
+    mode = _tls_mode(request)
+    if mode is None:
+        return None
+    if mode == TlsMode.self_signed:
+        return {"mode": mode.value, "root_cer_url": None}
+    system_cert = db.scalar(
+        select(Certificate).where(Certificate.source == "system").order_by(Certificate.id.desc())
+    )
+    root_cer_url = None
+    if system_cert is not None:
+        chain = ca_service.chain_for(db, system_cert.issuer_id)
+        root_cer_url = f"/ca/{chain[-1].id}.cer"
+    return {"mode": mode.value, "root_cer_url": root_cer_url}
+
+
+def _anon_context(request: Request, error: str | None) -> dict[str, object]:
     """Context for pre-auth pages (setup/login): no user yet, but
     layout.html's ``{% if user %}`` still needs the key to exist now that
-    undefined variables are a hard error.
+    undefined variables are a hard error. ``tls_self_signed`` is spec 0022
+    FR-14's flag for setup.html's first-run warning note.
     """
-    return {"user": None, "error": error}
+    return {
+        "user": None,
+        "error": error,
+        "tls_self_signed": _tls_mode(request) == TlsMode.self_signed,
+    }
 
 
 # --- first-run setup -------------------------------------------------------
@@ -97,7 +140,7 @@ def _anon_context(error: str | None) -> dict[str, object]:
 def setup_form(request: Request, db: Session = Depends(get_db)) -> Response:
     if users.count_users(db) > 0:
         raise HTTPException(status_code=404)
-    return templates.TemplateResponse(request, "setup.html", _anon_context(None))
+    return templates.TemplateResponse(request, "setup.html", _anon_context(request, None))
 
 
 @router.post("/setup")
@@ -114,14 +157,14 @@ def setup_submit(
             user = users.create_user(db, username, password, Role.superadmin)
         except WeakPasswordError as exc:
             return templates.TemplateResponse(
-                request, "setup.html", _anon_context(str(exc)), status_code=400
+                request, "setup.html", _anon_context(request, str(exc)), status_code=400
             )
         except (UserExistsError, IntegrityError):
             db.rollback()
             return templates.TemplateResponse(
                 request,
                 "setup.html",
-                _anon_context("setup already completed by another request"),
+                _anon_context(request, "setup already completed by another request"),
                 status_code=400,
             )
     # Nobody is logged in yet, so the actor is cabin itself: an audit trail
@@ -145,7 +188,7 @@ def setup_submit(
 
 @router.get("/login")
 def login_form(request: Request, _: None = Depends(redirect_if_no_users)) -> Response:
-    return templates.TemplateResponse(request, "login.html", _anon_context(None))
+    return templates.TemplateResponse(request, "login.html", _anon_context(request, None))
 
 
 @router.post("/login")
@@ -174,7 +217,7 @@ def login_submit(
         return templates.TemplateResponse(
             request,
             "login.html",
-            _anon_context("invalid username or password"),
+            _anon_context(request, "invalid username or password"),
             status_code=401,
         )
     # Re-logging in while already holding a session for the SAME user
@@ -268,6 +311,10 @@ def dashboard(
     rows = ca_service.list_cas(db)
     context = base_context(request, user)
     context["ca_configured"] = bool(rows)
+    # Spec 0022 FR-14: which certificate cabin itself is serving right now,
+    # shown regardless of whether a CA hierarchy exists yet -- stage 1
+    # (self-signed) is exactly the state before one does.
+    context["tls_banner"] = _tls_banner(request, db)
     if not rows:
         # Nothing to summarise before there is a CA (AC-8).
         return templates.TemplateResponse(request, "dashboard.html", context)

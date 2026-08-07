@@ -9,6 +9,24 @@
   </div>
 </div>
 
+{% if tls_banner %}
+<div id="tls-banner" data-tls-mode="{{ tls_banner.mode }}" class="note">
+  {% if tls_banner.mode == "self_signed" %}
+  cabin is using a self-signed certificate, so your browser shows a warning.
+  Create or import a CA to replace it.
+  {% else %}
+  cabin's certificate is issued by its own CA.
+  {% if tls_banner.root_cer_url %}
+  Install <a href="{{ tls_banner.root_cer_url }}">this root certificate</a>
+  in your trust store to remove the browser warning.
+  {% else %}
+  Install its root certificate in your trust store to remove the browser
+  warning.
+  {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
 {% if not ca_configured %}
 <div class="error"><a href="/ca">CA: not set up</a></div>
 <p class="note">

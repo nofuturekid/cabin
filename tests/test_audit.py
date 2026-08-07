@@ -51,6 +51,8 @@ SPEC_ACTIONS = {
     # spec 0017 FR-15: renewing or retiring a CA hierarchy row
     "ca_renewed",
     "ca_retired",
+    # spec 0022 FR-14: cabin's own TLS certificate, self-signed or CA-issued
+    "tls_certificate_issued",
 }
 
 

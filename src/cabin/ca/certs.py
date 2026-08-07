@@ -56,6 +56,11 @@ class CertSource(StrEnum):
     #: of "api" -- "an assistant did this" is exactly the distinction an
     #: operator reading the inventory wants to be able to make.
     mcp = "mcp"
+    #: Spec 0022 FR-6: cabin issuing a certificate for itself. A fifth front
+    #: door, not a flavour of "ui" -- an operator reading the inventory must
+    #: be able to tell "cabin's own listener" apart from anything a human or
+    #: a script asked for.
+    system = "system"
 
 
 class Certificate(Base):

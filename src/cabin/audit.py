@@ -100,6 +100,10 @@ class AuditAction(StrEnum):
     acme_certificate_revoked = "acme_certificate_revoked"
     acme_eab_key_created = "acme_eab_key_created"
     acme_eab_key_revoked = "acme_eab_key_revoked"
+    # Spec 0022 FR-14: cabin's own TLS certificate, self-signed or
+    # CA-issued -- recorded with SYSTEM_ACTOR so the certificate the
+    # instance presents always has a written history.
+    tls_certificate_issued = "tls_certificate_issued"
 
 
 #: Accepted ``?action=`` / ``?actor_kind=`` values; "all" means "no filter".

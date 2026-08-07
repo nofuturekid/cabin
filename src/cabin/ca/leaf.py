@@ -404,6 +404,51 @@ def issue_certificate(
     return cert, key, capped_from
 
 
+def self_signed_server_certificate(
+    subject_cn: str,
+    sans: Sequence[str],
+    key_type: str = "ecdsa-p256",
+    days: int = 90,
+) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes]:
+    """Spec 0022 FR-4: stage 1's certificate, generated before any CA
+    exists so cabin has something to serve at first start.
+
+    Reuses this module's SAN normalisation and validation and the
+    ``server`` profile's KeyUsage/EKU, so a stage-1 certificate looks, to
+    everything but its issuer, like an ordinary server leaf --
+    ``BasicConstraints(ca=False)``, the same digitalSignature KeyUsage and
+    serverAuth EKU :func:`issue_certificate` gives the ``server`` profile,
+    and the same ``_BACKDATE``. It carries no CRL distribution point and no
+    AIA: there is no CRL that would cover a certificate with no issuer to
+    revoke it. Not stored in the ``certificates`` table -- that is the
+    caller's decision (FR-4), not this pure function's.
+    """
+    cn = _validate_cn(subject_cn)
+    resolved = _resolve_sans([_normalize_san(san) for san in sans], [], cn)
+    key = generate_key(key_type)
+    now = datetime.now(UTC)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - _BACKDATE)
+        .not_valid_after(now + timedelta(days=days))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(_key_usage(Profile.server, key.public_key()), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([_PROFILE_EKU[Profile.server]]), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(
+            x509.SubjectAlternativeName([_general_name(san) for san in resolved]),
+            critical=False,
+        )
+        .sign(key, algorithm=signing_algorithm(key))
+    )
+    return cert, key
+
+
 def sign_csr(
     issuer_cert: x509.Certificate,
     issuer_key: CertificateIssuerPrivateKeyTypes,

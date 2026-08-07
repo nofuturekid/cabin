@@ -84,4 +84,34 @@
     Display="advanced"
     Required="false"
     Mask="true"/>
+  <Config
+    Name="CABIN_TLS"
+    Target="CABIN_TLS"
+    Default=""
+    Mode=""
+    Description="Set to true to have cabin terminate TLS itself: it issues its own certificate (self-signed at first start, then from its own CA) and forces COOKIE_SECURE on automatically. Needs the plaintext PKI port below published too."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"/>
+  <Config
+    Name="CABIN_HTTP_PORT"
+    Target="CABIN_HTTP_PORT"
+    Default="8081"
+    Mode=""
+    Description="Port cabin listens on for the plaintext CRL/CA-certificate routes. Only used when CABIN_TLS is true; must match the container-side port of the mapping below."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">8081</Config>
+  <Config
+    Name="Plaintext PKI port"
+    Target="8081"
+    Default="8081"
+    Mode="tcp"
+    Description="Host port for the plaintext CRL/CA-certificate listener. Only bound when CABIN_TLS is true. If base_url names this host, publish it on host port 80 — that is where every certificate cabin issues says its CRL and CA certificate are."
+    Type="Port"
+    Display="advanced"
+    Required="false"
+    Mask="false">8081</Config>
 </Container>

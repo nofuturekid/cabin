@@ -389,6 +389,23 @@ def create_intermediate_under(
     return row
 
 
+def retire_targets(db: Session, ca_id: int) -> set[int]:
+    """The ids :func:`retire` would stand down for ``ca_id``: the row
+    itself, plus its intermediates when it is a root (spec 0017 FR-4's
+    cascade).
+
+    Extracted so spec 0022 FR-17's route check -- "would retiring this leave
+    cabin's own TLS binding without an issuer" -- and :func:`retire` itself
+    share one definition of what a retire touches, instead of the check
+    re-deriving the cascade and silently drifting from it.
+    """
+    row = get_ca(db, ca_id)
+    if row.kind != "root":
+        return {row.id}
+    children = db.scalars(select(CACertificate).where(CACertificate.parent_id == row.id))
+    return {row.id, *(child.id for child in children)}
+
+
 def retire(db: Session, ca_id: int) -> None:
     """Stand a row down: it stops being offered as an issuer, but keeps
     serving its chain, its CRL and its inventory entry (spec 0017 FR-4).
@@ -396,30 +413,25 @@ def retire(db: Session, ca_id: int) -> None:
     Retiring an already-retired row is a no-op, not an error -- a caller
     retrying after a timeout should get success, not a 409. Retiring a root
     cascades to every one of its intermediates, because a root that must
-    not be used is not one whose intermediates may keep issuing under it.
-    Either way, the operation is refused with RetireError when it would
-    leave the whole instance with no active issuer anywhere -- the same
-    invariant as "the last superadmin cannot be deleted"
-    (``users.py:75-79``) -- and refusing leaves every row untouched.
+    not be used is not one whose intermediates may keep issuing under it --
+    :func:`retire_targets` is what computes that set. Either way, the
+    operation is refused with RetireError when it would leave the whole
+    instance with no active issuer anywhere -- the same invariant as "the
+    last superadmin cannot be deleted" (``users.py:75-79``) -- and refusing
+    leaves every row untouched.
     """
     row = get_ca(db, ca_id)
     if row.status == "retired":
         return
 
-    if row.kind == "root":
-        children = list(db.scalars(select(CACertificate).where(CACertificate.parent_id == row.id)))
-        descendant_ids = {child.id for child in children}
-        remaining = [issuer for issuer in active_issuers(db) if issuer.id not in descendant_ids]
-        if not remaining:
+    targets = retire_targets(db, ca_id)
+    remaining = [issuer for issuer in active_issuers(db) if issuer.id not in targets]
+    if not remaining:
+        if row.kind == "root":
             raise RetireError(f"retiring root {ca_id} would leave no active issuer")
-        row.status = "retired"
-        for child in children:
-            child.status = "retired"
-    else:
-        remaining = [issuer for issuer in active_issuers(db) if issuer.id != row.id]
-        if not remaining:
-            raise RetireError(f"cannot retire the last active issuer ({ca_id})")
-        row.status = "retired"
+        raise RetireError(f"cannot retire the last active issuer ({ca_id})")
+    for target_id in targets:
+        get_ca(db, target_id).status = "retired"
     db.commit()
 
 
