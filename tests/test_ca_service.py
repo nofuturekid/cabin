@@ -482,6 +482,20 @@ def test_renew_in_place_same_key_name_id_longer_validity(db: Session, secrets: S
     assert after_cert.serial_number != before_cert.serial_number
     assert after_cert.not_valid_after_utc > before_cert.not_valid_after_utc
 
+    # SKI equality is carried over unconditionally by renew_certificate and
+    # so would still hold even if the row had been re-signed with a fresh
+    # key -- it does not prove the key is unchanged. Check the actual public
+    # key bytes, and that the renewed root's self-signature verifies against
+    # that same key: a root resigned with a different private key still has
+    # subject == issuer (still "looks" self-issued) but fails this check.
+    def _spki(cert: x509.Certificate) -> bytes:
+        return cert.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+    assert _spki(after_cert) == _spki(before_cert)
+    after_cert.verify_directly_issued_by(after_cert)
+
     stored = get_ca(db, hierarchy.root.id)
     assert stored.cert_pem == renewed.cert_pem
 

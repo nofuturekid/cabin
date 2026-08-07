@@ -187,7 +187,6 @@ def create_intermediate(
 
 def renew_certificate(
     cert: x509.Certificate,
-    key: CertificateIssuerPrivateKeyTypes,
     parent_cert: x509.Certificate,
     parent_key: CertificateIssuerPrivateKeyTypes,
     years: int,
@@ -195,14 +194,18 @@ def renew_certificate(
     """Re-sign ``cert`` for the same key, subject and row (spec 0017 FR-5) --
     rotation without a rekey.
 
-    ``parent_cert``/``parent_key`` do the signing: for a root, the
-    certificate's own cert/key (self-signed); for an intermediate, its
-    parent's. The public key, subject, SubjectKeyIdentifier, BasicConstraints
-    (including ``path_length``) and KeyUsage are carried over from ``cert``
-    unchanged -- only the serial number and ``not_after`` actually move. That
-    is what keeps every certificate issued under the old ``cert`` valid
-    against the renewed one: its AuthorityKeyIdentifier still matches the
-    unchanged SubjectKeyIdentifier.
+    ``parent_key`` is the ONLY key that signs, and there is no separate
+    ``key`` parameter for ``cert``'s own key: the renewed certificate's
+    public key is read straight off ``cert.public_key()``, so there is
+    nothing for a second key argument to do except be silently ignored (that
+    was this function's bug once). For a root, call with ``cert``/its own
+    key as ``parent_cert``/``parent_key`` (self-signed); for an intermediate,
+    pass its parent's cert/key. The public key, subject, SubjectKeyIdentifier,
+    BasicConstraints (including ``path_length``) and KeyUsage are carried
+    over from ``cert`` unchanged -- only the serial number and ``not_after``
+    actually move. That is what keeps every certificate issued under the old
+    ``cert`` valid against the renewed one: its AuthorityKeyIdentifier still
+    matches the unchanged SubjectKeyIdentifier.
 
     The AuthorityKeyIdentifier is not "carried over" but re-derived from
     ``parent_cert``/``parent_key`` the normal way, and only added at all if

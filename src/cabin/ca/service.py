@@ -430,10 +430,12 @@ def renew_in_place(db: Session, secrets: SecretStore, ca_id: int, years: int) ->
     unchanged SubjectKeyIdentifier, keeps validating without reissue.
 
     Delegates the actual rebuilding to
-    ``ca/x509.py:renew_certificate(cert, key, parent_cert, parent_key,
-    years)`` rather than assembling a ``CertificateBuilder`` here -- a root
-    is its own parent for this call, an intermediate's parent is the row
-    ``parent_id`` names. Requires the signing key: raises
+    ``ca/x509.py:renew_certificate(cert, parent_cert, parent_key, years)``
+    rather than assembling a ``CertificateBuilder`` here. ``parent_key`` is
+    the only key that ever signs: for a root that is its own unsealed key
+    (self-renewal); for an intermediate it is the row ``parent_id`` names --
+    never the intermediate's own key, which only ever supplies its already-
+    signed public key via ``cert``. Requires the signing key: raises
     CANotConfiguredError, naming the reason, for a row with no stored key
     (an imported root) or an intermediate whose imported parent has none.
     """
@@ -441,10 +443,10 @@ def renew_in_place(db: Session, secrets: SecretStore, ca_id: int, years: int) ->
     if row.key_sealed is None:
         raise CANotConfiguredError(f"CA certificate {ca_id}'s private key is not available")
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
-    key = _unseal_signing_key(secrets, row.key_sealed)
 
     if row.kind == "root":
-        parent_cert, parent_key = cert, key
+        parent_cert = cert
+        parent_key = _unseal_signing_key(secrets, row.key_sealed)
         effective_years = years
     else:
         parent = get_ca(db, row.parent_id) if row.parent_id is not None else None
@@ -456,7 +458,7 @@ def renew_in_place(db: Session, secrets: SecretStore, ca_id: int, years: int) ->
         parent_key = _unseal_signing_key(secrets, parent.key_sealed)
         effective_years = _years_until(parent_cert.not_valid_after_utc, years)
 
-    renewed = ca_x509.renew_certificate(cert, key, parent_cert, parent_key, effective_years)
+    renewed = ca_x509.renew_certificate(cert, parent_cert, parent_key, effective_years)
     row.cert_pem = _cert_pem(renewed)
     db.commit()
     return row

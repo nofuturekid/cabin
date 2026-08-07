@@ -74,6 +74,14 @@ def _openssl_verify(tmp_path: Path, label: str, leaf_pem: str, ca_chain_pem: str
     chain_path = d / "chain.pem"
     leaf_path.write_text(leaf_pem)
     chain_path.write_text(ca_chain_pem)
+    # CAUTION: openssl treats the certificate(s) in -CAfile as trust anchors
+    # and does NOT check their own self-signature -- only that the leaf
+    # chains up to them. A root in ca_chain_pem whose self-signature is
+    # cryptographically invalid (e.g. renewed with the wrong signing key)
+    # still passes this call. A chain check via this helper alone never
+    # proves a root itself is intact; that needs a direct
+    # cert.verify_directly_issued_by(cert) check on the root, e.g. as done
+    # in test_certs_issued_before_renewal_verify_against_renewed_ca below.
     result = subprocess.run(
         ["openssl", "verify", "-CAfile", str(chain_path), str(leaf_path)],
         capture_output=True,
@@ -350,6 +358,7 @@ def test_certs_issued_before_renewal_verify_against_renewed_ca(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
     hierarchy = create_hierarchy(db, secrets, "Renew", root_years=1)
+    original_root_pem = hierarchy.root.cert_pem
     leaf = issue_and_store(
         db,
         secrets,
@@ -360,6 +369,20 @@ def test_certs_issued_before_renewal_verify_against_renewed_ca(
     )
 
     renew_in_place(db, secrets, hierarchy.root.id, years=30)
+
+    # Direct check on the renewed root itself, independent of openssl: see
+    # the CAUTION comment on _openssl_verify above for why a chain check
+    # alone cannot prove the root's own self-signature is valid.
+    original_root_cert = x509.load_pem_x509_certificate(original_root_pem.encode("ascii"))
+    renewed_root_cert = x509.load_pem_x509_certificate(
+        get_ca(db, hierarchy.root.id).cert_pem.encode("ascii")
+    )
+    assert renewed_root_cert.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    ) == original_root_cert.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    renewed_root_cert.verify_directly_issued_by(renewed_root_cert)
 
     renewed_chain = _chain_pem(db, hierarchy.intermediate.id)
     assert _openssl_verify(tmp_path, "renewed-chain", leaf.row.cert_pem, renewed_chain)

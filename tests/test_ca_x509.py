@@ -377,7 +377,7 @@ def test_root_path_length_configurable() -> None:
 
 # --- spec 0017 FR-5: renew_certificate (pure helper) ----------------------------
 #
-# Interface Contract: renew_certificate(cert, key, parent_cert, parent_key,
+# Interface Contract: renew_certificate(cert, parent_cert, parent_key,
 # years) -> x509.Certificate. FR-5 requires this to be the ONLY place a
 # renewal is built, so that no route reaches into a CertificateBuilder --
 # without a test here, an implementation that inlines the builder into
@@ -398,7 +398,7 @@ def test_renew_certificate_root_keeps_key_and_gets_new_serial_and_validity() -> 
     over unchanged; only the serial and not_after actually move."""
     cert, key = create_root("Renew Root CA", "ecdsa-p256", years=1, path_length=2)
 
-    renewed = renew_certificate(cert, key, cert, key, years=20)
+    renewed = renew_certificate(cert, cert, key, years=20)
 
     # the part that carries the weight: the SAME key, not a fresh one.
     assert _public_key_der(renewed) == _public_key_der(cert)
@@ -431,11 +431,11 @@ def test_renew_certificate_intermediate_keeps_key_and_still_chains_to_parent() -
     against that same parent, which only holds if the AKI (derived from the
     parent's SKI) and the reused key are both carried over correctly."""
     root_cert, root_key = create_root("Renew Parent Root CA", "ecdsa-p256", years=20)
-    intermediate_cert, intermediate_key = create_intermediate(
+    intermediate_cert, _intermediate_key = create_intermediate(
         root_cert, root_key, "Renew Intermediate CA", "ecdsa-p256", years=5
     )
 
-    renewed = renew_certificate(intermediate_cert, intermediate_key, root_cert, root_key, years=8)
+    renewed = renew_certificate(intermediate_cert, root_cert, root_key, years=8)
 
     assert _public_key_der(renewed) == _public_key_der(intermediate_cert)
     assert renewed.subject == intermediate_cert.subject
