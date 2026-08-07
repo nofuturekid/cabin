@@ -27,10 +27,12 @@ from cabin.api_tokens import create_token
 from cabin.app import create_app
 from cabin.audit import AuditEvent
 from cabin.ca.certs import MAX_PAGE, MAX_QUERY_LENGTH, Certificate, CertSource
+from cabin.ca.crl import current_crl
 from cabin.ca.leaf import MAX_CN_LENGTH, MAX_DAYS, MAX_SANS, MIN_DAYS
-from cabin.ca.service import get_ca
+from cabin.ca.service import CACertificate, active_issuers
 from cabin.config import Config
 from cabin.mcp import MCP_PATH
+from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.settings import ACME_ENABLED, BASE_URL, MCP_ENABLED, TRUE, set_setting
 from cabin.store import create_session_factory
@@ -405,40 +407,60 @@ def test_mcp_role_enforced(mcp: TestClient, cfg: Config) -> None:
 
 
 def test_mcp_get_ca_info(mcp: TestClient, cfg: Config) -> None:
-    """FR-3: subjects, fingerprints, validity and the published URLs -- the
-    same shape GET /api/v1/ca reports, plus the ACME directory."""
+    """FR-3/AC-15: one entry per ``ca_certificates`` row -- the same shape
+    GET /api/v1/ca reports, plus the ACME directory."""
     info = _call(mcp, "get_ca_info", token=_token(cfg, Role.viewer))
     assert info["base_url"] == BASE
-    assert info["crl_url"] == f"{BASE}/crl"
+    issuers = info["issuers"]
+    assert isinstance(issuers, list)
     # ACME is off, so there is no directory URL to hand out.
     assert info["acme_directory_url"] is None
 
     db = _db(cfg)
     try:
-        hierarchy = get_ca(db)
-        assert hierarchy is not None
+        by_id = {row.id: row for row in active_issuers(db)}
+        root = db.get(CACertificate, next(iter(by_id.values())).parent_id)
+        assert root is not None
         expected = {
-            "root": hierarchy.root.cert_pem,
-            "intermediate": hierarchy.intermediate.cert_pem,
+            "root": root.cert_pem,
+            "intermediate": next(iter(by_id.values())).cert_pem,
         }
         set_setting(db, ACME_ENABLED, TRUE)
     finally:
         db.close()
 
+    described_by_kind = {row["kind"]: row for row in issuers}
     for kind, pem in expected.items():
-        described = info[kind]
-        assert isinstance(described, dict)
+        described = described_by_kind[kind]
         cert = x509.load_pem_x509_certificate(pem.encode("ascii"))
         assert described["kind"] == kind
+        assert described["status"] == "active"
         assert described["subject"] == cert.subject.rfc4514_string()
         assert (
             described["fingerprint"].replace(":", "").lower()
             == cert.fingerprint(hashes.SHA256()).hex()
         )
         assert described["not_valid_after"].startswith(cert.not_valid_after_utc.date().isoformat())
+    assert described_by_kind["root"]["parent_id"] is None
+    assert described_by_kind["intermediate"]["parent_id"] == described_by_kind["root"]["id"]
 
     again = _call(mcp, "get_ca_info", token=_token(cfg, Role.viewer))
     assert again["acme_directory_url"] == f"{BASE}/acme/directory"
+
+
+def test_mcp_ca_info_matches_rest(mcp: TestClient, cfg: Config) -> None:
+    """AC-15: the MCP tool and the REST endpoint report the same ids and
+    statuses against the same database."""
+    admin = _token(cfg, Role.admin)
+    mcp_info = _call(mcp, "get_ca_info", token=admin)
+
+    resp = mcp.get("/api/v1/ca", headers={"Authorization": f"Bearer {admin}"})
+    assert resp.status_code == 200
+    rest_issuers = resp.json()["issuers"]
+
+    mcp_by_id = {row["id"]: (row["kind"], row["status"]) for row in mcp_info["issuers"]}  # type: ignore[union-attr]
+    rest_by_id = {row["id"]: (row["kind"], row["status"]) for row in rest_issuers}
+    assert mcp_by_id == rest_by_id
 
 
 def test_mcp_list_and_get_certificate(mcp: TestClient, cfg: Config) -> None:
@@ -533,11 +555,8 @@ def test_mcp_issue_certificate(mcp: TestClient, cfg: Config) -> None:
 
     db = _db(cfg)
     try:
-        hierarchy = get_ca(db)
-        assert hierarchy is not None
-        intermediate = x509.load_pem_x509_certificate(
-            hierarchy.intermediate.cert_pem.encode("ascii")
-        )
+        issuer_row = active_issuers(db)[0]
+        intermediate = x509.load_pem_x509_certificate(issuer_row.cert_pem.encode("ascii"))
     finally:
         db.close()
     assert cert.issuer == intermediate.subject
@@ -690,9 +709,18 @@ def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
     )
     assert revoked["status"] == "revoked"
     assert revoked["reason"] == "key_compromise"
-    assert revoked["crl_url"] == f"{BASE}/crl"
+    assert str(revoked["crl_url"]).startswith(BASE)
+    assert "/crl/" in str(revoked["crl_url"])
 
-    crl = x509.load_der_x509_crl(mcp.get("/crl").content)
+    # The route that serves /crl/{issuer_id} is Security's (spec 0017 work
+    # split); checked here through the service layer instead.
+    db = _db(cfg)
+    try:
+        issuer_id = active_issuers(db)[0].id
+        state = current_crl(db, SecretStore.open(cfg.data_dir, None), issuer_id)
+    finally:
+        db.close()
+    crl = x509.load_der_x509_crl(state.crl_der)
     assert crl.get_revoked_certificate_by_serial_number(int(str(issued["serial_hex"]), 16))
 
     detail = _call(mcp, "get_certificate", {"certificate_id": issued["id"]}, token=admin)

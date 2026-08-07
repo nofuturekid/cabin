@@ -442,6 +442,60 @@ def test_certificate_ids_that_cannot_be_rows_are_not_found(acme: Acme, cfg: Conf
     assert owner.certificate(f"{BASE}/acme/cert/{real_id}").status_code == 200
 
 
+def test_finalize_stores_the_default_resolved_issuer(acme: Acme, cfg: Config) -> None:
+    """Spec 0017 FR-6: ACME passes no ``issuer_id`` (0019 gives it one), so a
+    finalize with exactly one active issuer stores that issuer's id on the
+    certificate row -- the default rule that keeps a single-CA instance
+    working exactly as it did before this spec."""
+    db = db_session(cfg)
+    try:
+        issuer_id = ca_service.active_issuers(db)[0].id
+    finally:
+        db.close()
+
+    flow = Flow(acme, cfg, "nas.lan")
+    flow.make_ready()
+    flow.finalize_ok(csr_der("nas.lan"))
+
+    db = db_session(cfg)
+    try:
+        row = db.scalars(select(Certificate).order_by(Certificate.id)).first()
+        assert row is not None
+        assert row.issuer_id == issuer_id
+    finally:
+        db.close()
+
+
+def test_finalize_with_multiple_active_issuers_is_a_clean_error(acme: Acme, cfg: Config) -> None:
+    """Spec 0017 FR-6/Out of Scope: with two active issuers and no way for
+    ACME to name one (0019's gap, not this spec's to close), a finalize must
+    still answer with an RFC 8555 problem document -- not a raw crash -- and
+    must not leave the order wedged: the claim is released so the client can
+    retry once an operator has retired one of the two issuers."""
+    flow = Flow(acme, cfg, "nas.lan")
+    flow.make_ready()
+    db = db_session(cfg)
+    try:
+        ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "second"
+        )
+    finally:
+        db.close()
+
+    failed = flow.finalize(csr_der("nas.lan"))
+
+    assert_problem(failed, "serverInternal", 500)
+    assert count_certificates(cfg) == 0
+    db = db_session(cfg)
+    try:
+        order = db.get(AcmeOrder, flow.order_id)
+        assert order is not None
+        assert order.certificate_id is None
+    finally:
+        db.close()
+    assert flow.order()["status"] == "ready"
+
+
 def test_finalize_leaves_no_certificate_when_the_ca_is_missing(
     acme: Acme, cfg: Config, tmp_path: Path
 ) -> None:

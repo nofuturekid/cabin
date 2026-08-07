@@ -204,15 +204,29 @@ plus the MCP `get_ca_info` tool (`mcp/server.py:335-347`) return a
   this is what lets a client repair a chain from a server that ships only the
   leaf.
 - FR-12: **CDP and AIA URLs are always `http://`, never `https://`.** A new
-  helper beside `crl.distribution_url` derives the public HTTP origin from
-  the configured base URL: scheme forced to `http`, an explicit `:443`
-  dropped, everything else (host, port, path) left as configured. Reason: a
-  relying party validating a cabin certificate would otherwise need a CRL it
-  can only fetch over TLS, which needs a validated certificate. This is not a
-  detail to be tidied up later — it is the constraint spec 0022's second,
-  plaintext listener exists to satisfy. `settings.validate_base_url`
+  pure helper `ca/leaf.py:public_http_origin(base_url) -> str` derives the
+  public HTTP origin from the configured base URL: scheme forced to `http`,
+  an explicit `:443` dropped, everything else (host, port, path) left as
+  configured. `crl.distribution_url` and `crl.ca_issuers_url` call it rather
+  than reimplementing it, so there is exactly one place the scheme is forced.
+  Reason: a relying party validating a cabin certificate would otherwise need
+  a CRL it can only fetch over TLS, which needs a validated certificate. This
+  is not a detail to be tidied up later — it is the constraint spec 0022's
+  second, plaintext listener exists to satisfy. `settings.validate_base_url`
   (`settings.py:139-176`) is unchanged and still accepts an `https://` base
   URL; only what goes into a certificate is rewritten.
+
+  The helper lives in `ca/leaf.py`, not in `ca/crl.py` as an earlier draft of
+  this requirement said. `ca/leaf.py` and `ca/x509.py` are the only two
+  modules under `ca/` that import no session, no ORM and no settings;
+  `ca/crl.py` imports all three. The helper takes a string and returns a
+  string, and the consumer that must not get it wrong is the certificate
+  builder next door. Putting it in `ca/crl.py` would have made the
+  pure-crypto module — and `tests/test_ca_leaf.py`, which never opens a
+  database — reach through the persistence layer for a string transformation,
+  and would have parked the whole pure-crypto lane behind FR-9's rework of
+  `ca/crl.py`.
+
 - FR-13: **`path_length` is chosen when a root is created.** `ca/x509.py:126`
   hard-codes `path_length=1`; `create_root` takes it as a parameter and the
   create form offers it, default 1, server-validated 1..4. Below 1 no
@@ -244,6 +258,222 @@ plus the MCP `get_ca_info` tool (`mcp/server.py:335-347`) return a
   and the row's `crl_url` and `ca_url`; the MCP `get_ca_info` tool
   (`mcp/server.py:335-347`) reports the same list. `CAInfo`'s
   `{root, intermediate}` shape (`api/models.py:63-70`) is removed.
+
+## Interface Contract
+
+The Functional Requirements above say what changes. This section says exactly
+what the changed things are called, what they take and what they return, so
+that the modules on either side of a seam cannot be built against two
+different guesses. It was written after the test suites and reconciles them;
+where two of them assumed different things, the choice made here is the one
+that stands and the note says why.
+
+### The naming rule
+
+`ca_certificates.name` is always the subject common name of that row's
+`cert_pem`. For a hierarchy cabin generates, cabin composes the subject from
+the operator's label — `create_hierarchy(name="cabin")` produces
+`CN=cabin Root CA` and `CN=cabin Intermediate CA`, and the two rows are named
+that. For an imported hierarchy the subject already exists and was chosen by
+whoever ran that CA, so the row takes it verbatim; `import_hierarchy` derives
+both names from the submitted certificates and takes no `name` argument, and
+`POST /ca/import` has no name field. A second, cabin-local label for an
+imported CA would let `/ca` show one name while the certificate an operator
+hands to a relying party says another. One name, read off the certificate.
+
+### `cabin.ca.x509` — pure crypto, no database
+
+- `create_root(subject_cn, key_type, years=20, path_length=1)` — FR-13.
+  `path_length` follows `years`, so existing keyword calls are unaffected.
+  This layer does not enforce the 1..4 bound; the form does (AC-11), because
+  the bound is a policy about what an operator may ask for, not an X.509
+  invariant.
+- `renew_certificate(cert, key, parent_cert, parent_key, years) -> x509.Certificate`
+  — FR-5. For a root, `parent_cert`/`parent_key` are the certificate's own.
+  Carries over the subject, the public key, the SubjectKeyIdentifier,
+  BasicConstraints (including `path_length`) and KeyUsage; issues a new
+  serial and a later `not_after`.
+
+### `cabin.ca.leaf` — pure crypto, no database
+
+- `public_http_origin(base_url: str) -> str` — FR-12.
+- `issue_certificate(issuer_cert, issuer_key, profile, subject_cn, sans, days=DEFAULT_DAYS, key_type="ecdsa-p256", crl_url=None, ca_issuers_url=None) -> tuple[x509.Certificate, PrivateKey, datetime | None]`
+- `sign_csr(issuer_cert, issuer_key, csr_pem, profile, days=DEFAULT_DAYS, sans_override=None, crl_url=None, ca_issuers_url=None, subject_cn_fallback=None, allow_empty_subject=False) -> tuple[x509.Certificate, datetime | None]`
+
+  The last element of each return is FR-7's `capped_from`: the `not_after`
+  that was requested but not granted, and `None` when the full request was
+  met. It is returned from here, and not re-derived in `ca/certs.py`, because
+  `_build_leaf` is the only place that holds both the requested `days` and
+  the `now` the clamp was measured against (`ca/leaf.py:284-286`). A second
+  module recomputing it would need `_BACKDATE` and its own clock, and the two
+  answers would drift apart at exactly the boundary the clamp is about. This
+  changes the shape of both returns; every call site unpacks one more value.
+
+  `ca_issuers_url` builds FR-11's AIA the way `crl_url` builds the CDP: one
+  non-critical `AuthorityInformationAccess` extension with exactly one
+  `caIssuers` `UniformResourceIdentifier`, omitted entirely when the argument
+  is `None`.
+
+### `cabin.ca.service`
+
+- `create_hierarchy(db, secrets, name, key_type="ecdsa-p256", root_years=20, intermediate_years=10) -> CAHierarchy`
+  — unchanged apart from the deleted guards (FR-2).
+- `import_hierarchy(db, secrets, cert_pem, key_pem, key_passphrase, chain_pem) -> CAHierarchy`
+  — unchanged signature; see the naming rule above for why it gains no
+  `name`.
+- `create_intermediate_under(db, secrets, root_id, name, key_type="ecdsa-p256", years=10) -> CACertificate`
+  — FR-3. Subject `CN={name} Intermediate CA`, `parent_id = root_id`,
+  `status="active"`. A `root_id` that is not a `kind == "root"` row is a
+  plain `ValueError` whose message names "root": it is a programming error at
+  the call site, not a state the operator can be in through the UI, which
+  only offers the action on roots.
+- `retire(db, ca_id) -> None` — FR-4.
+- `renew_in_place(db, secrets, ca_id, years) -> CACertificate` — FR-5,
+  returning the same row it was given, with `cert_pem` overwritten.
+- `list_cas(db, *, status=None, kind=None) -> list[CACertificate]` — ordered
+  by id.
+- `chain_for(db, ca_id) -> list[CACertificate]` — that row first, root last.
+- `active_issuers(db) -> list[CACertificate]`.
+- `resolve_issuer(db, issuer_id: int | None) -> CACertificate` — FR-6's rule.
+- `get_ca(db, issuer_id) -> CACertificate` — no longer returns `None` and no
+  longer returns a `CAHierarchy`; an unknown id raises.
+- `signing_credentials(db, secrets, issuer_id) -> tuple[x509.Certificate, PrivateKey]`.
+- `CAExistsError` is deleted. `tests/test_ca_service.py` asserts its absence
+  from the module, not merely that nothing raises it.
+
+### `cabin.ca.certs`
+
+- `Issued(row: Certificate, capped_from: datetime | None)` — a frozen
+  dataclass, FR-7.
+- `issue_and_store(db, secrets, *, profile, subject_cn, sans, days=DEFAULT_DAYS, key_type="ecdsa-p256", issuer_id=None, source=CertSource.ui) -> Issued`
+- `sign_csr_and_store(db, secrets, *, csr_pem, profile, days=DEFAULT_DAYS, sans_override=None, subject_cn_fallback=None, allow_empty_subject=False, issuer_id=None, source=CertSource.ui) -> Issued`
+
+  Both **lose** their `crl_url` parameter. Under FR-6 the issuer is resolved
+  inside these functions, so when `issuer_id` is omitted no caller can know
+  which issuer's CRL and CA URL belong in the certificate. These two
+  functions call `crl.distribution_url` and `crl.ca_issuers_url` for the
+  issuer they resolved and pass the results to `leaf`. That is also what
+  makes FR-12 hold for every front door at once instead of seven times over.
+
+- `_store(..., *, issuer_id: int)` — required, keyword-only, no default, so
+  that a caller which forgets it is a type error rather than an
+  `IntegrityError` in whichever entry point runs first (work split R1).
+
+### `cabin.ca.crl`
+
+- `distribution_url(db, issuer_id) -> str | None` — `<http origin>/crl/{issuer_id}`,
+  `None` without a configured base URL.
+- `ca_issuers_url(db, issuer_id) -> str | None` — `<http origin>/ca/{issuer_id}.cer`,
+  `None` without a configured base URL. New in FR-11.
+- `regenerate_crl(db, secrets, issuer_id, now=None) -> CRLState`
+- `stored_crl(db, issuer_id) -> CRLState | None`
+- `current_crl(db, secrets, issuer_id, now=None) -> CRLState`
+- `revoke_certificate(db, secrets, cert_id, reason, now=None) -> Certificate`
+  — signature unchanged (FR-9).
+- `CRLState`'s primary key is `issuer_id`; `_STATE_ID` is deleted.
+
+### New exceptions
+
+All four are defined in `cabin.ca.service` and imported from there by every
+other module and every test. None of them is defined twice.
+
+| Exception             | Raised by                                                                        | When                                                                     |
+| --------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `UnknownIssuerError`  | `get_ca`, `chain_for`, `resolve_issuer`, `signing_credentials`, `renew_in_place` | No `ca_certificates` row has that id                                     |
+| `IssuerRetiredError`  | `resolve_issuer`                                                                 | The named row exists and is an intermediate, but its `status` is retired |
+| `IssuerRequiredError` | `resolve_issuer`                                                                 | No `issuer_id` was given and more than one active issuer exists          |
+| `RetireError`         | `retire`                                                                         | The operation would leave the instance with no active issuer             |
+
+`CANotConfiguredError` stays where it is and keeps its two existing jobs: no
+active issuer at all (from `resolve_issuer`), and a row whose `key_sealed` is
+NULL where a signature is needed (from `signing_credentials`,
+`create_intermediate_under`, `renew_in_place`). Its message names the missing
+key in the latter case, which AC-13 asserts on.
+
+### Routes
+
+`ca_ui.py` mounts `APIRouter(prefix="/ca")` with `Depends(get_current_user)`
+on its GETs; `crl_ui.py` remains the only router in cabin without an
+authentication dependency, and its docstring changes from "the public CRL
+endpoints" to "the public PKI endpoints".
+
+| Method | Path                         | Module          | Auth         | Response                      |
+| ------ | ---------------------------- | --------------- | ------------ | ----------------------------- |
+| GET    | `/crl/{issuer_id:int}`       | `web/crl_ui.py` | none         | `application/pkix-crl` (DER)  |
+| GET    | `/crl/{issuer_id:int}.pem`   | `web/crl_ui.py` | none         | `application/x-pem-file`      |
+| GET    | `/ca/{ca_id:int}.cer`        | `web/crl_ui.py` | none         | `application/pkix-cert` (DER) |
+| GET    | `/ca`                        | `web/ca_ui.py`  | session      | `text/html`                   |
+| GET    | `/ca/{ca_id}.pem`            | `web/ca_ui.py`  | session      | `application/x-pem-file`      |
+| GET    | `/ca/{issuer_id}/chain.pem`  | `web/ca_ui.py`  | session      | `application/x-pem-file`      |
+| POST   | `/ca/create`                 | `web/ca_ui.py`  | admin + CSRF | 303 to `/ca`                  |
+| POST   | `/ca/import`                 | `web/ca_ui.py`  | admin + CSRF | 303 to `/ca`                  |
+| POST   | `/ca/{root_id}/intermediate` | `web/ca_ui.py`  | admin + CSRF | 303 to `/ca`                  |
+| POST   | `/ca/{ca_id}/renew`          | `web/ca_ui.py`  | admin + CSRF | 303 to `/ca`                  |
+| POST   | `/ca/{ca_id}/retire`         | `web/ca_ui.py`  | admin + CSRF | 303 to `/ca`                  |
+
+Removed with no alias and no redirect: `GET /crl`, `GET /crl.pem`,
+`GET /ca/root.pem`, `GET /ca/chain.pem`.
+
+Form fields: `/ca/create` takes `name`, `key_type`, `root_years`,
+`intermediate_years` and the new optional `path_length` (default 1);
+`/ca/import` takes `cert_pem`, `key_pem`, optional `key_passphrase` and
+`chain_pem`; `/ca/{root_id}/intermediate` takes `name`, `key_type`, `years`;
+`/ca/{ca_id}/renew` takes `years`; `/ca/{ca_id}/retire` takes nothing beyond
+the CSRF token. `/certs/issue` and `/certs/sign` gain an optional `issuer_id`
+field, and `POST /api/v1/certificates` and `/api/v1/certificates/sign` gain
+an optional `issuer_id` JSON key.
+
+**The two `/ca` routes do not shadow each other, and this is not luck.**
+Starlette compiles `/ca/{ca_id}.pem` to `^/ca/(?P<ca_id>[^/]+)\.pem$` and
+`/ca/{ca_id}.cer` to `^/ca/(?P<ca_id>[^/]+)\.cer$`; the two regexes are
+disjoint, so registration order cannot decide between them. Verified against
+FastAPI by registering the authenticated router first (as `app.py` does) and
+then again with the order reversed: `/ca/7.cer` answers anonymously both
+times.
+
+**The two `/crl` routes do collide, and the `:int` convertor is what
+separates them.** `^/crl/(?P<issuer_id>[^/]+)$` matches `/crl/7.pem`, so with
+plain `{issuer_id}` the DER route wins whenever it is registered first, and
+`GET /crl/7.pem` answers **422** — a wrong status, for the wrong reason, from
+the wrong handler. Both CRL routes therefore declare `{issuer_id:int}`, which
+compiles the parameter to `[0-9]+` and makes the two paths disjoint whatever
+order they are registered in. `/ca/{ca_id:int}.cer` uses the same convertor
+for consistency; it also turns `/crl/abc` into a 404 instead of a 422.
+
+**404 conditions on the public routes.** Both CRL routes answer 404 for an
+unknown id (`UnknownIssuerError`) and for a row whose `kind` is not
+`intermediate` — a root never signs a CRL, so there is nothing to serve and
+nothing to say about it. `/ca/{ca_id}.cer` answers 404 only for an unknown
+id: serving a root's certificate is exactly what a client repairing a chain
+may need. `/ca/{ca_id}.pem` and `/ca/{issuer_id}/chain.pem` answer 404 for an
+unknown id once past the session check.
+
+### Changed return types, in one list
+
+| Was                                             | Is                                                |
+| ----------------------------------------------- | ------------------------------------------------- |
+| `get_ca(db) -> CAHierarchy \| None`             | `get_ca(db, issuer_id) -> CACertificate`, raising |
+| `issue_certificate(...) -> (cert, key)`         | `-> (cert, key, capped_from)`                     |
+| `sign_csr(...) -> cert`                         | `-> (cert, capped_from)`                          |
+| `issue_and_store(...) -> Certificate`           | `-> Issued`                                       |
+| `sign_csr_and_store(...) -> Certificate`        | `-> Issued`                                       |
+| `CAInfo{root, intermediate, base_url, crl_url}` | `CAInfo{issuers: list[IssuerInfo], base_url}`     |
+
+`IssuerInfo` carries `id`, `name`, `kind`, `status`, `parent_id`, everything
+`describe_certificate` already produces (`subject`, `issuer`, `serial`,
+`not_valid_before`, `not_valid_after`, `fingerprint`, `key_type`), plus
+`crl_url` and `ca_url`. `crl_url` is `None` for a `kind == "root"` row,
+because there is no CRL route that would answer for it; `ca_url` is set for
+every row, because `/ca/{id}.cer` answers for every row.
+
+`CertificateDetail` and `CertificatePem` gain
+`validity_capped_from: datetime | None`, set only on an issuance response
+(FR-7) and omitted from the JSON entirely when `None`.
+
+`mcp/server.py:get_ca_info` builds its response by naming each field rather
+than splatting `views.ca_info(db).model_dump()`, so that the shape change is
+a type error at build time instead of a pydantic failure inside a tool call
+(work split R6).
 
 ## Acceptance Criteria
 
@@ -361,6 +591,29 @@ test_issuer_select_posts_stored_issuer, test_dashboard_warns_per_issuer,
 test_dashboard_retired_issuer_only_flagged_when_expired,
 test_audit_ca_renewed_and_retired, test_api_ca_lists_issuers,
 test_mcp_ca_info_matches_rest, test_schema_has_no_singleton_constraints
+
+Two more, missing from the list above and from every suite written so far.
+Both would let a wrong implementation pass everything else in this document,
+so they are named here rather than left to be noticed:
+
+- **`test_issuance_entry_points_use_the_forced_http_origin`** — the
+  highest-value missing test in this spec. Every existing FR-12 test either
+  calls `public_http_origin` directly or hands a pre-built URL to
+  `issue_certificate`. Nothing checks that the real issuance entry points —
+  `web/certs_ui.py`, `api/v1.py`, `acme/api_finalize.py` and `mcp/server.py`,
+  FR-6's seven call sites between them — actually route production traffic
+  through the helper. An implementation that gets the helper exactly right
+  and forgets to wire one door to it ships `https://` CDP and AIA URLs into
+  real certificates and passes every test in this document. The test issues
+  through each of the four modules with an `https://` base URL configured and
+  parses the CDP and AIA off the resulting certificate; asserting on the
+  helper's return value does not satisfy it.
+- **`test_no_aia_on_root_and_intermediate_certificates`** — FR-11 specifies
+  AIA for leaves only, and the Out of Scope section says so again, but
+  nothing asserts it. A root or intermediate carrying a `caIssuers` pointer
+  is the kind of extension that is added once "for symmetry" and then never
+  questioned. Assert the extension's **absence** on a generated root, on its
+  intermediate, and on an intermediate from `create_intermediate_under`.
 
 The 0005–0013 issuance and revocation tests carry the rest and are expected
 to keep passing on the FR-6 default rule; where they assert `{root,

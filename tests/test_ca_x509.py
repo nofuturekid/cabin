@@ -1,24 +1,36 @@
 """Tests for cabin.ca.x509: pure X.509 crypto (spec 0004 FR-1/FR-2).
 
 No FastAPI/DB fixtures here -- these exercise real certificates built with
-pyca/cryptography directly, never mocks.
+pyca/cryptography directly, never mocks. The one exception is
+``test_no_aia_on_root_and_intermediate_certificates``, which needs
+``create_intermediate_under`` (spec 0017 FR-3, DB-backed) to cover all three
+certificate kinds the spec's Test list names; it gets its own local
+``db``/``secrets`` fixtures rather than pulling the whole file into
+``cabin.web``/``TestClient`` territory.
 """
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import NameOID
+from sqlalchemy.orm import Session
 
+from cabin.ca.service import create_hierarchy, create_intermediate_under
 from cabin.ca.x509 import (
     CAImportError,
     create_intermediate,
     create_root,
     generate_key,
     load_import,
+    renew_certificate,
 )
+from cabin.secrets import SecretStore
+from cabin.store import create_session_factory, run_migrations
 
 type _SigningKey = ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey | ed25519.Ed25519PrivateKey
 
@@ -336,3 +348,153 @@ def test_import_rejects_wrong_passphrase() -> None:
             "wrong-passphrase",
             _pem_cert(root_cert),
         )
+
+
+# --- spec 0017 FR-13/AC-11: path_length is chosen when a root is created --------
+
+
+def test_root_path_length_configurable() -> None:
+    """AC-11: a root created with an explicit path_length round-trips to
+    exactly that value in BasicConstraints, replacing the value that used to
+    be hard-coded at path_length=1 in create_root."""
+    cert, _key = create_root("Depth Root CA", "ecdsa-p256", path_length=2)
+    bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+    assert bc.critical is True
+    assert bc.value.ca is True
+    assert bc.value.path_length == 2
+
+    # counter-check: a different explicit value round-trips to that
+    # different value -- not a coincidence of 2 happening to be readable.
+    other_cert, _other_key = create_root("Depth Root CA 2", "ecdsa-p256", path_length=3)
+    other_bc = other_cert.extensions.get_extension_for_class(x509.BasicConstraints)
+    assert other_bc.value.path_length == 3
+
+    # AC-11: the default stays 1 when the parameter is omitted.
+    default_cert, _default_key = create_root("Depth Root CA Default", "ecdsa-p256")
+    default_bc = default_cert.extensions.get_extension_for_class(x509.BasicConstraints)
+    assert default_bc.value.path_length == 1
+
+
+# --- spec 0017 FR-5: renew_certificate (pure helper) ----------------------------
+#
+# Interface Contract: renew_certificate(cert, key, parent_cert, parent_key,
+# years) -> x509.Certificate. FR-5 requires this to be the ONLY place a
+# renewal is built, so that no route reaches into a CertificateBuilder --
+# without a test here, an implementation that inlines the builder into
+# ca/service.py's renew_in_place and never writes this helper at all still
+# passes the rest of the suite (Backend only covers renew_in_place at the
+# service level).
+
+
+def _public_key_der(cert: x509.Certificate) -> bytes:
+    return cert.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+
+def test_renew_certificate_root_keeps_key_and_gets_new_serial_and_validity() -> None:
+    """FR-5: for a root, parent_cert/parent_key are the certificate's own.
+    Subject, public key, SKI, BasicConstraints and KeyUsage are carried
+    over unchanged; only the serial and not_after actually move."""
+    cert, key = create_root("Renew Root CA", "ecdsa-p256", years=1, path_length=2)
+
+    renewed = renew_certificate(cert, key, cert, key, years=20)
+
+    # the part that carries the weight: the SAME key, not a fresh one.
+    assert _public_key_der(renewed) == _public_key_der(cert)
+    assert renewed.subject == cert.subject
+
+    ski_before = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    ski_after = renewed.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    assert ski_after.digest == ski_before.digest
+
+    bc_before = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    bc_after = renewed.extensions.get_extension_for_class(x509.BasicConstraints).value
+    assert bc_after.ca == bc_before.ca is True
+    assert bc_after.path_length == bc_before.path_length == 2
+
+    ku_before = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+    ku_after = renewed.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku_after.key_cert_sign == ku_before.key_cert_sign is True
+    assert ku_after.crl_sign == ku_before.crl_sign is True
+
+    # what actually changed.
+    assert renewed.serial_number != cert.serial_number
+    assert renewed.not_valid_after_utc > cert.not_valid_after_utc
+
+    renewed.verify_directly_issued_by(renewed)  # still self-signed, still verifies
+
+
+def test_renew_certificate_intermediate_keeps_key_and_still_chains_to_parent() -> None:
+    """FR-5 for an intermediate: parent_cert/parent_key are the ROOT's, not
+    the intermediate's own -- and the renewed certificate must still verify
+    against that same parent, which only holds if the AKI (derived from the
+    parent's SKI) and the reused key are both carried over correctly."""
+    root_cert, root_key = create_root("Renew Parent Root CA", "ecdsa-p256", years=20)
+    intermediate_cert, intermediate_key = create_intermediate(
+        root_cert, root_key, "Renew Intermediate CA", "ecdsa-p256", years=5
+    )
+
+    renewed = renew_certificate(intermediate_cert, intermediate_key, root_cert, root_key, years=8)
+
+    assert _public_key_der(renewed) == _public_key_der(intermediate_cert)
+    assert renewed.subject == intermediate_cert.subject
+
+    bc = renewed.extensions.get_extension_for_class(x509.BasicConstraints).value
+    assert bc.ca is True
+    assert bc.path_length == 0  # create_intermediate's own path_length, carried over
+
+    ku = renewed.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku.key_cert_sign is True
+    assert ku.crl_sign is True
+
+    assert renewed.serial_number != intermediate_cert.serial_number
+    assert renewed.not_valid_after_utc > intermediate_cert.not_valid_after_utc
+
+    renewed.verify_directly_issued_by(root_cert)
+
+
+# --- spec 0017 FR-11: AIA is leaf-only ------------------------------------------
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Iterator[Session]:
+    db_url = f"sqlite:///{tmp_path}/cabin.db"
+    run_migrations(db_url)
+    session = create_session_factory(db_url)()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def secrets(tmp_path: Path) -> SecretStore:
+    return SecretStore.open(tmp_path, None)
+
+
+def _no_aia(cert: x509.Certificate) -> None:
+    with pytest.raises(x509.ExtensionNotFound):
+        cert.extensions.get_extension_for_class(x509.AuthorityInformationAccess)
+
+
+def test_no_aia_on_root_and_intermediate_certificates(db: Session, secrets: SecretStore) -> None:
+    """Spec's Test list: FR-11 gives AIA to leaves only, and the Out of
+    Scope section repeats it -- but nothing asserted the absence before
+    this. Checked on all three ways cabin produces a CA certificate: a
+    generated root, its generated intermediate, and an intermediate from
+    the rotation path (``create_intermediate_under``, spec 0017 FR-3)."""
+    root_cert, _root_key = create_root("No AIA Root CA", "ecdsa-p256")
+    _no_aia(root_cert)
+
+    intermediate_cert, _intermediate_key = create_intermediate(
+        root_cert, _root_key, "No AIA Intermediate CA", "ecdsa-p256"
+    )
+    _no_aia(intermediate_cert)
+
+    hierarchy = create_hierarchy(db, secrets, "No AIA Hierarchy")
+    rotated = create_intermediate_under(
+        db, secrets, hierarchy.root.id, "No AIA Rotated Intermediate"
+    )
+    rotated_cert = x509.load_pem_x509_certificate(rotated.cert_pem.encode("ascii"))
+    _no_aia(rotated_cert)

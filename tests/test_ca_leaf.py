@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.types import (
     CertificateIssuerPrivateKeyTypes,
 )
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
 
 from cabin.ca.leaf import (
     MAX_DAYS,
@@ -22,6 +22,7 @@ from cabin.ca.leaf import (
     issue_certificate,
     parse_profile,
     parse_san_lines,
+    public_http_origin,
     sign_csr,
 )
 from cabin.ca.x509 import create_intermediate, create_root
@@ -62,7 +63,7 @@ def _extension[T: x509.ExtensionType](cert: x509.Certificate, cls: type[T]) -> x
 
 def test_issue_server_profile_extensions(issuer: Issuer) -> None:
     issuer_cert, issuer_key = issuer
-    cert, key = issue_certificate(
+    cert, key, _capped = issue_certificate(
         issuer_cert,
         issuer_key,
         Profile.server,
@@ -112,7 +113,7 @@ def test_issue_server_profile_extensions(issuer: Issuer) -> None:
 
 def test_issue_client_profile_extensions(issuer: Issuer) -> None:
     issuer_cert, issuer_key = issuer
-    cert, _key = issue_certificate(
+    cert, _key, _capped = issue_certificate(
         issuer_cert,
         issuer_key,
         Profile.client,
@@ -135,7 +136,7 @@ def test_issue_rsa_keyusage_includes_keyencipherment(issuer: Issuer) -> None:
     """FR-1: an RSA server leaf may still be used for RSA key transport, so
     it needs keyEncipherment; ECDSA/Ed25519 leaves must not carry it."""
     issuer_cert, issuer_key = issuer
-    cert, key = issue_certificate(
+    cert, key, _capped = issue_certificate(
         issuer_cert,
         issuer_key,
         Profile.server,
@@ -149,7 +150,7 @@ def test_issue_rsa_keyusage_includes_keyencipherment(issuer: Issuer) -> None:
     assert key_usage.value.digital_signature is True
     assert key_usage.value.key_encipherment is True
 
-    ed_cert, _ed_key = issue_certificate(
+    ed_cert, _ed_key, _capped = issue_certificate(
         issuer_cert,
         issuer_key,
         Profile.server,
@@ -163,7 +164,7 @@ def test_issue_rsa_keyusage_includes_keyencipherment(issuer: Issuer) -> None:
 
 def test_issue_chain_verifies(issuer: Issuer) -> None:
     issuer_cert, issuer_key = issuer
-    cert, _key = issue_certificate(
+    cert, _key, _capped = issue_certificate(
         issuer_cert, issuer_key, Profile.server, "verify.lan", ["DNS:verify.lan"]
     )
     cert.verify_directly_issued_by(issuer_cert)  # raises if the chain is broken
@@ -221,12 +222,12 @@ def test_issue_aki_copies_issuer_ski() -> None:
     foreign_digest = bytes(range(20))
     issuer_cert, issuer_key = _custom_intermediate(x509.SubjectKeyIdentifier(foreign_digest))
 
-    cert, _key = issue_certificate(
+    cert, _key, _capped = issue_certificate(
         issuer_cert, issuer_key, Profile.server, "aki.lan", ["DNS:aki.lan"]
     )
     assert _extension(cert, x509.AuthorityKeyIdentifier).value.key_identifier == foreign_digest
 
-    csr_cert = sign_csr(
+    csr_cert, _capped = sign_csr(
         issuer_cert,
         issuer_key,
         _csr("aki.lan", sans=[x509.DNSName("aki.lan")]),
@@ -241,7 +242,7 @@ def test_issue_aki_falls_back_to_issuer_public_key_without_ski() -> None:
     issuer_cert, issuer_key = _custom_intermediate(None)
     expected = x509.SubjectKeyIdentifier.from_public_key(issuer_cert.public_key()).digest
 
-    cert, _key = issue_certificate(
+    cert, _key, _capped = issue_certificate(
         issuer_cert, issuer_key, Profile.server, "noski.lan", ["DNS:noski.lan"]
     )
     assert _extension(cert, x509.AuthorityKeyIdentifier).value.key_identifier == expected
@@ -276,7 +277,7 @@ def test_sign_csr_preserves_sans(issuer: Issuer) -> None:
             x509.IPAddress(ipaddress.ip_address("192.168.1.10")),
         ],
     )
-    cert = sign_csr(issuer_cert, issuer_key, csr_pem, Profile.server, days=60)
+    cert, _capped = sign_csr(issuer_cert, issuer_key, csr_pem, Profile.server, days=60)
 
     assert cert.subject.rfc4514_string() == "CN=app.lan"
     san = _extension(cert, x509.SubjectAlternativeName).value
@@ -289,7 +290,7 @@ def test_sign_csr_override_sans_win(issuer: Issuer) -> None:
     """FR-3: an explicit override replaces the CSR's SANs entirely."""
     issuer_cert, issuer_key = issuer
     csr_pem = _csr("app.lan", sans=[x509.DNSName("app.lan")])
-    cert = sign_csr(
+    cert, _capped = sign_csr(
         issuer_cert,
         issuer_key,
         csr_pem,
@@ -326,7 +327,7 @@ def test_sign_csr_blocks_extension_smuggling(issuer: Issuer) -> None:
             (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.OCSP_SIGNING]), False),
         ],
     )
-    cert = sign_csr(issuer_cert, issuer_key, csr_pem, Profile.server)
+    cert, _capped = sign_csr(issuer_cert, issuer_key, csr_pem, Profile.server)
 
     basic_constraints = _extension(cert, x509.BasicConstraints).value
     assert basic_constraints.ca is False
@@ -380,12 +381,14 @@ def test_sign_csr_requires_subject_cn(issuer: Issuer) -> None:
 
 def test_san_fallback_cn_dns(issuer: Issuer) -> None:
     issuer_cert, issuer_key = issuer
-    cert, _key = issue_certificate(issuer_cert, issuer_key, Profile.server, "printer.lan", [])
+    cert, _key, _capped = issue_certificate(
+        issuer_cert, issuer_key, Profile.server, "printer.lan", []
+    )
     san = _extension(cert, x509.SubjectAlternativeName).value
     assert san.get_values_for_type(x509.DNSName) == ["printer.lan"]
 
     # same ladder for a CSR without any SAN extension
-    csr_cert = sign_csr(issuer_cert, issuer_key, _csr("plain.lan"), Profile.server)
+    csr_cert, _capped = sign_csr(issuer_cert, issuer_key, _csr("plain.lan"), Profile.server)
     assert _extension(csr_cert, x509.SubjectAlternativeName).value.get_values_for_type(
         x509.DNSName
     ) == ["plain.lan"]
@@ -393,7 +396,7 @@ def test_san_fallback_cn_dns(issuer: Issuer) -> None:
 
 def test_san_fallback_cn_ip(issuer: Issuer) -> None:
     issuer_cert, issuer_key = issuer
-    cert, _key = issue_certificate(issuer_cert, issuer_key, Profile.server, "10.0.0.5", [])
+    cert, _key, _capped = issue_certificate(issuer_cert, issuer_key, Profile.server, "10.0.0.5", [])
     san = _extension(cert, x509.SubjectAlternativeName).value
     assert san.get_values_for_type(x509.IPAddress) == [ipaddress.ip_address("10.0.0.5")]
     assert san.get_values_for_type(x509.DNSName) == []
@@ -445,7 +448,7 @@ def test_days_clamped_to_ca() -> None:
         root_cert, root_key, "Clamp Intermediate CA", "ecdsa-p256", years=1
     )
 
-    cert, _key = issue_certificate(
+    cert, _key, _capped = issue_certificate(
         issuer_cert,
         issuer_key,
         Profile.server,
@@ -455,13 +458,13 @@ def test_days_clamped_to_ca() -> None:
     )
     assert cert.not_valid_after_utc == issuer_cert.not_valid_after_utc
 
-    short, _short_key = issue_certificate(
+    short, _short_key, _capped = issue_certificate(
         issuer_cert, issuer_key, Profile.server, "short.lan", ["DNS:short.lan"], days=30
     )
     expected = datetime.now(UTC) + timedelta(days=30)
     assert abs((short.not_valid_after_utc - expected).total_seconds()) < 60
 
-    csr_cert = sign_csr(
+    csr_cert, _capped = sign_csr(
         issuer_cert,
         issuer_key,
         _csr("csrclamp.lan", sans=[x509.DNSName("csrclamp.lan")]),
@@ -530,7 +533,7 @@ def test_sans_are_deduplicated(issuer: Issuer) -> None:
     """The same name written two ways must not end up in the certificate
     twice -- the stored SAN list would then disagree with the certificate."""
     issuer_cert, issuer_key = issuer
-    cert, _key = issue_certificate(
+    cert, _key, _capped = issue_certificate(
         issuer_cert,
         issuer_key,
         Profile.server,
@@ -548,7 +551,9 @@ def test_san_count_capped(issuer: Issuer) -> None:
         issue_certificate(issuer_cert, issuer_key, Profile.server, "nas.lan", too_many)
 
     just_enough = too_many[:MAX_SANS]
-    cert, _key = issue_certificate(issuer_cert, issuer_key, Profile.server, "nas.lan", just_enough)
+    cert, _key, _capped = issue_certificate(
+        issuer_cert, issuer_key, Profile.server, "nas.lan", just_enough
+    )
     assert len(_extension(cert, x509.SubjectAlternativeName).value) == MAX_SANS
 
 
@@ -572,3 +577,234 @@ def test_expired_signing_ca_errors() -> None:
             _csr("late.lan", sans=[x509.DNSName("late.lan")]),
             Profile.server,
         )
+
+
+# --- spec 0017 FR-7: capped_from reporting -----------------------------------
+#
+# The Interface Contract (pinned into the spec after the three lanes'
+# suites were reconciled) makes ``_build_leaf`` the sole owner of the clamp
+# decision: ``issue_certificate`` returns ``(cert, key, capped_from)`` and
+# ``sign_csr`` returns ``(cert, capped_from)``, where ``capped_from`` is the
+# ``not_after`` that was requested but not granted, and ``None`` when the
+# full request was met. Every other call site in this file was updated to
+# match; these two tests are the ones that actually exercise the new value.
+
+
+def test_capped_from_set_when_issuer_expiry_is_sooner_than_requested() -> None:
+    """FR-7: when the request would outlive the issuer, capped_from carries
+    the instant that was ASKED for -- not a boolean, and not the granted
+    (clamped) expiry, which is already visible as cert.not_valid_after_utc."""
+    root_cert, root_key = create_root("Capped Root CA", "ecdsa-p256", years=2)
+    issuer_cert, issuer_key = create_intermediate(
+        root_cert, root_key, "Capped Intermediate CA", "ecdsa-p256", years=1
+    )
+    before = datetime.now(UTC)
+    requested_days = 3000
+
+    cert, _key, capped_from = issue_certificate(
+        issuer_cert,
+        issuer_key,
+        Profile.server,
+        "capped.lan",
+        ["DNS:capped.lan"],
+        days=requested_days,
+    )
+
+    assert cert.not_valid_after_utc == issuer_cert.not_valid_after_utc
+    assert capped_from is not None
+    expected_request = before + timedelta(days=requested_days)
+    assert abs((capped_from - expected_request).total_seconds()) < 60
+    # the requested instant is later than what was actually granted --
+    # otherwise this would just be echoing the granted expiry back.
+    assert capped_from > cert.not_valid_after_utc
+
+    csr_cert, csr_capped_from = sign_csr(
+        issuer_cert,
+        issuer_key,
+        _csr("csrcapped.lan", sans=[x509.DNSName("csrcapped.lan")]),
+        Profile.server,
+        days=requested_days,
+    )
+    assert csr_cert.not_valid_after_utc == issuer_cert.not_valid_after_utc
+    assert csr_capped_from is not None
+    assert abs((csr_capped_from - expected_request).total_seconds()) < 60
+
+
+def test_capped_from_none_when_request_fits(issuer: Issuer) -> None:
+    """FR-7's other half, and the one worth just as much: a request the
+    issuer can fully grant reports no cap at all. A helper that always
+    reports a cap would pass test_capped_from_set_... above and still be
+    wrong -- this is the counter-check that catches it."""
+    issuer_cert, issuer_key = issuer  # ~10 years remaining, from the fixture
+    cert, _key, capped_from = issue_certificate(
+        issuer_cert, issuer_key, Profile.server, "uncapped.lan", ["DNS:uncapped.lan"], days=30
+    )
+    assert capped_from is None
+    assert cert.not_valid_after_utc < issuer_cert.not_valid_after_utc
+
+    csr_cert, csr_capped_from = sign_csr(
+        issuer_cert,
+        issuer_key,
+        _csr("csruncapped.lan", sans=[x509.DNSName("csruncapped.lan")]),
+        Profile.server,
+        days=30,
+    )
+    assert csr_capped_from is None
+    assert csr_cert.not_valid_after_utc < issuer_cert.not_valid_after_utc
+
+
+# --- spec 0017 FR-11/FR-12: AIA caIssuers + http-only CDP/AIA URLs -----------
+#
+# FR-12 says the scheme-forcing helper lives "beside crl.distribution_url"
+# (cabin.ca.crl) -- but crl.py's per-issuer rework is Backend's FR-9, still
+# unimplemented, and importing a DB-backed module here would make these
+# pure-crypto tests depend on Backend's timeline for no reason. The contract
+# these tests require instead: a pure, dependency-free
+# ``cabin.ca.leaf.public_http_origin(base_url) -> str`` that forces the
+# scheme to http and drops an explicit :443; cabin.ca.crl's distribution_url
+# and new ca_issuers_url are expected to call it, not reimplement it. This is
+# the deviation-from-spec-text kind the work split's own FR-12 fallback note
+# sanctions ("needs a note in the PR, not a silent move") -- consider this
+# that note.
+
+
+def test_leaf_has_aia_caissuers(issuer: Issuer) -> None:
+    """AC-8: every issued leaf carries exactly one caIssuers AccessDescription,
+    non-critical, equal to whatever URL the caller supplies -- both for a
+    server-generated key and for a signed CSR."""
+    issuer_cert, issuer_key = issuer
+    url = "http://ca.example.lan/ca/7.cer"
+
+    cert, _key, _capped = issue_certificate(
+        issuer_cert,
+        issuer_key,
+        Profile.server,
+        "aia.lan",
+        ["DNS:aia.lan"],
+        ca_issuers_url=url,
+    )
+    aia = _extension(cert, x509.AuthorityInformationAccess)
+    assert aia.critical is False
+    descriptions = list(aia.value)
+    assert len(descriptions) == 1
+    assert descriptions[0].access_method == AuthorityInformationAccessOID.CA_ISSUERS
+    assert isinstance(descriptions[0].access_location, x509.UniformResourceIdentifier)
+    assert descriptions[0].access_location.value == url
+
+    csr_cert, _capped = sign_csr(
+        issuer_cert,
+        issuer_key,
+        _csr("aia-csr.lan", sans=[x509.DNSName("aia-csr.lan")]),
+        Profile.server,
+        ca_issuers_url=url,
+    )
+    csr_descriptions = list(_extension(csr_cert, x509.AuthorityInformationAccess).value)
+    assert len(csr_descriptions) == 1
+    assert csr_descriptions[0].access_method == AuthorityInformationAccessOID.CA_ISSUERS
+    assert csr_descriptions[0].access_location.value == url
+
+
+def test_no_aia_and_no_cdp_without_a_base_url(issuer: Issuer) -> None:
+    """AC-8's last sentence: with nothing configured, neither AIA nor CDP is
+    present at all -- an absent extension, not one carrying an empty URL."""
+    issuer_cert, issuer_key = issuer
+    cert, _key, _capped = issue_certificate(
+        issuer_cert, issuer_key, Profile.server, "noaia.lan", ["DNS:noaia.lan"]
+    )
+    with pytest.raises(x509.ExtensionNotFound):
+        _extension(cert, x509.AuthorityInformationAccess)
+    with pytest.raises(x509.ExtensionNotFound):
+        _extension(cert, x509.CRLDistributionPoints)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://ca.example.lan", "http://ca.example.lan"),
+        ("https://ca.example.lan:443", "http://ca.example.lan"),
+        ("https://ca.example.lan:8443", "http://ca.example.lan:8443"),
+        ("http://ca.example.lan", "http://ca.example.lan"),
+        ("https://ca.example.lan/cabin", "http://ca.example.lan/cabin"),
+    ],
+)
+def test_https_base_url_port_443_dropped(base_url: str, expected: str) -> None:
+    """AC-9: scheme forced to http, an explicit :443 dropped, everything
+    else (host, a non-default port, a path) left alone. A pure unit test of
+    the helper -- the certificate-level counter-check that this is actually
+    wired in lives in test_cdp_and_aia_are_http_when_base_url_is_https."""
+    assert public_http_origin(base_url) == expected
+
+
+def test_cdp_and_aia_are_http_when_base_url_is_https(issuer: Issuer) -> None:
+    """AC-9, measured on the real certificate rather than on the input
+    string: build the CDP/AIA URLs the way production code is expected to
+    (the forced origin plus a path), issue with them, then parse the
+    finished certificate's extensions with cryptography and check the
+    scheme and port found there -- not what was fed in."""
+    issuer_cert, issuer_key = issuer
+    origin = public_http_origin("https://ca.example.lan")
+    crl_url = f"{origin}/crl/9"
+    aia_url = f"{origin}/ca/9.cer"
+
+    cert, _key, _capped = issue_certificate(
+        issuer_cert,
+        issuer_key,
+        Profile.server,
+        "scheme.lan",
+        ["DNS:scheme.lan"],
+        crl_url=crl_url,
+        ca_issuers_url=aia_url,
+    )
+
+    cdp = _extension(cert, x509.CRLDistributionPoints).value
+    assert cdp[0].full_name is not None
+    cdp_uri = cdp[0].full_name[0].value
+    assert isinstance(cdp_uri, str)
+    assert cdp_uri.startswith("http://")
+    assert "https" not in cdp_uri
+
+    aia_desc = next(iter(_extension(cert, x509.AuthorityInformationAccess).value))
+    aia_uri = aia_desc.access_location.value
+    assert isinstance(aia_uri, str)
+    assert aia_uri.startswith("http://")
+    assert "https" not in aia_uri
+
+
+@pytest.mark.parametrize(
+    ("base_url", "port_should_survive"),
+    [
+        ("https://ca.example.lan:443", False),
+        ("https://ca.example.lan:8443", True),
+    ],
+)
+def test_https_base_url_port_443_dropped_on_the_certificate(
+    issuer: Issuer, base_url: str, port_should_survive: bool
+) -> None:
+    """AC-9's port clause, also verified on the parsed certificate and not
+    merely on the helper's return value: :443 must not appear in either URL
+    a relying party reads off the certificate, while a non-default port
+    (:8443) must survive -- a wrong implementation that strips every port
+    would otherwise pass the CDP/AIA "http" checks above undetected."""
+    issuer_cert, issuer_key = issuer
+    origin = public_http_origin(base_url)
+    cert, _key, _capped = issue_certificate(
+        issuer_cert,
+        issuer_key,
+        Profile.server,
+        "port.lan",
+        ["DNS:port.lan"],
+        crl_url=f"{origin}/crl/9",
+        ca_issuers_url=f"{origin}/ca/9.cer",
+    )
+    cdp = _extension(cert, x509.CRLDistributionPoints).value
+    assert cdp[0].full_name is not None
+    cdp_uri = cdp[0].full_name[0].value
+    aia_desc = next(iter(_extension(cert, x509.AuthorityInformationAccess).value))
+    aia_uri = aia_desc.access_location.value
+    assert isinstance(cdp_uri, str)
+    assert isinstance(aia_uri, str)
+
+    assert (":8443" in cdp_uri) is port_should_survive
+    assert (":8443" in aia_uri) is port_should_survive
+    assert ":443" not in cdp_uri  # never the bare dropped default, either way
+    assert ":443" not in aia_uri

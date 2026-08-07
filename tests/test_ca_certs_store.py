@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from cabin.ca.certs import (
     Certificate,
     CertStatus,
+    Issued,
     certificate_status,
     get_certificate,
     issue_and_store,
@@ -26,7 +27,7 @@ from cabin.ca.certs import (
     sign_csr_and_store,
 )
 from cabin.ca.leaf import IssueError, Profile
-from cabin.ca.service import CANotConfiguredError, signing_credentials
+from cabin.ca.service import CANotConfiguredError, IssuerRequiredError, signing_credentials
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
 
@@ -66,9 +67,9 @@ def _csr_pem(cn: str, sans: list[x509.GeneralName]) -> str:
 
 
 def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
-    ca_fixtures.make_hierarchy(db, secrets, "Store")
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
 
-    row = issue_and_store(
+    issued = issue_and_store(
         db,
         secrets,
         profile=Profile.server,
@@ -77,6 +78,9 @@ def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
         days=90,
         key_type="ecdsa-p256",
     )
+    assert isinstance(issued, Issued)
+    row = issued.row
+    assert row.issuer_id == hierarchy.intermediate.id
 
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("ascii"))
     assert row.serial_hex == format(cert.serial_number, "x")
@@ -101,21 +105,23 @@ def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
     assert fetched.cert_pem == row.cert_pem
     assert fetched.sans == ["DNS:nas.lan", "IP:10.0.0.5"]
 
-    intermediate_cert, _key = signing_credentials(db, secrets)
+    intermediate_cert, _key = signing_credentials(db, secrets, hierarchy.intermediate.id)
     cert.verify_directly_issued_by(intermediate_cert)
 
 
 def test_store_no_key_csr_flow(db: Session, secrets: SecretStore) -> None:
-    ca_fixtures.make_hierarchy(db, secrets, "Store")
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
     csr_pem = _csr_pem("app.lan", [x509.DNSName("app.lan"), x509.DNSName("www.app.lan")])
 
-    row = sign_csr_and_store(db, secrets, csr_pem=csr_pem, profile=Profile.client, days=30)
+    issued = sign_csr_and_store(db, secrets, csr_pem=csr_pem, profile=Profile.client, days=30)
+    row = issued.row
 
     # AC-5: cabin never saw this private key, so there is nothing to store.
     assert row.key_sealed is None
     assert key_pem(secrets, row) is None
     assert row.profile == "client"
     assert row.subject_cn == "app.lan"
+    assert row.issuer_id == hierarchy.intermediate.id
     assert json.loads(row.sans_json) == ["DNS:app.lan", "DNS:www.app.lan"]
 
     fetched = get_certificate(db, row.id)
@@ -168,13 +174,101 @@ def test_store_sans_match_the_issued_certificate(db: Session, secrets: SecretSto
         subject_cn="nas.lan",
         sans=["nas.lan", "dns:nas.lan"],
         days=30,
-    )
+    ).row
 
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("ascii"))
     san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     assert san.get_values_for_type(x509.DNSName) == ["nas.lan"]
     assert json.loads(row.sans_json) == ["DNS:nas.lan"]
     assert len(list(san)) == len(row.sans)
+
+
+# --- spec 0017 FR-6: issuer_id threading and the default-issuer rule -------
+
+
+def test_issue_and_store_defaults_issuer_with_one_active(db: Session, secrets: SecretStore) -> None:
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+
+    row = issue_and_store(
+        db, secrets, profile=Profile.server, subject_cn="nas.lan", sans=["DNS:nas.lan"]
+    ).row
+
+    assert row.issuer_id == hierarchy.intermediate.id
+
+
+def test_issue_and_store_explicit_issuer_id_is_stored(db: Session, secrets: SecretStore) -> None:
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
+    second = ca_fixtures.make_hierarchy(db, secrets, "Second")
+
+    row = issue_and_store(
+        db,
+        secrets,
+        profile=Profile.server,
+        subject_cn="nas.lan",
+        sans=["DNS:nas.lan"],
+        issuer_id=second.intermediate.id,
+    ).row
+
+    assert row.issuer_id == second.intermediate.id
+
+
+def test_issue_and_store_requires_issuer_with_two_active(db: Session, secrets: SecretStore) -> None:
+    """AC-2: no row is written when the issuer is ambiguous."""
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
+    ca_fixtures.make_hierarchy(db, secrets, "Second")
+
+    with pytest.raises(IssuerRequiredError):
+        issue_and_store(
+            db, secrets, profile=Profile.server, subject_cn="nas.lan", sans=["DNS:nas.lan"]
+        )
+    assert get_certificate(db, 1) is None
+
+
+def test_sign_csr_and_store_threads_issuer_id(db: Session, secrets: SecretStore) -> None:
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    csr_pem = _csr_pem("app.lan", [x509.DNSName("app.lan")])
+
+    row = sign_csr_and_store(db, secrets, csr_pem=csr_pem, profile=Profile.client).row
+
+    assert row.issuer_id == hierarchy.intermediate.id
+
+
+# --- spec 0017 FR-7: a clamped validity is reported, not silently granted --
+
+
+def test_uncapped_issuance_reports_nothing(db: Session, secrets: SecretStore) -> None:
+    ca_fixtures.make_hierarchy(db, secrets, "Store", intermediate_years=10)
+
+    issued = issue_and_store(
+        db, secrets, profile=Profile.server, subject_cn="nas.lan", sans=["DNS:nas.lan"], days=90
+    )
+
+    assert issued.capped_from is None
+
+
+def test_capped_validity_is_reported_and_leaf_matches_issuer_expiry(
+    db: Session, secrets: SecretStore
+) -> None:
+    """AC-7: asking for more than the issuer has left yields exactly the
+    issuer's remaining life, and the response says what was actually asked
+    for -- not silently."""
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store", intermediate_years=1)
+    intermediate_cert = x509.load_pem_x509_certificate(
+        hierarchy.intermediate.cert_pem.encode("ascii")
+    )
+
+    issued = issue_and_store(
+        db,
+        secrets,
+        profile=Profile.server,
+        subject_cn="nas.lan",
+        sans=["DNS:nas.lan"],
+        days=3650,
+    )
+
+    assert issued.capped_from is not None
+    leaf_cert = x509.load_pem_x509_certificate(issued.row.cert_pem.encode("ascii"))
+    assert leaf_cert.not_valid_after_utc == intermediate_cert.not_valid_after_utc
 
 
 # --- spec 0006 FR-2/FR-3: inventory query and status ---------------------------

@@ -254,9 +254,9 @@ def _answer_http01(
 def _root_certificate(cfg: Config) -> x509.Certificate:
     db = create_session_factory(cfg.db_url)()
     try:
-        hierarchy = ca_service.get_ca(db)
-        assert hierarchy is not None
-        return x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii"))
+        intermediate = ca_service.active_issuers(db)[0]
+        root = ca_service.chain_for(db, intermediate.id)[-1]  # nearest first, root last
+        return x509.load_pem_x509_certificate(root.cert_pem.encode("ascii"))
     finally:
         db.close()
 

@@ -19,10 +19,12 @@ from cabin.api.models import IssueRequest, KeyType, StatusFilter
 from cabin.api_tokens import create_token
 from cabin.app import create_app
 from cabin.ca.certs import STATUS_FILTERS, get_certificate
+from cabin.ca.crl import current_crl
 from cabin.ca.leaf import MAX_CN_LENGTH, MAX_DAYS, MAX_SANS, MIN_DAYS
-from cabin.ca.service import get_ca
+from cabin.ca.service import active_issuers, create_hierarchy, get_ca, retire
 from cabin.ca.x509 import KEY_TYPES
 from cabin.config import Config
+from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
 from cabin.users import Role
@@ -215,16 +217,59 @@ def test_token_does_not_authenticate_ui(api: TestClient, cfg: Config) -> None:
 
 
 def test_api_get_ca(api: TestClient, cfg: Config) -> None:
+    """AC-15/FR-15: one entry per ``ca_certificates`` row, not a
+    ``{root, intermediate}`` pair -- so the shape still describes an
+    instance once a second hierarchy exists."""
     resp = api.get("/api/v1/ca", headers=_auth(_token(cfg, Role.viewer)))
     assert resp.status_code == 200
     body = resp.json()
-    assert body["root"]["subject"] == "CN=cabin Root CA"
-    assert body["intermediate"]["subject"] == "CN=cabin Intermediate CA"
-    assert body["intermediate"]["issuer"] == "CN=cabin Root CA"
-    assert len(body["root"]["fingerprint"].split(":")) == 32
-    assert body["intermediate"]["not_valid_after"] > body["intermediate"]["not_valid_before"]
-    assert body["base_url"] == BASE_URL
-    assert body["crl_url"] == f"{BASE_URL}/crl"
+    issuers = {row["name"]: row for row in body["issuers"]}
+    assert issuers.keys() == {"cabin Root CA", "cabin Intermediate CA"}
+    root = issuers["cabin Root CA"]
+    intermediate = issuers["cabin Intermediate CA"]
+    assert root["kind"] == "root"
+    assert root["parent_id"] is None
+    assert root["status"] == "active"
+    assert intermediate["kind"] == "intermediate"
+    assert intermediate["parent_id"] == root["id"]
+    assert intermediate["subject"] == "CN=cabin Intermediate CA"
+    assert intermediate["issuer"] == "CN=cabin Root CA"
+    assert len(root["fingerprint"].split(":")) == 32
+    assert intermediate["not_valid_after"] > intermediate["not_valid_before"]
+    assert intermediate["crl_url"].endswith(f"/crl/{intermediate['id']}") or intermediate[
+        "crl_url"
+    ].endswith(f"/crl/{intermediate['id']}.pem")
+    assert str(intermediate["id"]) in intermediate["ca_url"]
+
+
+def test_api_get_ca_reports_retired_status(api: TestClient, cfg: Config) -> None:
+    """AC-15: after retiring an issuer, the same call reports it retired --
+    proven with a second issuer active, since the last active one may not be
+    retired (FR-4)."""
+    db = _db(cfg)
+    try:
+        active = active_issuers(db)
+        assert len(active) == 1
+        first_issuer_id = active[0].id
+    finally:
+        db.close()
+
+    admin_headers = _auth(_token(cfg, Role.admin))
+    # A second hierarchy so retiring the first one is legal.
+    resp = api.get("/api/v1/ca", headers=admin_headers)
+    root_id = next(row["id"] for row in resp.json()["issuers"] if row["kind"] == "root")
+
+    db = _db(cfg)
+    try:
+        create_hierarchy(db, SecretStore.open(cfg.data_dir, None), "second")
+        retire(db, first_issuer_id)
+    finally:
+        db.close()
+
+    resp = api.get("/api/v1/ca", headers=_auth(_token(cfg, Role.viewer)))
+    by_id = {row["id"]: row for row in resp.json()["issuers"]}
+    assert by_id[first_issuer_id]["status"] == "retired"
+    assert root_id in by_id
 
 
 def test_api_list_and_get_certificate(api: TestClient, cfg: Config) -> None:
@@ -289,13 +334,111 @@ def test_api_issue_certificate(api: TestClient, cfg: Config) -> None:
     intermediate = x509.load_pem_x509_certificate(body["chain_pem"].encode("ascii"))
     cert.verify_directly_issued_by(intermediate)
 
-    # The CRL distribution point comes from the configured base URL (0007).
+    # The CRL distribution point comes from the configured base URL (0007)
+    # and, since spec 0017 FR-9/FR-10, names the issuer that actually signed
+    # this leaf rather than a single instance-wide /crl.
+    db = _db(cfg)
+    try:
+        issuer_id = active_issuers(db)[0].id
+    finally:
+        db.close()
     cdp = cert.extensions.get_extension_for_class(x509.CRLDistributionPoints).value
     assert cdp[0].full_name is not None
-    assert cdp[0].full_name[0].value == f"{BASE_URL}/crl"
+    cdp_url = cdp[0].full_name[0].value
+    assert cdp_url.startswith(BASE_URL)
+    assert f"/crl/{issuer_id}" in cdp_url
 
     listing = api.get("/api/v1/certificates", headers=admin).json()
     assert [item["id"] for item in listing["items"]] == [body["id"]]
+
+
+def test_api_chain_pem_comes_from_the_leafs_own_issuer(api: TestClient, cfg: Config) -> None:
+    """FR-8: the chain in a REST response is built from the *issuing* CA
+    hierarchy, not "the" hierarchy -- with two active issuers, each leaf's
+    ``chain_pem`` verifies against its own issuer and fails against the
+    other's, in both directions (work split R3)."""
+    admin = _auth(_token(cfg, Role.admin))
+    db = _db(cfg)
+    try:
+        first_issuer_id = active_issuers(db)[0].id
+        second = create_hierarchy(db, SecretStore.open(cfg.data_dir, None), "second")
+        second_issuer_id = second.intermediate.id
+    finally:
+        db.close()
+
+    body_a = api.post(
+        "/api/v1/certificates",
+        json=_issue_body(subject_cn="a.lan", sans=["a.lan"]) | {"issuer_id": first_issuer_id},
+        headers=admin,
+    ).json()
+    body_b = api.post(
+        "/api/v1/certificates",
+        json=_issue_body(subject_cn="b.lan", sans=["b.lan"]) | {"issuer_id": second_issuer_id},
+        headers=admin,
+    ).json()
+
+    cert_a = x509.load_pem_x509_certificate(body_a["cert_pem"].encode("ascii"))
+    cert_b = x509.load_pem_x509_certificate(body_b["cert_pem"].encode("ascii"))
+    chain_a = x509.load_pem_x509_certificate(body_a["chain_pem"].encode("ascii"))
+    chain_b = x509.load_pem_x509_certificate(body_b["chain_pem"].encode("ascii"))
+
+    cert_a.verify_directly_issued_by(chain_a)
+    cert_b.verify_directly_issued_by(chain_b)
+    with pytest.raises(Exception):  # noqa: B017 -- any verification failure, wrong chain
+        cert_a.verify_directly_issued_by(chain_b)
+    with pytest.raises(Exception):  # noqa: B017
+        cert_b.verify_directly_issued_by(chain_a)
+
+
+# --- AC-7: a clamped validity is reported, not silently granted -------------
+
+
+def test_api_capped_validity_reported_in_response(client: TestClient, cfg: Config) -> None:
+    """AC-7: requesting more than the issuer has left comes back clamped to
+    the issuer's own expiry, and ``validity_capped_from`` names what was
+    actually requested."""
+    _setup_superadmin(client)
+    csrf = _csrf(client, cfg)
+    resp = client.post(
+        "/ca/create",
+        data={
+            "name": "cabin",
+            "key_type": "ecdsa-p256",
+            "root_years": 5,
+            "intermediate_years": 1,
+            "csrf_token": csrf,
+        },
+    )
+    assert resp.status_code == 303
+    _set_base_url(client, cfg)
+    client.cookies.clear()
+    admin = _auth(_token(cfg, Role.admin))
+
+    resp = client.post("/api/v1/certificates", json=_issue_body(days=3650), headers=admin)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["validity_capped_from"] is not None
+
+    cert = x509.load_pem_x509_certificate(body["cert_pem"].encode("ascii"))
+    db = _db(cfg)
+    try:
+        issuer = get_ca(db, active_issuers(db)[0].id)
+    finally:
+        db.close()
+    issuer_cert = x509.load_pem_x509_certificate(issuer.cert_pem.encode("ascii"))
+    assert cert.not_valid_after_utc == issuer_cert.not_valid_after_utc
+
+
+def test_api_uncapped_issuance_reports_nothing(api: TestClient, cfg: Config) -> None:
+    """AC-7: the field is absent from the response, not ``null``-and-present,
+    when nothing was clamped (the default fixture's issuer has ten years
+    left, far more than the default 90-day request)."""
+    admin = _auth(_token(cfg, Role.admin))
+
+    resp = api.post("/api/v1/certificates", json=_issue_body(), headers=admin)
+
+    assert resp.status_code == 201
+    assert "validity_capped_from" not in resp.json()
 
 
 def test_api_issue_key_visibility_by_role(api: TestClient, cfg: Config) -> None:
@@ -364,9 +507,8 @@ def test_api_unsealable_keys_are_reported_not_crashed(api: TestClient, cfg: Conf
 
     db = _db(cfg)
     try:
-        hierarchy = get_ca(db)
-        assert hierarchy is not None
-        hierarchy.intermediate.key_sealed = "A" * 40
+        issuer = get_ca(db, active_issuers(db)[0].id)
+        issuer.key_sealed = "A" * 40
         db.commit()
     finally:
         db.close()
@@ -455,7 +597,13 @@ def test_api_sign_csr_smuggling_blocked(api: TestClient, cfg: Config) -> None:
 
 
 def test_api_revoke_updates_crl(api: TestClient, cfg: Config) -> None:
-    """AC-6: the serial shows up in the CRL that /crl serves."""
+    """AC-6/FR-9: the serial shows up in the revoking issuer's own CRL.
+
+    The route that serves ``/crl/{issuer_id}`` is Security's (spec 0017 work
+    split), so this checks the CRL through the service layer this API route
+    actually calls -- :func:`cabin.ca.crl.current_crl` -- rather than a
+    second front door's HTTP route.
+    """
     admin = _auth(_token(cfg, Role.admin))
     issued = api.post("/api/v1/certificates", json=_issue_body(), headers=admin).json()
 
@@ -469,9 +617,17 @@ def test_api_revoke_updates_crl(api: TestClient, cfg: Config) -> None:
     assert body["status"] == "revoked"
     assert body["reason"] == "key_compromise"
     assert body["revoked_at"]
-    assert body["crl_url"] == f"{BASE_URL}/crl"
+    assert body["crl_url"] is not None
+    assert body["crl_url"].startswith(BASE_URL)
+    assert "/crl/" in body["crl_url"]
 
-    crl = x509.load_der_x509_crl(api.get("/crl").content)
+    db = _db(cfg)
+    try:
+        issuer_id = active_issuers(db)[0].id
+        state = current_crl(db, SecretStore.open(cfg.data_dir, None), issuer_id)
+    finally:
+        db.close()
+    crl = x509.load_der_x509_crl(state.crl_der)
     assert [entry.serial_number for entry in crl] == [int(issued["serial_hex"], 16)]
 
     detail = api.get(f"/api/v1/certificates/{issued['id']}", headers=admin).json()

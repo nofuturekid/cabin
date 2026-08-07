@@ -206,8 +206,10 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
     db = _db(cfg)
     try:
         secrets = SecretStore.open(cfg.data_dir, cfg.master_passphrase)
-        ca_service.create_hierarchy(db, secrets, "cabin test")
-        row = certs_service.issue_and_store(
+        hierarchy = ca_service.create_hierarchy(db, secrets, "cabin test")
+        # spec 0017 FR-7: issue_and_store/sign_csr_and_store now return an
+        # Issued(row, capped_from) wrapper rather than a bare row.
+        issued = certs_service.issue_and_store(
             db,
             secrets,
             profile=Profile.server,
@@ -218,7 +220,8 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
         other = certs_service.issue_and_store(
             db, secrets, profile=Profile.server, subject_cn="ui.lan", sans=["ui.lan"]
         )
-        cert_id, other_id = row.id, other.id
+        cert_id, other_id = issued.row.id, other.row.id
+        issuer_id = hierarchy.intermediate.id
     finally:
         db.close()
 
@@ -239,5 +242,8 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
         assert certs_service.get_certificate(db, other_id).source == CertSource.ui  # type: ignore[union-attr]
     finally:
         db.close()
-    crl = client.get("/crl")
+    # spec 0017 FR-10: /crl is gone with no alias; the per-issuer route
+    # (/crl/{issuer_id}) is what replaces it.
+    assert client.get("/crl").status_code == 404
+    crl = client.get(f"/crl/{issuer_id}")
     assert crl.status_code == 200
