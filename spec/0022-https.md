@@ -238,11 +238,12 @@ recorded as an ADR rather than allowed to happen quietly (FR-12).
   `tls.ensure_current(db, secrets) -> bool` is the single entry point for
   everything above and returns whether the material changed. It:
   1. reads the current certificate from disk (or notes that there is none);
-  2. decides the target state — CA-issued when `active_issuers(db)` is
-     non-empty, self-signed otherwise — and the names from FR-5;
+  2. decides the target state — CA-issued when FR-17 resolves a bound
+     issuer, self-signed otherwise — and the names from FR-5;
   3. re-issues when the target differs from what is on disk, when the names
-     differ, or when FR-9's renewal window is open; otherwise returns
-     `False` and touches nothing;
+     differ, or when FR-9's renewal window is open **and** FR-17's
+     no-shorter-certificate rule allows it; otherwise returns `False` and
+     touches nothing;
   4. writes `cabin.crt` and the sealed `cabin.key.sealed` per FR-3, then
      calls `tls.load_into(config.ssl, cert_path, key_pem)` — FR-3's memfd
      load — on the live `uvicorn.Config` from FR-1. The unsealed key is
@@ -324,6 +325,22 @@ recorded as an ADR rather than allowed to happen quietly (FR-12).
   an hourly interval. This is cabin's first background scheduler, and spec
   0017's Out of Scope names the lazy CRL refresh as cabin's only one — this
   is a deliberate, argued exception to that line, not an oversight in it.
+
+  **The loop is a seam, so it can be tested without waiting an hour.**
+  `tls.renewal_loop(interval, tick, stop)` is the whole of the scheduler:
+  it calls `tick` every `interval` until `stop` is set, and `run` supplies
+  `CHECK_INTERVAL`, a `tick` that opens a session and calls
+  `ensure_current`, and the same stop signal FR-2 uses. A test drives it
+  with a millisecond interval and a fake `tick`; nothing in the suite sleeps
+  for an hour.
+
+  **A failing tick must not kill the loop.** `renewal_loop` catches every
+  exception `tick` raises, logs it, and continues to the next interval. A
+  transient database error, a locked SQLite file or an issuer that is
+  briefly unusable must cost one cycle, not the scheduler — a loop that dies
+  silently after one bad tick is worse than no loop at all, because the
+  certificate then expires with the process looking perfectly healthy.
+  AC-22 asserts the cycle _after_ a raising one still runs.
 
 - FR-10: **The plaintext PKI listener.** With TLS on, `run` starts a second
   `uvicorn.Server` on `config.http_port`, bound to `0.0.0.0`, serving a
@@ -477,6 +494,93 @@ recorded as an ADR rather than allowed to happen quietly (FR-12).
   An operator who can see the URL and click it finds a broken deployment in
   seconds. That is the entire justification, and it is cheap.
 
+- FR-17: **Which issuer signs cabin's own certificate is a stored,
+  deliberate choice.** Spec 0017 FR-6 requires an explicit `issuer_id` as
+  soon as more than one issuer is active and raises `IssuerRequiredError`
+  otherwise. `ensure_current` calling `issue_and_store` without one would
+  therefore fail to issue **and fail to renew** on exactly the multi-issuer
+  installations 0017 exists to enable. That is a functional defect, not a
+  corner case, and the fix is not to pick a default silently: whichever
+  issuer signs cabin's own certificate decides the chain an operator has
+  installed in their browser and their trust stores, so a rotation that
+  moved cabin onto a different issuer without anyone deciding would break
+  trust across a fleet with no decision recorded anywhere.
+
+  A new setting `TLS_ISSUER_ID = "tls_issuer_id"` (`settings.py`) holds the
+  chosen `ca_certificates.id` as text. `tls.resolve_tls_issuer(db)` decides,
+  in the shape 0017 FR-6 already established:
+  - set, and it names an **active intermediate** → that issuer.
+  - unset, and exactly **one** active issuer exists → that one, **and it is
+    persisted immediately**, before the certificate is issued. Writing the
+    decision down at the moment it is unambiguous is what stops a second
+    issuer created later from changing the answer retroactively.
+  - unset, and **several** active issuers exist → no CA-issued certificate.
+    cabin keeps serving what it has (self-signed at stage 1), logs it,
+    and shows the operator a banner asking them to choose. It does **not**
+    raise: the multi-issuer instance must stay reachable, and being
+    reachable behind a self-signed certificate beats not starting.
+  - set, but the row is unknown or retired → the same: keep the current
+    material, warn, do not silently rebind. Falling back to another issuer
+    here would be precisely the silent chain change this requirement exists
+    to prevent.
+
+  `/settings` gains an issuer select, populated from `active_issuers(db)`
+  and rendered only when TLS is on — mirroring how the issue form renders
+  its selector only when there is a choice to make (0017 FR-14). Changing it
+  triggers `ensure_current`, so the new chain is served immediately rather
+  than at the next renewal.
+
+  **Retiring the bound issuer is refused while TLS is on.** Retiring it
+  would leave `resolve_tls_issuer` unable to renew, and cabin's certificate
+  would then expire 30 to 90 days later — the maximum possible distance
+  between cause and symptom, long after the operator has forgotten the
+  retirement. The refusal is the same shape as 0017 FR-4's
+  `RetireError` and the last-superadmin invariant (`users.py:75-79`), and
+  its message names the fix: rebind under Settings first, then retire. The
+  check must cover the **cascade**: retiring a root also retires its
+  intermediates (`ca/service.py:409-417`), so it tests the whole set that
+  would be stood down, not just the named row. A new
+  `ca/service.retire_targets(db, ca_id) -> set[int]` returns that set and is
+  used by `retire` itself, so there is one definition of what a retire
+  touches rather than two that can drift.
+
+  Like FR-13, the check lives in the route (`web/ca_ui.py`'s retire POST),
+  which has `request.app.state.config`, and not in `ca/service.retire`,
+  which does not and must not. With TLS off there is no refusal at all — the
+  binding is inert and an operator not using cabin's TLS must not be
+  obstructed by it.
+
+  **An expiring bound issuer is warned about, never worked around.** cabin
+  cannot choose a different issuer on its own, so it does the two things it
+  can:
+  - The dashboard's per-issuer expiry warning (`web/ui.py:55`,
+    `CA_WARN_DAYS`) says additionally, for the bound issuer, that this is
+    the issuer signing cabin's own certificate — so the warning names a
+    consequence and not just a date.
+  - 0017 FR-7 already reports a clamped validity as `capped_from`. When
+    cabin's own renewal comes back clamped, that is the first hard evidence
+    the bound issuer is running out; it is logged and audited with the
+    renewal, not discarded.
+
+  **No renewal storm as the issuer runs out.** Once the bound issuer has
+  less time left than `RENEW_BEFORE`, every certificate cabin issues itself
+  is clamped to the issuer's `not_after` and is therefore _immediately_
+  inside the renewal window again. A naive implementation would re-issue on
+  every hourly tick and add 8,760 rows a year to the inventory. So
+  `ensure_current` re-issues only when the replacement would be **at least
+  one day longer-lived** than what is already loaded; otherwise it logs and
+  returns `False`. AC-24 measures this.
+
+  **cabin never downgrades itself from CA-issued to self-signed.** If the
+  bound issuer becomes unusable, the existing certificate keeps being
+  served — even once expired — and the failure is logged, audited and shown.
+  Replacing a certificate whose root the operator has installed with a
+  self-signed one would turn a working, trusted deployment into a browser
+  warning automatically and unattended, and would look enough like a fix to
+  take the pressure off repairing the real problem. A self-signed
+  certificate is what an instance starts with, not something it falls back
+  to.
+
 ## Interface Contract
 
 What the Functional Requirements change, named exactly, so that the modules
@@ -491,12 +595,31 @@ on either side of a seam cannot be built against two different guesses.
 
 ### `cabin.server` — new
 
-- `run(config: Config) -> None` — builds the application, the uvicorn
-  `Config`/`Server` objects and the TLS manager, and blocks until every
-  server has stopped. The only caller is `cli.main`.
+- `run(config: Config) -> None` — builds the TLS manager, passes it to
+  `create_app`, builds the uvicorn `Config`/`Server` objects, and blocks
+  until every server has stopped. The only caller is `cli.main`.
 - `create_public_app(main_app: FastAPI) -> FastAPI` — FR-10. Contains
   `crl_router` and nothing else, with `dependency_overrides` for `get_db`
   and `get_secrets` pointing at `main_app.state`.
+
+### `cabin.app` — where `app.state.tls` comes from
+
+`create_app` gains one optional parameter:
+`create_app(config: Config, tls: TlsManager | None = None) -> FastAPI`, and
+its lifespan sets `app.state.tls = tls` on the line after
+`app.state.config = config` (`app.py:39`). `run` is what passes a manager;
+every other caller passes nothing and gets `None`.
+
+**This is specified rather than left to the implementer because
+`app.state` is a trap here.** `set_session_cookie` reads
+`request.app.state.config` unguarded (`web/deps.py:41`) and works only
+because the lifespan sets it — so anything reading `app.state.tls` the same
+way would raise `AttributeError` in every one of the ~36 places that build
+an app through `create_app` without going through `server.run`, which is all
+of the test suite. Establishing it in the lifespan alongside `config`,
+defaulting to `None`, means no existing call site changes and `None` is a
+supported value with a defined meaning: TLS is off, and FR-14's banner is
+absent. Nothing may read `app.state.tls` without handling `None`.
 
 ### `cabin.tls` — new
 
@@ -506,7 +629,8 @@ import it back.
 
 - `TlsMode` (`StrEnum`): `self_signed`, `ca_issued`.
 - `CERT_DAYS = 90`, `RENEW_BEFORE = timedelta(days=30)`,
-  `CHECK_INTERVAL = timedelta(hours=1)`.
+  `CHECK_INTERVAL = timedelta(hours=1)`, `MIN_RENEWAL_GAIN = timedelta(days=1)`
+  (FR-17's no-shorter-certificate rule).
 - `TlsManager(data_dir: Path)`:
   - `mode: TlsMode | None` — what is currently loaded; `None` before the
     first `ensure_current`. Read by FR-14's templates via `app.state.tls`.
@@ -517,6 +641,16 @@ import it back.
     condition; logs and returns `False`.
   - `wanted_names(db: Session) -> tuple[str, list[str]]` — FR-5, as
     `(subject_cn, sans)`.
+- `resolve_tls_issuer(db: Session) -> CACertificate | None` — FR-17.
+  `None` means "no CA-issued certificate right now", never an exception:
+  every ambiguous or broken binding keeps the instance serving what it has.
+  Persists the sole-active-issuer decision as a side effect, which is the
+  one case where it writes.
+- `renewal_loop(interval: timedelta, tick: Callable[[], None], stop: asyncio.Event) -> None`
+  — FR-9's scheduler and the seam AC-22 drives. Calls `tick` every
+  `interval` until `stop` is set; catches, logs and swallows **every**
+  exception `tick` raises. Takes the interval as an argument precisely so a
+  test can pass milliseconds.
 - `cert_path(data_dir)` / `sealed_key_path(data_dir)` —
   `data_dir / "tls" / "cabin.crt"` and `.../"cabin.key.sealed"`. There is no
   `key_path`: no plaintext key file exists to have a path (FR-3).
@@ -539,6 +673,20 @@ import it back.
 - `CertSource` gains `system = "system"` (FR-6). The column is
   `String(16)` with no CHECK constraint (`ca/certs.py:92-97`), so this needs
   no migration.
+
+### `cabin.ca.service`
+
+- `retire_targets(db: Session, ca_id: int) -> set[int]` — the ids `retire`
+  would stand down: the row itself, plus its intermediates when it is a root
+  (`ca/service.py:409-417`). Extracted so `retire` and FR-17's route check
+  share one definition instead of each having their own.
+
+### `cabin.settings`
+
+- `TLS_ISSUER_ID = "tls_issuer_id"` (FR-17) — the chosen
+  `ca_certificates.id` as text, empty meaning unchosen. Read and written
+  through the existing `get_setting`/`set_setting`; no new storage
+  mechanism.
 
 ### `cabin.audit`
 
@@ -722,6 +870,52 @@ third where a chain check could not detect a cryptographically invalid root.
   is missing; or if the URL is rendered but not as a link. With no base URL
   configured, both are absent from the page and the existing "no base URL is
   set" note (`templates/ca_list.html:39`) is what appears instead.
+- AC-21: **cabin issues its own certificate on a multi-issuer instance.**
+  This is the defect FR-17 exists to fix, so it is measured end to end.
+  With **two** active issuers and `tls_issuer_id` unset, `ensure_current`
+  does not raise, writes no CA-issued material, leaves the self-signed
+  certificate being served, and the banner asks for a choice. After
+  `POST /settings` selects the second issuer, a new TLS connection presents
+  a certificate whose issuer is **that** issuer's subject — not the first
+  one's, which is what a test using the "sole active issuer" default would
+  wrongly accept. Counter-check on persistence: with exactly **one** active
+  issuer and the setting unset, `ensure_current` issues **and** stores the
+  id; creating a second issuer afterwards leaves the served certificate's
+  issuer unchanged, proving the decision was written down rather than
+  re-derived each time.
+  _Goes red if_: `issue_and_store` is called without an `issuer_id` (it
+  raises `IssuerRequiredError` and the connection fails); if the binding is
+  not persisted; or if a second issuer silently changes the chain.
+- AC-22: **The renewal loop runs, survives failure, and stops.** Driven
+  through `renewal_loop` with a millisecond interval, never a real hour:
+  1. A `tick` that renews an about-to-expire certificate is called
+     repeatedly, and the material is actually replaced — asserted on the
+     certificate served over a new connection, not on a call count.
+  2. A `tick` that raises on its first call is still called again on the
+     next interval, and the loop is still running afterwards. This is the
+     one that matters: a scheduler that dies silently after a transient
+     database error leaves the process looking healthy while the
+     certificate expires underneath it.
+  3. Setting the stop event ends the loop, and it does not delay FR-2's
+     shutdown — AC-16's `SIGTERM` timing holds with the loop running.
+- AC-23: **Retiring the bound issuer is refused, cascade included.** With
+  TLS on and cabin's certificate bound to intermediate I1 (a second active
+  issuer I2 existing, so 0017's own `RetireError` is not what fires), the
+  retire POST for I1 returns an error naming the rebind as the fix and I1's
+  `status` is **still** `active`. Retiring the **root** above I1 is refused
+  for the same reason, which is what proves `retire_targets` is consulted
+  rather than the named row alone. After rebinding to I2, retiring I1
+  succeeds. Counter-check: with TLS **off**, retiring I1 succeeds
+  immediately — the binding must not obstruct an instance not using it.
+- AC-24: **No renewal storm as the bound issuer runs out.** With the bound
+  issuer three days from expiry, cabin's own certificate is clamped to the
+  issuer's `not_after` (0017 FR-7) and is therefore already inside the
+  renewal window. Ten consecutive `ensure_current` calls after the first
+  produce **no** new certificate row and return `False`, and the audit log
+  gains no further `tls_certificate_issued` events. Counter-check: with a
+  fresh issuer, a certificate inside the renewal window **is** replaced
+  exactly once. Without both halves the test cannot tell "correctly declined"
+  from "renewal is broken".
 
 ## Test list
 
@@ -770,7 +964,26 @@ to raise, asserting both that TLS still works and that the fallback was
 logged), test_unsealable_tls_key_is_discarded_and_reissued,
 test_ca_page_shows_cdp_and_aia_urls,
 test_displayed_urls_match_issued_certificate (the AC-20 comparison against a
-parsed leaf), test_ca_page_urls_absent_without_base_url
+parsed leaf), test_ca_page_urls_absent_without_base_url,
+test_tls_issuer_persisted_when_exactly_one_active,
+test_second_issuer_does_not_change_persisted_binding,
+test_multi_issuer_without_binding_stays_self_signed,
+test_multi_issuer_serves_selected_issuers_chain,
+test_unknown_or_retired_binding_keeps_current_material,
+test_settings_issuer_select_rendered_only_with_tls,
+test_retire_bound_issuer_refused_with_tls,
+test_retire_root_above_bound_issuer_refused,
+test_retire_bound_issuer_allowed_without_tls,
+test_retire_after_rebinding_succeeds,
+test_renewal_loop_replaces_expiring_certificate,
+test_renewal_loop_survives_a_raising_tick,
+test_renewal_loop_stops_on_event,
+test_no_reissue_when_gain_below_minimum,
+test_reissue_when_gain_above_minimum,
+test_capped_renewal_is_logged_and_audited,
+test_never_downgrades_from_ca_issued_to_self_signed,
+test_create_app_without_tls_manager_has_none_state (the `app.state.tls`
+guard — every existing `create_app(config)` call site keeps working)
 
 The live-server tests need a real `uvicorn.Server`, not `TestClient`:
 `TestClient` never builds an `SSLContext`, so every criterion about the swap
@@ -811,6 +1024,12 @@ frequently cannot succeed from inside the container even when the deployment
 is correct — split-horizon DNS, a host-only port mapping — so a red cross
 there would be wrong more often than right. Showing the URL and letting a
 human click it is the check that works.
+
+**Automatically rebinding to another issuer.** When the bound issuer becomes
+unusable, cabin warns and keeps serving; it never picks a replacement.
+Choosing an issuer changes the chain a fleet has been told to trust, and
+that is an operator's decision (FR-17). Nothing here schedules cabin's own
+certificate to follow a rotation on its own.
 
 **Bring-your-own certificate.** cabin issues its own; there is no
 `CABIN_TLS_CERTFILE`. An operator with a certificate from elsewhere already
