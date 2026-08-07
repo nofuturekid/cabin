@@ -1,11 +1,11 @@
 """Web-layer tests for spec 0006: the /certs inventory page and the
 per-certificate downloads (FR-1/FR-2/FR-4..FR-6, AC-1..AC-6)."""
 
-import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import ca_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
-from cabin.ca.certs import Certificate, get_certificate
+from cabin.ca.certs import get_certificate
 from cabin.config import Config
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
@@ -160,25 +160,22 @@ def _serial(cfg: Config, cert_id: int) -> str:
 
 def _bulk_insert(cfg: Config, count: int) -> None:
     """Rows straight into the table: the pager only reads columns, and 60
-    real issuances would buy nothing but runtime."""
+    real issuances would buy nothing but runtime. issuer_id points at
+    ca_fixtures' sole stub issuer -- none of the pagination tests calling
+    this build a real hierarchy (spec 0017 FR-1)."""
     db = _db(cfg)
     now = datetime.now(UTC)
     try:
+        issuer_id = ca_fixtures.sole_active_issuer(db)
         for i in range(count):
-            db.add(
-                Certificate(
-                    serial_hex=f"beef{i:012x}",
-                    subject_cn=f"host{i:02d}.lan",
-                    sans_json=json.dumps([f"DNS:host{i:02d}.lan"]),
-                    profile="server",
-                    not_before=now.isoformat(),
-                    not_after=(now + timedelta(days=365)).isoformat(),
-                    cert_pem="-----BEGIN CERTIFICATE-----\nstub\n-----END CERTIFICATE-----\n",
-                    key_sealed=None,
-                    created_at=(now - timedelta(minutes=i)).replace(tzinfo=None),
-                )
+            ca_fixtures.insert_cert(
+                db,
+                issuer_id=issuer_id,
+                cn=f"host{i:02d}.lan",
+                serial=f"beef{i:012x}",
+                with_key=False,
+                created_at=(now - timedelta(minutes=i)),
             )
-        db.commit()
     finally:
         db.close()
 

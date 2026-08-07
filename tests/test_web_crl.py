@@ -253,13 +253,29 @@ def test_crl_lazy_regeneration_when_stale(client: TestClient, cfg: Config) -> No
     assert crl.next_update_utc > datetime.now(UTC)
 
 
-def _swap_ca_key(cfg: Config, sealed: str | None = None) -> str:
-    """Swap the intermediate's sealed key for one that fails GCM
+def _swap_ca_key(cfg: Config, sealed: str | None = None, *, issuer_id: int | None = None) -> str:
+    """Swap the given intermediate's sealed key for one that fails GCM
     authentication (or put the original back), the way a restored backup with
-    the wrong master key would. Returns the value that was there before."""
+    the wrong master key would. Returns the value that was there before.
+
+    Takes an explicit issuer_id (spec 0017 work split R7) rather than
+    ``.where(kind == "intermediate").one()``: with more than one
+    intermediate in the database, ``.one()`` raises MultipleResultsFound --
+    a failure that would show up far from here, in whichever multi-issuer
+    test happened to run after this file. Defaulting to the lowest id keeps
+    every existing single-hierarchy call site unchanged.
+    """
     db = _db(cfg)
     try:
-        row = db.scalars(select(CACertificate).where(CACertificate.kind == "intermediate")).one()
+        if issuer_id is not None:
+            row = db.get(CACertificate, issuer_id)
+        else:
+            row = db.scalars(
+                select(CACertificate)
+                .where(CACertificate.kind == "intermediate")
+                .order_by(CACertificate.id)
+            ).first()
+        assert row is not None
         original = row.key_sealed
         assert original is not None
         row.key_sealed = sealed if sealed is not None else "A" * 40

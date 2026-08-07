@@ -64,6 +64,10 @@ class Certificate(Base):
     __tablename__ = "certificates"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    #: Who signed this leaf (spec 0017 FR-1). NOT NULL, no default: a leaf
+    #: that does not know its issuer cannot have its chain rebuilt or its
+    #: revocation published.
+    issuer_id: Mapped[int] = mapped_column(sa.ForeignKey("ca_certificates.id"), nullable=False)
     serial_hex: Mapped[str] = mapped_column(sa.String(64), nullable=False, unique=True)
     subject_cn: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     sans_json: Mapped[str] = mapped_column(sa.Text, nullable=False)

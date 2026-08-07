@@ -3,6 +3,11 @@
 Revision ID: 0004
 Revises: 0003
 Create Date: 2026-08-01
+
+Edited in place for spec 0017 FR-1: every leaf now records who issued it.
+issuer_id is NOT NULL with no server default -- a leaf that does not know
+its issuer cannot have its chain rebuilt or its revocation published, so
+there is deliberately no way to insert one without it.
 """
 
 import sqlalchemy as sa
@@ -18,6 +23,12 @@ def upgrade() -> None:
     op.create_table(
         "certificates",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column(
+            "issuer_id",
+            sa.Integer(),
+            sa.ForeignKey("ca_certificates.id"),
+            nullable=False,
+        ),
         sa.Column("serial_hex", sa.String(length=64), nullable=False),
         sa.Column("subject_cn", sa.String(length=64), nullable=False),
         # JSON array of canonical SAN strings ("DNS:nas.lan", "IP:10.0.0.5").

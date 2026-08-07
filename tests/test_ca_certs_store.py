@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import ca_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -25,7 +26,7 @@ from cabin.ca.certs import (
     sign_csr_and_store,
 )
 from cabin.ca.leaf import IssueError, Profile
-from cabin.ca.service import CANotConfiguredError, create_hierarchy, signing_credentials
+from cabin.ca.service import CANotConfiguredError, signing_credentials
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
 
@@ -65,7 +66,7 @@ def _csr_pem(cn: str, sans: list[x509.GeneralName]) -> str:
 
 
 def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "Store")
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
 
     row = issue_and_store(
         db,
@@ -105,7 +106,7 @@ def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
 
 
 def test_store_no_key_csr_flow(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "Store")
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
     csr_pem = _csr_pem("app.lan", [x509.DNSName("app.lan"), x509.DNSName("www.app.lan")])
 
     row = sign_csr_and_store(db, secrets, csr_pem=csr_pem, profile=Profile.client, days=30)
@@ -137,7 +138,7 @@ def test_store_requires_a_ca(db: Session, secrets: SecretStore) -> None:
 def test_store_rejects_invalid_input_without_writing_a_row(
     db: Session, secrets: SecretStore
 ) -> None:
-    create_hierarchy(db, secrets, "Store")
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
     with pytest.raises(IssueError):
         issue_and_store(
             db,
@@ -151,14 +152,14 @@ def test_store_rejects_invalid_input_without_writing_a_row(
 
 
 def test_get_certificate_unknown_id(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "Store")
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
     assert get_certificate(db, 4242) is None
 
 
 def test_store_sans_match_the_issued_certificate(db: Session, secrets: SecretStore) -> None:
     """The same name given twice must not put a duplicate SAN in the
     certificate while sans_json (which de-duplicates) claims otherwise."""
-    create_hierarchy(db, secrets, "Store")
+    ca_fixtures.make_hierarchy(db, secrets, "Store")
 
     row = issue_and_store(
         db,
@@ -178,8 +179,6 @@ def test_store_sans_match_the_issued_certificate(db: Session, secrets: SecretSto
 
 # --- spec 0006 FR-2/FR-3: inventory query and status ---------------------------
 
-_STUB_PEM = "-----BEGIN CERTIFICATE-----\nstub\n-----END CERTIFICATE-----\n"
-
 
 def _insert(
     db: Session,
@@ -194,24 +193,19 @@ def _insert(
 ) -> Certificate:
     """A certificate row without going through issuance: the inventory query
     only reads columns, and a 60-row pagination fixture must not cost 60 key
-    generations."""
-    now = datetime.now(UTC)
-    row = Certificate(
-        serial_hex=(serial if serial is not None else f"{db.query(Certificate).count() + 1:016x}"),
-        subject_cn=cn,
-        sans_json=json.dumps(sans if sans is not None else [f"DNS:{cn}"]),
-        profile="server",
-        not_before=now.isoformat(),
-        not_after=(now + timedelta(days=days_left)).isoformat(),
-        cert_pem=_STUB_PEM,
-        key_sealed="sealed" if with_key else None,
-        created_at=(created_at or now).replace(tzinfo=None),
-        revoked_at=revoked_at.isoformat() if revoked_at else None,
-        revocation_reason="superseded" if revoked_at else None,
+    generations. None of these tests build a hierarchy, so the row's
+    issuer_id points at ca_fixtures' sole stub issuer (spec 0017 FR-1)."""
+    return ca_fixtures.insert_cert(
+        db,
+        issuer_id=ca_fixtures.sole_active_issuer(db),
+        cn=cn,
+        sans=sans,
+        serial=serial,
+        expires_in=timedelta(days=days_left),
+        created_at=created_at,
+        with_key=with_key,
+        revoked_at=revoked_at,
     )
-    db.add(row)
-    db.commit()
-    return row
 
 
 def _cns(rows: list[Certificate]) -> list[str]:

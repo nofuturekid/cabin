@@ -7,12 +7,12 @@ authorisation: it aggregates data from pages with different roles attached,
 so every section has to keep the role its source page has.
 """
 
-import json
 import re
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import ca_fixtures
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -82,29 +82,25 @@ def _insert(
     sans: int = 1,
 ) -> None:
     """A row straight into the table: the dashboard only reads columns, and
-    a real issuance per fixture would buy nothing but runtime."""
+    a real issuance per fixture would buy nothing but runtime. issuer_id
+    points at ca_fixtures' sole stub issuer when a test builds no real
+    hierarchy of its own (spec 0017 FR-1)."""
     db = _db(cfg)
     # X.509 validity is second-granular and so is every not_after cabin
     # stores; keeping microseconds here would make the fixture compare
     # differently to a real certificate at the exact 30-day boundary.
     now = datetime.now(UTC).replace(microsecond=0)
     try:
-        db.add(
-            Certificate(
-                serial_hex=f"beef{abs(hash(name)) % 10**12:012x}",
-                subject_cn=name,
-                sans_json=json.dumps([f"DNS:{name}"] * sans),
-                profile="server",
-                not_before=now.isoformat(),
-                not_after=(now + expires_in).isoformat(),
-                cert_pem="-----BEGIN CERTIFICATE-----\nstub\n-----END CERTIFICATE-----\n",
-                key_sealed=None,
-                created_at=now.replace(tzinfo=None),
-                revoked_at=(now.replace(tzinfo=None) if revoked else None),
-                revocation_reason=("superseded" if revoked else None),
-            )
+        ca_fixtures.insert_cert(
+            db,
+            issuer_id=ca_fixtures.sole_active_issuer(db),
+            cn=name,
+            sans=[f"DNS:{name}"] * sans,
+            serial=f"beef{abs(hash(name)) % 10**12:012x}",
+            created_at=now,
+            expires_in=expires_in,
+            revoked_at=(now if revoked else None),
         )
-        db.commit()
     finally:
         db.close()
 

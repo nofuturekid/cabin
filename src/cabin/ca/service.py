@@ -33,7 +33,18 @@ class CACertificate(Base):
     __tablename__ = "ca_certificates"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(sa.String(32), nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    #: Operator-facing label (spec 0017 FR-1). Not unique: a rotation
+    #: deliberately produces a second row with the same name.
+    name: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    #: Self-referential; NULL for a self-signed root (spec 0017 FR-1).
+    parent_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("ca_certificates.id"), nullable=True
+    )
+    #: "active" or "retired" (spec 0017 FR-1/FR-4).
+    status: Mapped[str] = mapped_column(
+        sa.String(16), nullable=False, default="active", server_default="active"
+    )
     cert_pem: Mapped[str] = mapped_column(sa.Text, nullable=False)
     key_sealed: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

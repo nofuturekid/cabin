@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import ca_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -28,7 +29,7 @@ from cabin.ca.revocation import (
     RevokedEntry,
     build_crl,
 )
-from cabin.ca.service import CANotConfiguredError, create_hierarchy, signing_credentials
+from cabin.ca.service import CANotConfiguredError, signing_credentials
 from cabin.ca.x509 import create_root
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
@@ -167,7 +168,7 @@ def test_build_crl_empty_list() -> None:
 def test_revoke_sets_fields_and_updates_crl(db: Session, secrets: SecretStore) -> None:
     """AC-1/AC-2: the row is marked, and the stored CRL -- signed by the
     intermediate, in its name -- carries that serial with its reason."""
-    create_hierarchy(db, secrets, "Revoke")
+    ca_fixtures.make_hierarchy(db, secrets, "Revoke")
     cert_id = _issue(db, secrets)
 
     row = revoke_certificate(db, secrets, cert_id, RevocationReason.key_compromise, now=_NOW)
@@ -192,7 +193,7 @@ def test_revoke_sets_fields_and_updates_crl(db: Session, secrets: SecretStore) -
 def test_revoke_is_idempotent(db: Session, secrets: SecretStore) -> None:
     """AC-1: revoking twice is success, not an error, and must not rewrite
     the revocation date (a relying party's answer would change)."""
-    create_hierarchy(db, secrets, "Revoke")
+    ca_fixtures.make_hierarchy(db, secrets, "Revoke")
     cert_id = _issue(db, secrets)
 
     first = revoke_certificate(db, secrets, cert_id, RevocationReason.superseded, now=_NOW)
@@ -215,7 +216,7 @@ def test_revoke_is_idempotent(db: Session, secrets: SecretStore) -> None:
 
 
 def test_revoke_unknown_certificate_errors(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "Revoke")
+    ca_fixtures.make_hierarchy(db, secrets, "Revoke")
 
     with pytest.raises(RevocationError):
         revoke_certificate(db, secrets, 4242, RevocationReason.unspecified, now=_NOW)
@@ -253,7 +254,7 @@ def test_revoke_without_a_ca_leaves_the_row_alone(db: Session, secrets: SecretSt
 def test_crl_number_monotonic(db: Session, secrets: SecretStore) -> None:
     """AC-3: relying parties reject a CRL whose number went backwards, so the
     counter only ever climbs -- including across revocations."""
-    create_hierarchy(db, secrets, "Numbers")
+    ca_fixtures.make_hierarchy(db, secrets, "Numbers")
 
     numbers = [regenerate_crl(db, secrets, now=_NOW).crl_number for _ in range(3)]
     cert_id = _issue(db, secrets)
@@ -275,7 +276,7 @@ def test_crl_number_monotonic(db: Session, secrets: SecretStore) -> None:
 def test_crl_next_update_window(db: Session, secrets: SecretStore) -> None:
     """FR-4: nextUpdate is thisUpdate + 7 days, and a CRL past it is replaced
     on access rather than served stale (AC-4's self-healing half)."""
-    create_hierarchy(db, secrets, "Window")
+    ca_fixtures.make_hierarchy(db, secrets, "Window")
     assert CRL_VALIDITY.days == 7
 
     state = regenerate_crl(db, secrets, now=_NOW)
@@ -301,7 +302,7 @@ def test_crl_refreshed_before_it_expires(db: Session, secrets: SecretStore) -> N
     replaced a full cache lifetime BEFORE nextUpdate -- otherwise a client
     that caches a CRL 30 minutes before it expires is left holding an expired
     one for the other half hour."""
-    create_hierarchy(db, secrets, "Margin")
+    ca_fixtures.make_hierarchy(db, secrets, "Margin")
     assert CRL_MAX_AGE.total_seconds() == 3600
     published = regenerate_crl(db, secrets, now=_NOW).crl_number
 

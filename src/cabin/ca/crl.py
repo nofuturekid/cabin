@@ -40,13 +40,16 @@ class RevocationError(Exception):
 
 
 class CRLState(Base):
-    """The current CRL: its DER bytes, the number it was published under, and
-    when it was generated. Exactly one row -- a CRL is a current document,
+    """The current CRL for one issuer: its DER bytes, the number it was
+    published under, and when it was generated (spec 0017 FR-1/FR-9). One
+    row per issuer, not one per instance -- a CRL is a current document,
     not a history."""
 
     __tablename__ = "crl_state"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    issuer_id: Mapped[int] = mapped_column(
+        sa.ForeignKey("ca_certificates.id"), primary_key=True, autoincrement=False
+    )
     crl_number: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     generated_at: Mapped[datetime] = mapped_column(sa.DateTime, nullable=False)
     crl_der: Mapped[bytes] = mapped_column(sa.LargeBinary, nullable=False)

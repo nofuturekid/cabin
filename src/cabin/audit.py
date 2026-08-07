@@ -79,6 +79,9 @@ class AuditAction(StrEnum):
     user_deleted = "user_deleted"
     ca_created = "ca_created"
     ca_imported = "ca_imported"
+    # Spec 0017 FR-15: rotation and retirement of a CA hierarchy row.
+    ca_renewed = "ca_renewed"
+    ca_retired = "ca_retired"
     settings_changed = "settings_changed"
     cert_issued = "cert_issued"
     cert_signed = "cert_signed"
@@ -193,7 +196,17 @@ def setting_change_detail(key: str, old: str | None, new: str | None) -> dict[st
     return {"key": key, "old": value(old), "new": value(new)}
 
 
-def certificate_detail(row: "Certificate", *, key_type: str | None = None) -> dict[str, Any]:
+def certificate_detail(
+    row: "Certificate",
+    *,
+    key_type: str | None = None,
+    # Spec 0017 FR-7: accepted here so the seven issuance entry points can
+    # pass them once the clamp is wired up. Not yet used in the body --
+    # threading them into the detail dict is Backend/Security's job in a
+    # later phase.
+    days_requested: int | None = None,
+    validity_capped_from: datetime | None = None,
+) -> dict[str, Any]:
     """FR-3/AC-3: everything an issuance, signing or revocation event says
     about a certificate -- and the one place to look to check that it is
     nothing else. Identifiers and metadata only: no private key, no CSR body,
