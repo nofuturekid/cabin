@@ -368,28 +368,38 @@ either side of a seam cannot be built against two different guesses.
 ### `cabin.issuer_grants` — the whole policy, one module
 
 ```python
-class UserIssuer(Base):   # __tablename__ = "user_issuers"
-    user_id: Mapped[int]           # PK, FK users.id
-    ca_certificate_id: Mapped[int] # PK, FK ca_certificates.id
+class UserIssuer(Base):  # __tablename__ = "user_issuers"
+    user_id: Mapped[int]  # PK, FK users.id
+    ca_certificate_id: Mapped[int]  # PK, FK ca_certificates.id
+
 
 class TokenIssuer(Base):  # __tablename__ = "token_issuers"
-    api_token_id: Mapped[int]      # PK, FK api_tokens.id
-    ca_certificate_id: Mapped[int] # PK, FK ca_certificates.id
+    api_token_id: Mapped[int]  # PK, FK api_tokens.id
+    ca_certificate_id: Mapped[int]  # PK, FK ca_certificates.id
+
 
 class PrincipalKind(StrEnum):
-    user = "user"; token = "token"; acme = "acme"
+    user = "user"
+    token = "token"
+    acme = "acme"
+
 
 @dataclass(frozen=True)
 class Principal:
     kind: PrincipalKind
     id: int | None
     role: Role | None
+
     @property
     def unrestricted(self) -> bool: ...
 
+
 def user_principal(user: User) -> Principal: ...
 def token_principal(token: ApiToken) -> Principal: ...
+
+
 ACME_PRINCIPAL: Principal
+
 
 def granted_issuers(db: Session, principal: Principal) -> list[CACertificate]: ...
 def may_use_issuer(db: Session, principal: Principal, ca_certificate_id: int) -> bool: ...
@@ -397,19 +407,25 @@ def resolve_granted_issuer(
     db: Session, principal: Principal, issuer_id: int | None
 ) -> CACertificate: ...
 
+
 @dataclass(frozen=True)
 class Change:
     added: list[int]
     removed: list[int]
     issuers: list[int]
+
     @property
     def changed(self) -> bool: ...
+
 
 def issuers_of(db: Session, principal: Principal) -> list[int]: ...
 def set_issuers(db: Session, principal: Principal, issuer_ids: Sequence[int]) -> Change: ...
 def grant(db: Session, principal: Principal, ca_certificate_id: int) -> bool: ...
 
+
 class IssuerForbiddenError(Exception): ...
+
+
 class NoGrantedIssuerError(Exception): ...
 ```
 
