@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -27,16 +28,21 @@ from cabin.api_tokens import create_token
 from cabin.app import create_app
 from cabin.audit import AuditEvent
 from cabin.ca.certs import MAX_PAGE, MAX_QUERY_LENGTH, Certificate, CertSource
+from cabin.ca.crl import current_crl
 from cabin.ca.leaf import MAX_CN_LENGTH, MAX_DAYS, MAX_SANS, MIN_DAYS
-from cabin.ca.service import get_ca
+from cabin.ca.service import CACertificate, active_issuers
 from cabin.config import Config
 from cabin.mcp import MCP_PATH
+from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.settings import ACME_ENABLED, BASE_URL, MCP_ENABLED, TRUE, set_setting
 from cabin.store import create_session_factory
 from cabin.users import Role
 
 BASE = "https://ca.example.org"
+# FR-12: URLs baked into a certificate (e.g. the CRL URL) are always
+# http://, never https://, regardless of the configured (https) base_url.
+HTTP_BASE = "http://ca.example.org"
 
 #: What the streamable-HTTP transport requires a client to accept.
 _ACCEPT = "application/json, text/event-stream"
@@ -139,6 +145,21 @@ def _token(cfg: Config, role: Role, expires_at: datetime | None = None) -> str:
     db = _db(cfg)
     try:
         secret, _ = create_token(db, f"{role.value}-token", role, expires_at=expires_at)
+        return secret
+    finally:
+        db.close()
+
+
+def _granted_token(cfg: Config, role: Role, expires_at: datetime | None = None) -> str:
+    """Like :func:`_token`, but also granted the instance's sole active
+    issuer. Spec 0018 requires an explicit grant before a token may issue
+    or revoke; a bare admin token is correctly refused, so every test here
+    whose token actually issues or revokes uses this instead of ``_token``.
+    """
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, f"{role.value}-token", role, expires_at=expires_at)
+        grant_fixtures.grant_token(db, token, active_issuers(db)[0].id)
         return secret
     finally:
         db.close()
@@ -337,8 +358,19 @@ def test_mcp_lists_tools(mcp: TestClient, cfg: Config) -> None:
     assert isinstance(issue, dict)
     properties = issue["properties"]
     assert isinstance(properties, dict)
-    assert set(properties) == {"subject_cn", "sans", "profile", "key_type", "days"}
+    # FR-6: an MCP client must be able to select an issuer, or MCP can issue
+    # nothing at all from the moment a second issuer exists -- optional, so
+    # a single-issuer instance is unaffected and the FR-6 default still
+    # applies when it is omitted.
+    assert set(properties) == {"subject_cn", "sans", "profile", "key_type", "days", "issuer_id"}
     assert issue["required"] == ["subject_cn"]
+
+    sign = by_name["sign_csr"]["inputSchema"]
+    assert isinstance(sign, dict)
+    sign_properties = sign["properties"]
+    assert isinstance(sign_properties, dict)
+    assert set(sign_properties) == {"csr_pem", "profile", "days", "sans", "issuer_id"}
+    assert sign["required"] == ["csr_pem"]
 
 
 # --- FR-2 / AC-3: tokens and roles ---------------------------------------------
@@ -376,7 +408,7 @@ def test_mcp_role_enforced(mcp: TestClient, cfg: Config) -> None:
     """AC-3: a viewer reads; issuing, signing and revoking are admin+ and are
     refused with a message that says so, not with a crash."""
     viewer = _token(cfg, Role.viewer)
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
 
     assert _call(mcp, "get_ca_info", token=viewer)["base_url"] == BASE
     assert _call(mcp, "list_certificates", token=viewer)["total"] == 0
@@ -405,46 +437,111 @@ def test_mcp_role_enforced(mcp: TestClient, cfg: Config) -> None:
 
 
 def test_mcp_get_ca_info(mcp: TestClient, cfg: Config) -> None:
-    """FR-3: subjects, fingerprints, validity and the published URLs -- the
-    same shape GET /api/v1/ca reports, plus the ACME directory."""
+    """FR-3/AC-15: one entry per ``ca_certificates`` row -- the same shape
+    GET /api/v1/ca reports, plus the ACME directory."""
     info = _call(mcp, "get_ca_info", token=_token(cfg, Role.viewer))
     assert info["base_url"] == BASE
-    assert info["crl_url"] == f"{BASE}/crl"
-    # ACME is off, so there is no directory URL to hand out.
-    assert info["acme_directory_url"] is None
+    issuers = info["issuers"]
+    assert isinstance(issuers, list)
+    # ACME is off, so there are no directory URLs to hand out (spec 0019
+    # FR-13: a scalar field cannot answer "which URL is which CA" once there
+    # is one per issuer, so the empty case is an empty list, not None).
+    assert info["acme_directory_urls"] == []
 
     db = _db(cfg)
     try:
-        hierarchy = get_ca(db)
-        assert hierarchy is not None
+        by_id = {row.id: row for row in active_issuers(db)}
+        intermediate_id = next(iter(by_id.values())).id
+        root = db.get(CACertificate, next(iter(by_id.values())).parent_id)
+        assert root is not None
         expected = {
-            "root": hierarchy.root.cert_pem,
-            "intermediate": hierarchy.intermediate.cert_pem,
+            "root": root.cert_pem,
+            "intermediate": next(iter(by_id.values())).cert_pem,
         }
         set_setting(db, ACME_ENABLED, TRUE)
     finally:
         db.close()
 
+    described_by_kind = {row["kind"]: row for row in issuers}
     for kind, pem in expected.items():
-        described = info[kind]
-        assert isinstance(described, dict)
+        described = described_by_kind[kind]
         cert = x509.load_pem_x509_certificate(pem.encode("ascii"))
         assert described["kind"] == kind
+        assert described["status"] == "active"
         assert described["subject"] == cert.subject.rfc4514_string()
         assert (
             described["fingerprint"].replace(":", "").lower()
             == cert.fingerprint(hashes.SHA256()).hex()
         )
         assert described["not_valid_after"].startswith(cert.not_valid_after_utc.date().isoformat())
+    assert described_by_kind["root"]["parent_id"] is None
+    assert described_by_kind["intermediate"]["parent_id"] == described_by_kind["root"]["id"]
 
     again = _call(mcp, "get_ca_info", token=_token(cfg, Role.viewer))
-    assert again["acme_directory_url"] == f"{BASE}/acme/directory"
+    # spec 0019 FR-13: one entry per issuer (per-issuer directories replace
+    # the old scalar field, FR-3).
+    assert again["acme_directory_urls"] == [
+        {"issuer_id": intermediate_id, "url": f"{BASE}/acme/ca/{intermediate_id}/directory"}
+    ]
+
+
+def test_mcp_ca_info_matches_rest(mcp: TestClient, cfg: Config) -> None:
+    """AC-15: the MCP tool and the REST endpoint report the same ids and
+    statuses against the same database."""
+    admin = _token(cfg, Role.admin)
+    mcp_info = _call(mcp, "get_ca_info", token=admin)
+
+    resp = mcp.get("/api/v1/ca", headers={"Authorization": f"Bearer {admin}"})
+    assert resp.status_code == 200
+    rest_issuers = resp.json()["issuers"]
+
+    mcp_by_id = {row["id"]: (row["kind"], row["status"]) for row in mcp_info["issuers"]}  # type: ignore[union-attr]
+    rest_by_id = {row["id"]: (row["kind"], row["status"]) for row in rest_issuers}
+    assert mcp_by_id == rest_by_id
+
+
+def test_mcp_ca_info_matches_rest_for_cross_rows(mcp: TestClient, cfg: Config) -> None:
+    """AC-17: the same agreement as :func:`test_mcp_ca_info_matches_rest`,
+    extended to ``kind == "cross"`` and its ``cross_of_id`` -- the two
+    fields spec 0021 adds to both surfaces. Compares MCP directly against
+    REST rather than checking each against a literal id copied into this
+    test, because two assertions that each look right against a copied
+    literal can still drift from each other without either one failing.
+    """
+    from cabin.ca.service import create_hierarchy, cross_sign_root
+
+    admin = _token(cfg, Role.admin)
+    db = _db(cfg)
+    secrets = SecretStore.open(cfg.data_dir, cfg.master_passphrase)
+    try:
+        subject_root = db.scalars(select(CACertificate).where(CACertificate.kind == "root")).one()
+        # path_length=2: room for the cross certificate and the subject's
+        # own intermediate below it (spec 0021 FR-3).
+        signer = create_hierarchy(db, secrets, "signer", path_length=2)
+        cross = cross_sign_root(db, secrets, subject_root.id, signer.root.id)
+        cross_id, subject_root_id = cross.id, subject_root.id
+    finally:
+        db.close()
+
+    mcp_info = _call(mcp, "get_ca_info", token=admin)
+    resp = mcp.get("/api/v1/ca", headers={"Authorization": f"Bearer {admin}"})
+    assert resp.status_code == 200
+
+    mcp_by_id = {
+        row["id"]: (row["kind"], row.get("cross_of_id"))  # type: ignore[union-attr]
+        for row in mcp_info["issuers"]  # type: ignore[union-attr]
+    }
+    rest_by_id = {
+        row["id"]: (row["kind"], row.get("cross_of_id")) for row in resp.json()["issuers"]
+    }
+    assert mcp_by_id == rest_by_id
+    assert mcp_by_id[cross_id] == ("cross", subject_root_id)
 
 
 def test_mcp_list_and_get_certificate(mcp: TestClient, cfg: Config) -> None:
     """FR-3: the spec-0006 inventory with its filters, and one certificate
     with its chain."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     nas = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
     _call(mcp, "issue_certificate", {"subject_cn": "app.lan"}, token=admin)
 
@@ -484,7 +581,7 @@ def test_mcp_list_and_get_certificate(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_get_certificate_never_returns_key(mcp: TestClient, cfg: Config) -> None:
     """FR-3/AC-4: no role, not even superadmin, gets key material back out of
     a lookup -- the field does not exist on the tool's result at all."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
     assert issued["key_pem"]
 
@@ -505,7 +602,7 @@ def test_mcp_get_certificate_never_returns_key(mcp: TestClient, cfg: Config) -> 
 def test_mcp_issue_certificate(mcp: TestClient, cfg: Config) -> None:
     """AC-4: a real certificate that chains to the intermediate, with the one
     private key any MCP tool ever returns -- and it matches."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(
         mcp,
         "issue_certificate",
@@ -533,11 +630,8 @@ def test_mcp_issue_certificate(mcp: TestClient, cfg: Config) -> None:
 
     db = _db(cfg)
     try:
-        hierarchy = get_ca(db)
-        assert hierarchy is not None
-        intermediate = x509.load_pem_x509_certificate(
-            hierarchy.intermediate.cert_pem.encode("ascii")
-        )
+        issuer_row = active_issuers(db)[0]
+        intermediate = x509.load_pem_x509_certificate(issuer_row.cert_pem.encode("ascii"))
     finally:
         db.close()
     assert cert.issuer == intermediate.subject
@@ -559,7 +653,7 @@ def test_mcp_responses_are_never_cached(mcp: TestClient, cfg: Config) -> None:
     tool no handle on its own response; ``no-cache``/``no-transform``, which
     the streaming transport needs, survive alongside it.
     """
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     resp = _post(
         mcp,
         "tools/call",
@@ -582,7 +676,7 @@ def test_mcp_issue_sets_source_mcp(mcp: TestClient, cfg: Config) -> None:
     """FR-5/AC-4: both mutating issuance paths record where the request came
     from, and the operator sees it on the row -- an assistant's work has to be
     recognizable in the inventory, not only in the database."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
     _call(
         mcp,
@@ -615,7 +709,7 @@ def test_mcp_issue_sets_source_mcp(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_sign_csr(mcp: TestClient, cfg: Config) -> None:
     """FR-3: the CSR contributes its public key, CN and SANs; cabin never
     sees a key, so none comes back."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     csr = _csr_pem("app.lan", [x509.DNSName("app.lan"), x509.DNSName("www.app.lan")])
     signed = _call(mcp, "sign_csr", {"csr_pem": csr, "profile": "client", "days": 30}, token=admin)
 
@@ -634,7 +728,7 @@ def test_mcp_sign_csr(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_sign_csr_smuggling_blocked(mcp: TestClient, cfg: Config) -> None:
     """AC-5: the hostile CSR from spec 0005 yields an ordinary leaf, and a
     broken one a readable message."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     csr = _csr_pem(
         "evil.lan",
         [x509.DNSName("evil.lan")],
@@ -679,7 +773,7 @@ def test_mcp_sign_csr_smuggling_blocked(mcp: TestClient, cfg: Config) -> None:
 
 def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
     """AC-6: revoked, and the serial is on the published CRL."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
 
     revoked = _call(
@@ -690,9 +784,23 @@ def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
     )
     assert revoked["status"] == "revoked"
     assert revoked["reason"] == "key_compromise"
-    assert revoked["crl_url"] == f"{BASE}/crl"
+    # FR-12: the CRL URL is always http://, never https://, even though the
+    # configured base_url is https:// -- otherwise validating a cabin
+    # certificate would require fetching its CRL over TLS, which would
+    # require validating that certificate.
+    assert str(revoked["crl_url"]).startswith(HTTP_BASE)
+    assert not str(revoked["crl_url"]).startswith("https"), revoked["crl_url"]
+    assert "/crl/" in str(revoked["crl_url"])
 
-    crl = x509.load_der_x509_crl(mcp.get("/crl").content)
+    # The route that serves /crl/{issuer_id} is Security's (spec 0017 work
+    # split); checked here through the service layer instead.
+    db = _db(cfg)
+    try:
+        issuer_id = active_issuers(db)[0].id
+        state = current_crl(db, SecretStore.open(cfg.data_dir, None), issuer_id)
+    finally:
+        db.close()
+    crl = x509.load_der_x509_crl(state.crl_der)
     assert crl.get_revoked_certificate_by_serial_number(int(str(issued["serial_hex"]), 16))
 
     detail = _call(mcp, "get_certificate", {"certificate_id": issued["id"]}, token=admin)
@@ -710,7 +818,7 @@ def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_revoke_idempotent(mcp: TestClient, cfg: Config) -> None:
     """AC-6/AC-7: revoking twice succeeds, keeps the first date and reason,
     and does not write a second audit event."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
 
     first = _call(
@@ -738,7 +846,7 @@ def test_mcp_revoke_idempotent(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_validation_errors(mcp: TestClient, cfg: Config) -> None:
     """AC-8: the REST API's limits, enforced here too, and reported as
     sentences rather than as stack traces."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     csr = _csr_pem("app.lan", [x509.DNSName("app.lan")])
 
     for arguments, expected in (
@@ -877,7 +985,7 @@ def test_mcp_masks_unexpected_errors(
 def test_mcp_audit_events(mcp: TestClient, cfg: Config) -> None:
     """AC-7: one event per mutating call, attributed to the token and marked
     as having come through MCP; the read tools write nothing."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     before = len(_events(cfg))
 
     for _ in range(2):

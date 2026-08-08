@@ -38,21 +38,58 @@
       The base URL and the validation settings live on
       <a href="/settings">Settings</a>; the switch above is the same one.
     </p>
+    {% if acme_enabled and not acme_require_eab %}
+    <div class="callout warning" id="eab-not-required-warning">
+      <p>
+        <strong>Issuer grants do not restrict ACME in this configuration.</strong>
+        With "Require external account binding" unchecked, any client that can
+        reach this server may register an account and obtain a certificate from
+        any issuer below — whether or not anyone holds a grant for it. Tick
+        "Require external account binding" above to close that gap.
+      </p>
+    </div>
+    {% endif %}
   </div>
 </div>
 
 <div class="section">
   <div>
-    <h2>Directory URL</h2>
-    <p class="help">Hand this address to a client — it is all it needs to start.</p>
+    <h2>Directory URLs</h2>
+    <p class="help">
+      Hand the address for the hierarchy you want a client to use — a directory
+      belongs to one issuer, so each has its own.
+    </p>
   </div>
   <div>
-    {% if acme_directory_url %}
-    <pre class="pem">{{ acme_directory_url }}</pre>
-    {% else %}
+    {% if not base_url %}
     <p class="note">
       No base URL is set, so there is no directory address to hand out. Set one
       under <a href="/settings">Settings</a> first.
+    </p>
+    {% elif issuers %}
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr>
+            <th>Issuer</th>
+            <th>Status</th>
+            <th>Directory URL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for issuer in issuers %}
+          <tr>
+            <td>{{ issuer.name }}</td>
+            <td><span class="tag{% if issuer.status == "retired" %} tag-bad{% endif %}">{{ issuer.status }}</span></td>
+            <td class="mono">{{ issuer.directory_url }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">
+      No intermediate exists yet — create or import one under <a href="/ca">CA</a>.
     </p>
     {% endif %}
   </div>
@@ -85,6 +122,7 @@
     <thead>
       <tr>
         <th>Label</th>
+        <th>Issuer</th>
         <th>Key ID</th>
         <th>Status</th>
         <th>Bound account</th>
@@ -96,6 +134,7 @@
       {% for key in keys %}
       <tr>
         <td>{{ key.label }}</td>
+        <td>{{ key.issuer_name }}</td>
         <td class="mono">{{ key.id }}</td>
         <td><span class="tag tag-{{ key.status }}">{{ key.status }}</span></td>
         <td>
@@ -125,7 +164,7 @@
 <div class="section">
   <div>
     <h2>Create a key</h2>
-    <p class="help">One key per host you want to let in.</p>
+    <p class="help">One key per host you want to let in. A key authorizes exactly one issuer, and only one you are granted for.</p>
   </div>
   <div>
     <form method="post" action="/acme/admin/eab-keys">
@@ -133,6 +172,18 @@
       <div class="field">
         <label for="label">Label</label>
         <input id="label" type="text" name="label" maxlength="100" placeholder="nas.lan" required />
+      </div>
+      <div class="field">
+        <label for="issuer_id">Issuer</label>
+        {% if issuer_options %}
+        <select id="issuer_id" name="issuer_id" required style="min-width: 0;">
+          {% for opt in issuer_options %}
+          <option value="{{ opt.id }}">{{ opt.name }}</option>
+          {% endfor %}
+        </select>
+        {% else %}
+        <p class="note">{{ no_granted_issuer }}</p>
+        {% endif %}
       </div>
       <div class="actions"><button type="submit" class="primary">Create key</button></div>
     </form>

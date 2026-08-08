@@ -53,17 +53,26 @@ def client(cfg: Config) -> Iterator[TestClient]:
         try:
             set_setting(db, BASE_URL, BASE)
             set_setting(db, ACME_ENABLED, TRUE)
-            ca_service.create_hierarchy(
-                db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
-            )
         finally:
             db.close()
         yield c
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    db = create_session_factory(cfg.db_url)()
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
 
 
 def certificates(cfg: Config) -> list[Certificate]:
@@ -442,23 +451,93 @@ def test_certificate_ids_that_cannot_be_rows_are_not_found(acme: Acme, cfg: Conf
     assert owner.certificate(f"{BASE}/acme/cert/{real_id}").status_code == 200
 
 
-def test_finalize_leaves_no_certificate_when_the_ca_is_missing(
-    acme: Acme, cfg: Config, tmp_path: Path
-) -> None:
-    """The order must not be left claimed by a failed issuance: whatever went
-    wrong, the client has to be able to try again."""
+def test_finalize_stores_the_default_resolved_issuer(acme: Acme, cfg: Config) -> None:
+    """Spec 0017 FR-6: ACME passes no ``issuer_id`` (0019 gives it one), so a
+    finalize with exactly one active issuer stores that issuer's id on the
+    certificate row -- the default rule that keeps a single-CA instance
+    working exactly as it did before this spec."""
+    db = db_session(cfg)
+    try:
+        issuer_id = ca_service.active_issuers(db)[0].id
+    finally:
+        db.close()
+
+    flow = Flow(acme, cfg, "nas.lan")
+    flow.make_ready()
+    flow.finalize_ok(csr_der("nas.lan"))
+
+    db = db_session(cfg)
+    try:
+        row = db.scalars(select(Certificate).order_by(Certificate.id)).first()
+        assert row is not None
+        assert row.issuer_id == issuer_id
+    finally:
+        db.close()
+
+
+def test_finalize_never_uses_the_default_rule(acme: Acme, cfg: Config) -> None:
+    """Spec 0019 FR-9 closes 0018's gap that this test used to document as
+    open: with two active issuers on the instance and no per-request way for
+    0017's default rule to pick between them, finalize used to raise
+    ``IssuerRequiredError`` and no certificate could be obtained over ACME
+    at all. After FR-9, ``_issue`` passes ``issuer_id=account.issuer_id``
+    instead of leaving :func:`cabin.ca.service.resolve_issuer` to guess, so
+    a second active issuer is no longer a reason finalize can fail -- it
+    finalizes, and from the account's own issuer specifically, never from
+    whichever one the default rule would otherwise have picked. Asserted on
+    the certificate's stored ``issuer_id``, not merely on the response
+    succeeding, so an implementation that resolved the issuer from the
+    second (or from neither) would still be caught here."""
     flow = Flow(acme, cfg, "nas.lan")
     flow.make_ready()
     db = db_session(cfg)
     try:
-        db.execute(ca_service.CACertificate.__table__.delete())
-        db.commit()
+        second = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "second"
+        )
+        second_issuer_id = second.intermediate.id
+    finally:
+        db.close()
+
+    finalized = flow.finalize(csr_der("nas.lan"))
+
+    assert finalized.status_code == 200, finalized.text
+    assert flow.order()["status"] == "valid"
+    rows = certificates(cfg)
+    assert len(rows) == 1
+    assert rows[0].issuer_id == acme.issuer_id
+    assert rows[0].issuer_id != second_issuer_id
+
+
+def test_finalize_leaves_no_certificate_when_the_ca_is_missing(acme: Acme, cfg: Config) -> None:
+    """The order must not be left claimed by a failed issuance: whatever went
+    wrong, the client has to be able to try again.
+
+    Retiring the account's own issuer is the schema-respecting way to reach
+    this: deleting every ``ca_certificates`` row outright, as this test used
+    to, is refused by the database now that ``acme_accounts.issuer_id`` is a
+    NOT NULL foreign key to it (spec 0019 FR-1) -- the account this flow
+    registered still names a row, and the delete would raise before the
+    assertions below ever ran. A second hierarchy is created and left
+    active, both so :func:`cabin.ca.service.retire` -- which itself refuses
+    to leave the instance with no active issuer at all -- has somewhere to
+    land, and so a build that fell back to 0017's default rule would issue
+    from the wrong one instead of failing the way FR-9 requires."""
+    flow = Flow(acme, cfg, "nas.lan")
+    flow.make_ready()
+    db = db_session(cfg)
+    try:
+        ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "second"
+        )
+        ca_service.retire(db, acme.issuer_id)
     finally:
         db.close()
 
     failed = flow.finalize(csr_der("nas.lan"))
 
-    assert failed.status_code == 500, failed.text
+    assert_problem(failed, "serverInternal", 500)
+    assert "retire" in failed.text.lower(), failed.text
     assert count_certificates(cfg) == 0
     db = db_session(cfg)
     try:

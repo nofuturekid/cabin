@@ -36,6 +36,38 @@
     </div>
   </div>
 
+  {% if tls_enabled %}
+  <div class="section">
+    <div>
+      <h2>TLS certificate issuer</h2>
+      <p class="help">
+        Which CA signs the certificate cabin serves itself. Whoever signs it
+        decides the chain every browser and trust store that connects to
+        cabin has to trust, so cabin never guesses this on its own when more
+        than one active issuer exists.
+      </p>
+    </div>
+    <div>
+      <div class="field">
+        <label for="tls_issuer_id">Issuer</label>
+        <select id="tls_issuer_id" name="tls_issuer_id">
+          <option disabled {% if not tls_issuer_selected %}selected{% endif %}>not decided</option>
+          {% for issuer in tls_issuers %}
+          <option value="{{ issuer.id }}" {% if tls_issuer_selected == issuer.id|string %}selected{% endif %}>{{ issuer.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% if not tls_issuer_selected %}
+      <p class="note">
+        No issuer is bound, so cabin cannot decide who signs its own
+        certificate -- it keeps serving what it currently has rather than
+        guessing. Choose one and save.
+      </p>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   <div class="section">
     <div>
       <h2>Trust the reverse proxy</h2>
@@ -74,19 +106,6 @@
         The directory URL, external account keys and client setup snippets live
         on the <a href="/acme/admin">ACME</a> page.
       </p>
-      {% if acme_enabled %}
-      {% if acme_directory_url %}
-      <p class="note">
-        ACME directory: <code>{{ acme_directory_url }}</code> — hand this URL to
-        your client.
-      </p>
-      {% else %}
-      <p class="note">
-        ACME is enabled, but without a base URL there is no directory address to
-        hand out.
-      </p>
-      {% endif %}
-      {% endif %}
     </div>
   </div>
 

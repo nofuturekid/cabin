@@ -20,6 +20,7 @@ from starlette.responses import Response
 from cabin.ca import certs as certs_service
 from cabin.ca import service as ca_service
 from cabin.ca.certs import Certificate
+from cabin.ca.service import UnknownIssuerError
 from cabin.users import User
 from cabin.web.certs_ui import SERIAL_CHARS
 from cabin.web.deps import (
@@ -38,6 +39,11 @@ MIN_P12_PASSWORD = 8
 _NO_CA = "no CA configured"
 _NO_KEY = "no private key is stored for this certificate"
 _P12_UNSUPPORTED = "this key type cannot be stored in a PKCS#12 bundle"
+#: FR-8: an ``anchor`` that names no path in this leaf's ChainSet is a 404,
+#: never a silent fallback to the default -- a client that asked for a
+#: specific anchor and got a different one has been misinformed about the
+#: one thing it asked about.
+_UNKNOWN_ANCHOR = "no such chain for this certificate"
 
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 
@@ -66,15 +72,26 @@ def _attachment(body: bytes, media_type: str, filename: str) -> Response:
     )
 
 
-def _chain(db: Session) -> list[x509.Certificate]:
-    """Issuer chain for a leaf, nearest issuer first."""
-    hierarchy = ca_service.get_ca(db)
-    if hierarchy is None:
-        raise HTTPException(status_code=404, detail=_NO_CA)
-    return [
-        x509.load_pem_x509_certificate(hierarchy.intermediate.cert_pem.encode("ascii")),
-        x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii")),
-    ]
+def _chain_set(db: Session, row: Certificate) -> "ca_service.ChainSet":
+    """The leaf's full set of paths -- default and alternates (spec 0021
+    FR-6) -- built from the leaf's own issuer (spec 0017 FR-8), not from a
+    single instance-wide hierarchy: with several hierarchies side by side,
+    a certificate's chain is whichever one actually signed it."""
+    try:
+        return ca_service.chains_for(db, row.issuer_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=_NO_CA) from exc
+
+
+def _certs(chain: "ca_service.Chain") -> list[x509.Certificate]:
+    return [x509.load_pem_x509_certificate(ca.cert_pem.encode("ascii")) for ca in chain.rows]
+
+
+def _chain(db: Session, row: Certificate) -> list[x509.Certificate]:
+    """The *default* chain (spec 0021 FR-6/FR-8) -- what the PKCS#12 bundle
+    always bundles, and what ``chain.pem`` serves when no ``anchor`` is
+    given."""
+    return _certs(_chain_set(db, row).default)
 
 
 def _key_pem(request: Request, row: Certificate) -> str:
@@ -106,12 +123,26 @@ def download_cert_pem(
 @router.get("/{cert_id}/download/chain.pem")
 def download_chain_pem(
     cert_id: int,
+    anchor: int | None = None,
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> Response:
+    """FR-8: ``anchor`` names a path by its topmost row's id. Omitted, this
+    serves the default -- the long path, when a live cross certificate
+    offers one (spec 0021 FR-6). Given, it must name a path that is
+    actually in this leaf's current :class:`~cabin.ca.service.ChainSet`, or
+    the request is a 404 rather than a quiet fallback to the default."""
     row = certificate_or_404(db, cert_id)
+    chain_set = _chain_set(db, row)
+    if anchor is None:
+        chain = chain_set.default
+    else:
+        found = chain_set.by_anchor(anchor)
+        if found is None:
+            raise HTTPException(status_code=404, detail=_UNKNOWN_ANCHOR)
+        chain = found
     body = row.cert_pem + "".join(
-        cert.public_bytes(serialization.Encoding.PEM).decode("ascii") for cert in _chain(db)
+        cert.public_bytes(serialization.Encoding.PEM).decode("ascii") for cert in _certs(chain)
     )
     return _attachment(body.encode("ascii"), "application/x-pem-file", _filename(row, "-chain.pem"))
 
@@ -161,7 +192,7 @@ def download_bundle_p12(
             # key it cannot carry into a clean 400.
             key=cast(pkcs12.PKCS12PrivateKeyTypes, key),
             cert=x509.load_pem_x509_certificate(row.cert_pem.encode("ascii")),
-            cas=_chain(db),
+            cas=_chain(db, row),
             # PBES2/AES-256, i.e. whatever the library considers current --
             # not the legacy RC2/3DES profile (FR-5).
             encryption_algorithm=serialization.BestAvailableEncryption(password.encode("utf-8")),

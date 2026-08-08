@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import ca_fixtures
 import pytest
 from acme_client import Acme, ec_key, flattened, rsa_key
 from fastapi.testclient import TestClient
@@ -53,8 +54,20 @@ def client(raw_client: TestClient, cfg: Config) -> TestClient:
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    """A real, active intermediate -- spec 0019 FR-4/FR-5 resolve the
+    per-issuer directory and new-account paths against an existing row, so
+    ``acme`` needs one to build a working URL at all. Tests that used to
+    call ``create_ca`` for order placement no longer have to: this fixture
+    already made the one hierarchy they need, and calling ``create_ca``
+    again would leave the instance with two active issuers, which is a
+    different (and, for most of these tests, irrelevant) scenario."""
+    return create_ca(cfg)
+
+
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
 
 
 def db_session(cfg: Config) -> Session:
@@ -69,12 +82,14 @@ def _setting(cfg: Config, key: str, value: str) -> None:
         db.close()
 
 
-def create_ca(cfg: Config) -> None:
+def create_ca(cfg: Config) -> int:
+    """A fresh hierarchy; returns the intermediate's id."""
     db = db_session(cfg)
     try:
-        ca_service.create_hierarchy(
+        hierarchy = ca_service.create_hierarchy(
             db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
         )
+        return hierarchy.intermediate.id
     finally:
         db.close()
 
@@ -109,7 +124,7 @@ def register(acme: Acme, key: Any = None, **payload: Any) -> tuple[Any, str]:
     """A fresh account; returns (key, kid)."""
     key = key or rsa_key()
     body: dict[str, Any] = {"termsOfServiceAgreed": True, **payload}
-    resp = acme.post("/acme/new-account", key, body)
+    resp = acme.post(acme.new_account_path, key, body)
     assert resp.status_code == 201, resp.text
     return key, resp.headers["location"]
 
@@ -131,13 +146,13 @@ def read(acme: Acme, key: Any, kid: str, url: str) -> Response:
 # --- FR-4, AC-1: directory and nonces ------------------------------------------------
 
 
-def test_directory_fields(client: TestClient) -> None:
-    resp = client.get("/acme/directory")
+def test_directory_fields(client: TestClient, issuer_id: int) -> None:
+    resp = client.get(f"/acme/ca/{issuer_id}/directory")
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["newNonce"] == "http://testserver/acme/new-nonce"
-    assert body["newAccount"] == "http://testserver/acme/new-account"
+    assert body["newAccount"] == f"http://testserver/acme/ca/{issuer_id}/new-account"
     assert body["newOrder"] == "http://testserver/acme/new-order"
     assert body["revokeCert"] == "http://testserver/acme/revoke-cert"
     assert body["keyChange"] == "http://testserver/acme/key-change"
@@ -146,18 +161,21 @@ def test_directory_fields(client: TestClient) -> None:
     # the directory is a GET nobody follows with a POST of the same nonce, so
     # it does not mint one -- see the nonce-economy test below
     assert "replay-nonce" not in resp.headers
-    assert resp.headers["link"] == '<http://testserver/acme/directory>;rel="index"'
+    # FR-11: a per-issuer path carries an index link to its own directory.
+    assert resp.headers["link"] == f'<http://testserver/acme/ca/{issuer_id}/directory>;rel="index"'
 
 
-def test_directory_prefers_the_configured_base_url(client: TestClient, cfg: Config) -> None:
+def test_directory_prefers_the_configured_base_url(
+    client: TestClient, issuer_id: int, cfg: Config
+) -> None:
     """FR-4/FR-5: behind a reverse proxy the request's own host is whatever
     the proxy passed on -- the configured base URL is what clients were told
     to use, and every URL cabin hands out has to agree with it."""
     _setting(cfg, BASE_URL, "https://ca.example.org")
 
-    body = client.get("/acme/directory").json()
+    body = client.get(f"/acme/ca/{issuer_id}/directory").json()
 
-    assert body["newAccount"] == "https://ca.example.org/acme/new-account"
+    assert body["newAccount"] == f"https://ca.example.org/acme/ca/{issuer_id}/new-account"
     assert body["meta"]["website"] == "https://ca.example.org"
 
 
@@ -168,7 +186,8 @@ def test_new_nonce_headers(client: TestClient) -> None:
     assert head.status_code == 200
     assert head.headers["replay-nonce"]
     assert head.headers["cache-control"] == "no-store"
-    assert 'rel="index"' in head.headers["link"]
+    # FR-11: new-nonce carries no issuer, so it carries no index link either.
+    assert "link" not in head.headers
 
     get = client.get("/acme/new-nonce")
     assert get.status_code == 204
@@ -183,7 +202,7 @@ def test_new_account_creates_and_is_idempotent(acme: Acme, cfg: Config) -> None:
     key = rsa_key()
 
     created = acme.post(
-        "/acme/new-account",
+        acme.new_account_path,
         key,
         {"termsOfServiceAgreed": True, "contact": ["mailto:ops@example.org"]},
     )
@@ -197,12 +216,12 @@ def test_new_account_creates_and_is_idempotent(acme: Acme, cfg: Config) -> None:
     assert body["orders"] == f"{kid}/orders"
 
     # AC-3: the same key again is the same account, answered with 200
-    again = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True})
+    again = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True})
     assert again.status_code == 200, again.text
     assert again.headers["location"] == kid
 
     # a different key is a different account
-    other = acme.post("/acme/new-account", rsa_key(), {"termsOfServiceAgreed": True})
+    other = acme.post(acme.new_account_path, rsa_key(), {"termsOfServiceAgreed": True})
     assert other.status_code == 201
     assert other.headers["location"] != kid
 
@@ -224,11 +243,11 @@ def test_new_account_creates_and_is_idempotent(acme: Acme, cfg: Config) -> None:
 def test_only_return_existing(acme: Acme) -> None:
     """AC-3: onlyReturnExisting never creates -- an unknown key is
     accountDoesNotExist 400."""
-    unknown = acme.post("/acme/new-account", rsa_key(), {"onlyReturnExisting": True})
+    unknown = acme.post(acme.new_account_path, rsa_key(), {"onlyReturnExisting": True})
     assert_problem(unknown, "accountDoesNotExist", 400)
 
     key, kid = register(acme)
-    found = acme.post("/acme/new-account", key, {"onlyReturnExisting": True})
+    found = acme.post(acme.new_account_path, key, {"onlyReturnExisting": True})
     assert found.status_code == 200
     assert found.headers["location"] == kid
 
@@ -254,7 +273,7 @@ def test_account_update_contacts_and_deactivate(acme: Acme, cfg: Config) -> None
     assert_problem(read(acme, key, kid, kid), "unauthorized", 403)
     assert_problem(place_order(acme, key, kid, "nas.lan"), "unauthorized", 403)
     assert_problem(
-        acme.post("/acme/new-account", key, {"onlyReturnExisting": True}),
+        acme.post(acme.new_account_path, key, {"onlyReturnExisting": True}),
         "unauthorized",
         403,
     )
@@ -301,7 +320,7 @@ def test_key_change(acme: Acme) -> None:
     assert read(acme, key, kid, kid).status_code in (400, 403)
     assert read(acme, new_key, kid, kid).json()["status"] == "valid"
     # ...and the new key now finds the same account
-    same = acme.post("/acme/new-account", new_key, {"onlyReturnExisting": True})
+    same = acme.post(acme.new_account_path, new_key, {"onlyReturnExisting": True})
     assert same.status_code == 200
     assert same.headers["location"] == kid
 
@@ -310,7 +329,6 @@ def test_key_change(acme: Acme) -> None:
 
 
 def test_new_order_creates_authz_and_challenges(acme: Acme, cfg: Config) -> None:
-    create_ca(cfg)
     key, kid = register(acme)
 
     resp = place_order(acme, key, kid, "nas.lan")
@@ -346,7 +364,6 @@ def test_new_order_creates_authz_and_challenges(acme: Acme, cfg: Config) -> None
 
 
 def test_new_order_accepts_ip_and_multiple_identifiers(acme: Acme, cfg: Config) -> None:
-    create_ca(cfg)
     key, kid = register(acme)
 
     resp = acme.post(
@@ -375,7 +392,6 @@ def test_new_order_accepts_ip_and_multiple_identifiers(acme: Acme, cfg: Config) 
 def test_wildcard_order_dns01_only(acme: Acme, cfg: Config) -> None:
     """AC-4: RFC 8555 8.4 -- only dns-01 can prove control of a wildcard, and
     the authorization names the base domain with wildcard: true."""
-    create_ca(cfg)
     key, kid = register(acme)
 
     resp = place_order(acme, key, kid, "*.nas.lan")
@@ -392,7 +408,6 @@ def test_wildcard_order_dns01_only(acme: Acme, cfg: Config) -> None:
 def test_identifier_policy_rejections(acme: Acme, cfg: Config) -> None:
     """AC-8/FR-7: the SAN policy from spec 0005 decides what a DNS identifier
     may be -- and every rejection is an ACME problem, never a 500."""
-    create_ca(cfg)
     key, kid = register(acme)
 
     for value in (
@@ -468,21 +483,27 @@ def test_identifier_policy_rejections(acme: Acme, cfg: Config) -> None:
         assert str(problem(resp)["type"]).startswith(ERROR_PREFIX)
 
 
-def test_new_order_without_a_ca_says_so(acme: Acme) -> None:
-    """FR-5: the directory keeps working without a CA, but an order that
-    could never be fulfilled is refused with a reason an operator can act
-    on."""
-    key, kid = register(acme)
+def test_new_order_without_a_ca_says_so(client: TestClient, cfg: Config) -> None:
+    """FR-5: a new registration at a retired issuer's directory is refused
+    outright, so a client learns this issuer cannot sign anything before it
+    ever reaches new-order. The pre-0019 version of this test registered
+    against a directory with no CA behind it at all -- impossible now that
+    FR-4/FR-5 resolve the directory and new-account paths against a real
+    row, so a retired one is the nearest surviving shape of "cannot issue"."""
+    db = db_session(cfg)
+    try:
+        retired_id = ca_fixtures.retired_issuer(db)
+    finally:
+        db.close()
+    acme = Acme(client, issuer_id=retired_id)
 
-    resp = place_order(acme, key, kid, "nas.lan")
+    resp = acme.post(acme.new_account_path, rsa_key(), {"termsOfServiceAgreed": True})
 
-    assert_problem(resp, "serverInternal", 500)
-    assert "CA" in problem(resp)["detail"]
+    assert_problem(resp, "unauthorized", 403)
 
 
 def test_orders_belong_to_one_account(acme: Acme, cfg: Config) -> None:
     """A resource URL is not a capability: another account may not read it."""
-    create_ca(cfg)
     key, kid = register(acme)
     order = place_order(acme, key, kid, "nas.lan").json()
     order_url = place_order(acme, key, kid, "other.lan").headers["location"]
@@ -500,7 +521,6 @@ def test_orders_belong_to_one_account(acme: Acme, cfg: Config) -> None:
 
 
 def test_post_as_get_all_resources(acme: Acme, cfg: Config) -> None:
-    create_ca(cfg)
     key, kid = register(acme)
     created = place_order(acme, key, kid, "nas.lan")
     order_url = created.headers["location"]
@@ -525,11 +545,11 @@ def test_post_as_get_all_resources(acme: Acme, cfg: Config) -> None:
     assert str(problem(unknown)["type"]).startswith(ERROR_PREFIX)
 
 
-def test_get_method_not_allowed(client: TestClient) -> None:
+def test_get_method_not_allowed(client: TestClient, issuer_id: int) -> None:
     """AC-5: these resources are read with POST-as-GET; a plain GET is 405,
     not a leak and not a 404."""
     for path in (
-        "/acme/new-account",
+        f"/acme/ca/{issuer_id}/new-account",
         "/acme/new-order",
         "/acme/key-change",
         "/acme/revoke-cert",
@@ -563,7 +583,7 @@ def test_requires_the_jose_content_type(acme: Acme) -> None:
             {
                 "alg": key.alg,
                 "nonce": acme.nonce(),
-                "url": acme.url("/acme/new-account"),
+                "url": acme.url(acme.new_account_path),
                 "jwk": key.jwk,
             },
             {"termsOfServiceAgreed": True},
@@ -577,7 +597,7 @@ def test_requires_the_jose_content_type(acme: Acme) -> None:
         "",
         None,
     ):
-        resp = acme.post_body("/acme/new-account", body(), content_type=content_type)
+        resp = acme.post_body(acme.new_account_path, body(), content_type=content_type)
         assert resp.status_code == 415, f"{content_type!r} -> {resp.status_code}"
         assert str(problem(resp)["type"]).startswith(ERROR_PREFIX)
         # a client that gets this far still needs a nonce to try again
@@ -588,7 +608,7 @@ def test_requires_the_jose_content_type(acme: Acme) -> None:
         "application/jose+json",
         "application/jose+json; charset=utf-8",
     ):
-        resp = acme.post_body("/acme/new-account", body(), content_type=content_type)
+        resp = acme.post_body(acme.new_account_path, body(), content_type=content_type)
         assert resp.status_code in (200, 201), f"{content_type!r} -> {resp.text}"
 
 
@@ -612,7 +632,7 @@ def test_nonces_are_only_issued_where_the_protocol_needs_them(
 
     before = stored()
     for _ in range(25):
-        resp = client.get("/acme/directory")
+        resp = client.get(acme.directory_path)
         assert resp.status_code == 200
         assert "replay-nonce" not in resp.headers
     assert client.get("/acme/nothing-here").status_code == 404
@@ -638,7 +658,6 @@ def test_nonces_are_only_issued_where_the_protocol_needs_them(
 def test_dns_identifiers_are_case_folded(acme: Acme, cfg: Config) -> None:
     """DNS names are case-insensitive, so NAS.LAN and nas.lan are one name --
     one authorization, one challenge set, one thing to prove."""
-    create_ca(cfg)
     key, kid = register(acme)
 
     resp = acme.post(
@@ -670,7 +689,6 @@ def test_expired_orders_and_authorizations_say_so(acme: Acme, cfg: Config) -> No
     invalid and the authorization expired, whatever the stored row says. Spec
     0011 refuses to validate a challenge on that basis, so the rule has to be
     one shared function rather than two readings of the same column."""
-    create_ca(cfg)
     key, kid = register(acme)
     created = place_order(acme, key, kid, "nas.lan")
     order_url = created.headers["location"]
@@ -698,10 +716,12 @@ def test_expired_orders_and_authorizations_say_so(acme: Acme, cfg: Config) -> No
 def test_acme_disabled_returns_404(raw_client: TestClient, cfg: Config) -> None:
     """AC-6: off means invisible -- 404 everywhere, never 403, and never a
     nonce that would suggest there is something here."""
+    # No hierarchy exists yet, so "1" names nothing real -- the gate has to
+    # 404 these before FR-4 ever gets to ask whether the id resolves.
     paths = (
-        "/acme/directory",
+        "/acme/ca/1/directory",
         "/acme/new-nonce",
-        "/acme/new-account",
+        "/acme/ca/1/new-account",
         "/acme/new-order",
         "/acme/key-change",
         "/acme/revoke-cert",
@@ -726,11 +746,12 @@ def test_acme_disabled_returns_404(raw_client: TestClient, cfg: Config) -> None:
     # ...and switching it on lights the same paths up
     _setting(cfg, BASE_URL, BASE)
     _setting(cfg, ACME_ENABLED, TRUE)
-    assert raw_client.get("/acme/directory").status_code == 200
+    issuer_id = create_ca(cfg)
+    assert raw_client.get(f"/acme/ca/{issuer_id}/directory").status_code == 200
 
     # ...and switching it off again puts them out
     _setting(cfg, ACME_ENABLED, FALSE)
-    assert raw_client.get("/acme/directory").status_code == 404
+    assert raw_client.get(f"/acme/ca/{issuer_id}/directory").status_code == 404
 
 
 def test_acme_needs_a_base_url_to_answer(raw_client: TestClient, cfg: Config) -> None:
@@ -741,16 +762,23 @@ def test_acme_needs_a_base_url_to_answer(raw_client: TestClient, cfg: Config) ->
     gate treats "no base URL" exactly like "switched off": 404.
     """
     _setting(cfg, ACME_ENABLED, TRUE)
+    issuer_id = create_ca(cfg)
 
-    for path in ("/acme/directory", "/acme/new-nonce", "/acme/new-account"):
+    for path in (
+        f"/acme/ca/{issuer_id}/directory",
+        "/acme/new-nonce",
+        f"/acme/ca/{issuer_id}/new-account",
+    ):
         assert raw_client.get(path).status_code == 404, path
 
     _setting(cfg, BASE_URL, BASE)
-    assert raw_client.get("/acme/directory").status_code == 200
+    assert raw_client.get(f"/acme/ca/{issuer_id}/directory").status_code == 200
 
     # ...and a Host header cannot talk cabin into publishing someone else
-    body = raw_client.get("/acme/directory", headers={"Host": "evil.example"}).json()
-    assert body["newAccount"] == f"{BASE}/acme/new-account"
+    body = raw_client.get(
+        f"/acme/ca/{issuer_id}/directory", headers={"Host": "evil.example"}
+    ).json()
+    assert body["newAccount"] == f"{BASE}/acme/ca/{issuer_id}/new-account"
 
 
 def test_settings_refuses_to_enable_acme_without_a_base_url(
@@ -773,14 +801,14 @@ def test_settings_refuses_to_enable_acme_without_a_base_url(
         assert get_flag(db, ACME_ENABLED) is False
     finally:
         db.close()
-    assert raw_client.get("/acme/directory").status_code == 404
+    # No base URL, so the gate 404s whatever the id -- no hierarchy needed.
+    assert raw_client.get("/acme/ca/1/directory").status_code == 404
 
 
 # --- FR-6: audit ---------------------------------------------------------------------
 
 
 def test_audit_records_acme_events(acme: Acme, cfg: Config) -> None:
-    create_ca(cfg)
     key, kid = register(acme)
     order = place_order(acme, key, kid, "nas.lan")
     assert order.status_code == 201, order.text
@@ -816,11 +844,14 @@ def test_audit_records_acme_events(acme: Acme, cfg: Config) -> None:
 def test_settings_page_toggles_acme_and_shows_the_directory_url(
     raw_client: TestClient, cfg: Config
 ) -> None:
+    """FR-13: /settings only toggles ACME now -- there is no single directory
+    URL to print once every issuer has its own, so that line moved to /ca
+    (one row per intermediate) and /acme (AC-14)."""
     csrf = _setup_admin(raw_client, cfg)
 
     page = raw_client.get("/settings")
     assert "acme_enabled" in page.text
-    assert raw_client.get("/acme/directory").status_code == 404
+    assert raw_client.get("/acme/ca/1/directory").status_code == 404
 
     resp = raw_client.post(
         "/settings",
@@ -832,7 +863,7 @@ def test_settings_page_toggles_acme_and_shows_the_directory_url(
     )
     assert resp.status_code == 303, resp.text
 
-    assert raw_client.get("/acme/directory").status_code == 200
-    assert "https://ca.example.org/acme/directory" in raw_client.get("/settings").text
-    create_ca(cfg)
-    assert "https://ca.example.org/acme/directory" in raw_client.get("/ca").text
+    issuer_id = create_ca(cfg)
+    assert raw_client.get(f"/acme/ca/{issuer_id}/directory").status_code == 200
+    assert "/acme/ca/" not in raw_client.get("/settings").text
+    assert f"https://ca.example.org/acme/ca/{issuer_id}/directory" in raw_client.get("/ca").text

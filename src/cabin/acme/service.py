@@ -35,6 +35,8 @@ from cabin.acme.models import (
     kid_hash,
 )
 from cabin.ca import leaf
+from cabin.ca import service as ca_service
+from cabin.ca.service import CACertificate
 
 #: How long an order stays placeable before a client has to start over.
 ORDER_LIFETIME = timedelta(days=7)
@@ -226,6 +228,7 @@ def get_or_create_account(
     db: Session,
     key: AccountKey,
     *,
+    issuer_id: int,
     contacts: list[str] | None,
     tos_agreed: bool,
     now: datetime | None = None,
@@ -236,6 +239,14 @@ def get_or_create_account(
     what decides the race between two simultaneous first registrations --
     the loser reads back the winner's row rather than failing, which is what
     a retrying client expects.
+
+    ``issuer_id`` is keyword-only and has no default, for the reason 0018
+    FR-5 gives about ``principal``: a call site that forgets which issuer an
+    account belongs to must not compile (spec 0019 FR-1). Ignored for an
+    existing account -- FR-5 says an account belongs to exactly one issuer
+    for its whole life, and the caller (``new_account``, per the Interface
+    Contract's eight-step order) has already refused the request by the time
+    a *found* account with a different issuer could reach here.
     """
     existing = find_account_by_key(db, key.thumbprint)
     if existing is not None:
@@ -251,6 +262,7 @@ def get_or_create_account(
         contacts_json=json.dumps(contacts) if contacts is not None else None,
         tos_agreed_at=_iso(moment) if tos_agreed else None,
         created_at=_iso(moment),
+        issuer_id=issuer_id,
     )
     db.add(account)
     try:
@@ -262,6 +274,18 @@ def get_or_create_account(
             raise
         return raced, False
     return account, True
+
+
+def account_issuer(db: Session, account: AcmeAccount) -> CACertificate:
+    """The issuer row ``account`` registered against (spec 0019 FR-9).
+
+    One lookup, used by ``new_order``'s retirement check and available to
+    the routes, so "which issuer is this account's" is not spelled three
+    ways across the module boundary. Raises ``ca.service.UnknownIssuerError``
+    if the row is gone -- the same exception ``resolve_issuer`` raises for an
+    unknown id, so a caller already handling that one handles this too.
+    """
+    return ca_service.get_ca(db, account.issuer_id)
 
 
 def set_contacts(db: Session, account: AcmeAccount, contacts: list[str]) -> None:
@@ -327,7 +351,16 @@ def create_order(
 ) -> AcmeOrder:
     """One order, one authorization per identifier, and the challenges that
     could prove it -- written in a single transaction, so a client never sees
-    an order whose authorizations are still being built."""
+    an order whose authorizations are still being built.
+
+    The ``db.flush()`` calls below are load-bearing, not cleanup: order,
+    authorization and challenge are plain ``ForeignKey`` columns with no
+    ``relationship()`` between them, so the unit of work has no dependency
+    edge telling it a child must be inserted after its parent -- it is free
+    to emit the INSERT statements in whatever order the identity map happens
+    to iterate. Flushing the parent before constructing its children forces
+    the correct order deterministically instead of by accident.
+    """
     moment = now or datetime.now(UTC)
     order = AcmeOrder(
         id=new_id(),
@@ -340,6 +373,7 @@ def create_order(
         created_at=_iso(moment),
     )
     db.add(order)
+    db.flush()
     for identifier in identifiers:
         authz = AcmeAuthorization(
             id=new_id(),
@@ -351,6 +385,7 @@ def create_order(
             wildcard=identifier.wildcard,
         )
         db.add(authz)
+        db.flush()
         for challenge_type in challenge_types_for(identifier):
             db.add(
                 AcmeChallenge(

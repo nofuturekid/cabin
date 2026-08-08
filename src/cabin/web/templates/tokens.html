@@ -34,6 +34,7 @@
       <tr>
         <th>Label</th>
         <th>Role</th>
+        <th>Issuers</th>
         <th>Status</th>
         <th>Created</th>
         <th>Last used</th>
@@ -46,6 +47,28 @@
       <tr>
         <td>{{ token.label }}</td>
         <td><span class="tag">{{ token.role }}</span></td>
+        <td>
+          {% if token.can_edit_issuers %}
+          <form method="post" action="/tokens/{{ token.id }}/issuers">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            {% for issuer in active_intermediates %}
+            <label class="field-check">
+              <input type="checkbox" name="issuer_id" value="{{ issuer.id }}" {{ "checked" if issuer.id in token.granted_ids else "" }} />
+              {{ issuer.name }}
+            </label>
+            {% endfor %}
+            {% for retired in token.retired_grants %}
+            <input type="hidden" name="issuer_id" value="{{ retired.id }}" />
+            {% endfor %}
+            {% if token.retired_grants %}
+            <p class="note">Also granted (retired, no longer selectable): {{ token.retired_grants | map(attribute="name") | join(", ") }}</p>
+            {% endif %}
+            <div class="actions"><button type="submit">Save issuers</button></div>
+          </form>
+          {% else %}
+          {{ token.granted_names | join(", ") if token.granted_names else "none" }}
+          {% endif %}
+        </td>
         <td><span class="tag tag-{{ token.status }}">{{ token.status }}</span></td>
         <td class="nowrap">{{ token.created_at }}</td>
         <td class="nowrap">{{ token.last_used_at }}</td>
@@ -88,6 +111,16 @@
       <div class="field">
         <label for="expires_at">Expires (optional)</label>
         <input id="expires_at" type="date" name="expires_at" />
+      </div>
+      <div class="field">
+        <label>Issuers (optional)</label>
+        {% for issuer in active_intermediates %}
+        <label class="field-check">
+          <input type="checkbox" name="issuer_id" value="{{ issuer.id }}" />
+          {{ issuer.name }}
+        </label>
+        {% endfor %}
+        <span class="hint">An admin token created without any issuer can do nothing until granted.</span>
       </div>
       <div class="actions"><button type="submit" class="primary">Create token</button></div>
     </form>

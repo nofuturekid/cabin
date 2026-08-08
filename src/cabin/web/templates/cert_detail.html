@@ -11,6 +11,13 @@
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+{% if days_requested %}
+<div class="note">
+  Requested {{ days_requested }} days; the issuing CA's own expiry is sooner,
+  so this certificate is valid only until {{ cert.not_after }}.
+</div>
+{% endif %}
+
 <div class="scroller">
   <table>
     <tbody>

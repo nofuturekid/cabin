@@ -15,6 +15,8 @@ from starlette.responses import Response
 from cabin import sessions, users
 from cabin.audit import Actor, user_actor
 from cabin.ca.certs import Certificate, get_certificate
+from cabin.issuer_grants import Principal, user_principal
+from cabin.secrets import SecretStore
 from cabin.sessions import SESSION_LIFETIME, UserSession
 from cabin.settings import TRUST_PROXY, get_flag
 from cabin.users import Role, User
@@ -96,6 +98,15 @@ def get_db(request: Request) -> Generator[Session]:
         db.close()
 
 
+def get_secrets(request: Request) -> SecretStore:
+    """Spec 0022 FR-10: the accessor `crl_ui` uses in place of reading
+    `request.app.state.secrets` directly, so the plaintext PKI listener's
+    application (`server.create_public_app`, which has no secret store of
+    its own) can override this dependency to reach the main app's instead.
+    """
+    return request.app.state.secrets  # type: ignore[no-any-return]
+
+
 def redirect_if_no_users(db: Session = Depends(get_db)) -> None:
     """FR-5: first run — every request redirects to /setup until a user exists."""
     if users.count_users(db) == 0:
@@ -167,6 +178,16 @@ def require_role(*roles: Role) -> Callable[[User], User]:
 
 #: The guard for every mutating (and mutation-only) page.
 require_admin = require_role(*ADMIN_ROLES)
+
+
+def current_principal(user: User = Depends(require_admin)) -> Principal:
+    """Spec 0018 FR-5: the principal to check issuer grants against, for
+    routes that already require :data:`require_admin`. This is ergonomics,
+    not enforcement -- the enforcement is the required ``principal``
+    parameter on ``issue_and_store``/``sign_csr_and_store``/
+    ``revoke_certificate`` themselves.
+    """
+    return user_principal(user)
 
 
 def verify_csrf(

@@ -4,6 +4,14 @@
 <div class="card-narrow">
   <h1>Create the superadmin account</h1>
   <p class="note">This is a one-time setup. This account can manage all other users.</p>
+  {% if tls_self_signed %}
+  <p id="tls-setup-note" class="note">
+    cabin is serving a self-signed TLS certificate right now, so your browser
+    shows a warning before this page loads -- that is expected. It stops once
+    a CA exists: cabin then issues and switches to its own certificate
+    automatically, with no restart.
+  </p>
+  {% endif %}
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="post" action="/setup">
     <div class="field">

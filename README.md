@@ -13,21 +13,69 @@ server, an MCP server, direct issuance, CSR signing, revocation and a CRL.
   first-run wizard creates the superadmin, then walks you through creating a
   root + intermediate CA (ECDSA P-256/P-384, RSA-4096 or Ed25519) or
   importing an existing one. Roles: superadmin, admin, viewer.
+- **Multiple CA hierarchies** — root and intermediate CAs run side by side
+  rather than one of each. Adding a new intermediate under an existing root
+  and retiring the old one is how rotation works, with nothing already
+  issued invalidated. Which issuer signs is explicit on every request and
+  defaults only when exactly one is active; with several active, leaving it
+  out is refused rather than guessed. A root chooses its `path_length` at
+  creation — 1 to 4, default 1 — and it never changes afterwards; see
+  Cross-signing below for why that matters.
+- **Per-issuer permissions** — grants, not just roles, decide who may issue
+  or revoke on which CA, held by users and API tokens alike and checked
+  fresh on every request, so withdrawing one takes effect on the next
+  request rather than the next login. They do not bind ACME unless
+  `acme_require_eab` is on: with it off, any account still registers at any
+  issuer's directory and obtains a certificate regardless of grants, so
+  "cabin has per-issuer permissions" is only true for ACME once that
+  setting is on.
+- **Name constraints** — an intermediate can be restricted, at creation, to
+  the DNS names and IP ranges it may sign. cabin checks its own
+  constraints before every issuance, ACME included, rather than trusting a
+  client to respect them. Roots take none, and renewal carries an
+  intermediate's constraints over unchanged.
+- **Cross-signing** — a root can sign another root, or import a
+  cross-certificate produced elsewhere, so devices that still trust the old
+  root have a path to certificates issued under the new one. It only works
+  if the signing root was created with a `path_length` of at least 2 —
+  cabin's default is 1, renewal carries that forward unchanged, and there
+  is no way to repair it afterwards, so this has to be planned a root
+  generation ahead. For anything else, running two hierarchies side by
+  side (above) is the simpler transition.
 - **Certificates** — issue `server`/`client` leaves with a server-generated
   key or by signing a pasted CSR, browse and search the inventory, download
   the leaf, the chain, the private key or a password-protected **PKCS#12**
   bundle.
 - **REST API** — `/api/v1`, bearer-token authentication, OpenAPI docs at
   [`/api/v1/docs`](http://localhost:8080/api/v1/docs).
-- **ACME v2 server** (RFC 8555, own implementation) — directory at
-  `/acme/directory`, all three challenge types (`http-01`, `dns-01`,
-  `tls-alpn-01`) and External Account Binding. Verified against certbot and
-  acme.sh, not just unit tests.
+- **ACME v2 server** (RFC 8555, own implementation) — one directory per CA,
+  at `/acme/ca/<issuer id>/directory`, all three challenge types (`http-01`,
+  `dns-01`, `tls-alpn-01`) and External Account Binding. An account key
+  registers at one issuer's directory and stays bound to that issuer for
+  life, so obtaining certificates from two hierarchies needs two account
+  keys. With EAB required, an account can only register with a key issued
+  for that CA, so an identity holding no grant on it obtains no certificate
+  over ACME; with EAB not required, anyone who can reach the port may
+  register and order from any issuer's directory. Verified against certbot
+  and acme.sh, not just unit tests. Two things to know before pointing a
+  client at it: `http-01` always dials port 80 on the resolved address
+  (RFC 8555 8.3) — never the port cabin listens on, and not one the client
+  gets to pick — so a host where port 80 is taken or unreachable from cabin
+  just fails the challenge, with nothing in the error saying why. And
+  loopback identifiers (`localhost`, `127.0.0.1`) are refused
+  unconditionally as an SSRF guard. There is a setting that widens what
+  validation may reach (`allow_private_validation_targets`, on by default),
+  but it only covers RFC 1918 addresses — loopback stays blocked either
+  way. Test with a name that resolves elsewhere instead, e.g. wildcard DNS
+  to a LAN address (`*.example.test` → `192.168.1.20`).
 - **MCP server** — `/mcp` (streamable HTTP), six tools so an AI assistant can
-  look at the CA and issue, sign or revoke certificates under an API token's
-  role.
-- **Revocation and CRL** — reason codes, a monotonic CRL number and a public
-  `/crl` (DER) / `/crl.pem` that regenerates itself when stale.
+  look at the CAs and issue, sign or revoke certificates under an API
+  token's role and issuer grants.
+- **Revocation and CRL** — reason codes, a monotonic CRL number per issuer,
+  and a public `/crl/<issuer id>` (DER) / `/crl/<issuer id>.pem` per
+  intermediate that regenerates itself when stale. `/ca/<id>.cer` serves
+  any row's own certificate, root or intermediate, so a client can complete
+  a chain from a leaf's AIA URL.
 - **Audit log** — who did what, from which front door (UI, API, ACME, MCP).
 - **Secrets encrypted at rest** — AES-256-GCM, master key in
   `/data/secret.key`, optionally wrapped with a passphrase-derived KEK.
@@ -61,18 +109,23 @@ open the WebUI, complete the wizard.
 
 ## Configuration
 
-Five environment variables, all optional. Everything else — CA, profiles,
+Seven environment variables, all optional. Everything else — CA, profiles,
 base URL, ACME, MCP, users, tokens — is configured in the UI and stored in
 the database. Flags (`--port`, `--data-dir`) beat environment variables,
-which beat the defaults.
+which beat the defaults. Two of the seven exist only for native TLS
+(`CABIN_TLS`, `CABIN_HTTP_PORT`) — see
+[`docs/adr/0002-tls-environment-variables.md`](docs/adr/0002-tls-environment-variables.md)
+for why they had to leave the database and land here instead.
 
-| Variable                  | Default                        | What it does                                                                                           |
-| ------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `PORT`                    | `8080`                         | Listen port. One port serves the UI, the API, ACME, MCP and the CRL.                                   |
-| `DATA_DIR`                | `data` (`/data` in the image)  | Holds `cabin.db` and `secret.key`.                                                                     |
-| `CABIN_DB_URL`            | `sqlite:///$DATA_DIR/cabin.db` | SQLAlchemy URL. SQLite is the tested default; PostgreSQL needs a driver the image does not bundle yet. |
-| `COOKIE_SECURE`           | `false`                        | Send session cookies only over HTTPS. Turn on behind a TLS proxy.                                      |
-| `CABIN_MASTER_PASSPHRASE` | unset                          | Wraps the master key in `secret.key` with a scrypt-derived KEK. Set it **before** the first start.     |
+| Variable                  | Default                        | What it does                                                                                                     |
+| ------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `PORT`                    | `8080`                         | Listen port. Serves the UI, the API, ACME, MCP and the CRL — over HTTPS instead of HTTP when TLS is on.          |
+| `DATA_DIR`                | `data` (`/data` in the image)  | Holds `cabin.db`, `secret.key` and, with TLS on, `tls/`.                                                         |
+| `CABIN_DB_URL`            | `sqlite:///$DATA_DIR/cabin.db` | SQLAlchemy URL. SQLite is the tested default; PostgreSQL needs a driver the image does not bundle yet.           |
+| `COOKIE_SECURE`           | `false`                        | Send session cookies only over HTTPS. Turn on behind a TLS proxy; forced on automatically when TLS is on.        |
+| `CABIN_MASTER_PASSPHRASE` | unset                          | Wraps the master key in `secret.key` with a scrypt-derived KEK. Set it **before** the first start.               |
+| `CABIN_TLS`               | `false`                        | Terminate TLS in cabin itself instead of behind a reverse proxy. See Security notes below.                       |
+| `CABIN_HTTP_PORT`         | `8081`                         | Port of the plaintext listener serving only the CRL and CA-certificate routes. Used only when `CABIN_TLS` is on. |
 
 The version cabin reports at `/healthz` and in the UI footer is the version of
 the installed wheel: the release build stamps the git tag into it
@@ -86,9 +139,31 @@ the installed wheel: the release build stamps the git tag into it
 - **`CABIN_MASTER_PASSPHRASE`** adds a passphrase-derived KEK around the
   master key, so a stolen `secret.key` alone is not enough. It cannot be
   added or changed after the first start without discarding the sealed keys.
-- **Put TLS in front.** cabin speaks plain HTTP; terminate TLS in a reverse
-  proxy and set `COOKIE_SECURE=true`. ACME `http-01` validation is outbound,
-  so it works either way.
+- **Terminate TLS — in a reverse proxy, or in cabin itself.** The default is
+  still plain HTTP behind a reverse proxy: terminate TLS there and set
+  `COOKIE_SECURE=true`. ACME `http-01` validation is outbound, so it works
+  either way.
+
+  Set `CABIN_TLS=true` and cabin terminates TLS itself, in three stages, no
+  restart between them: it serves a self-signed certificate the moment it
+  starts (expect one browser warning — the UI says so before and after it
+  happens); the instant a CA exists it issues and serves a certificate from
+  it, hot-swapped into the running listener; once you install cabin's root
+  certificate in your trust store, the warning is gone for good and `curl`
+  without `--cacert` fails, which is how you know the trust is real.
+  `COOKIE_SECURE` is forced on automatically the moment TLS is on — there is
+  no deployment where an explicit `COOKIE_SECURE=false` should win.
+  Certificates need a plaintext CRL/CA-certificate listener to stay
+  fetchable (spec 0022 FR-10): cabin binds a second port
+  (`CABIN_HTTP_PORT`, default `8081`) that serves only those two routes and
+  nothing else. If `base_url` names this host, publish that port on host
+  port **80** — that is where every certificate cabin issues says its CRL
+  and CA certificate are, and `base_url` must not name any other explicit
+  port while TLS is on, or those URLs would point at the TLS listener
+  instead and be unfetchable. cabin's own TLS private key is sealed at rest
+  exactly like every other key it holds — `DATA_DIR/tls/cabin.key.sealed`,
+  same treatment as `secret.key`, no exception carved out for it.
+
 - **Do not expose it to the internet.** An internal CA is trusted by every
   machine that installs its root; treat the admin UI accordingly.
 

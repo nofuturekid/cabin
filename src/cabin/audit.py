@@ -79,12 +79,30 @@ class AuditAction(StrEnum):
     user_deleted = "user_deleted"
     ca_created = "ca_created"
     ca_imported = "ca_imported"
+    # Spec 0017 FR-15: rotation and retirement of a CA hierarchy row.
+    ca_renewed = "ca_renewed"
+    ca_retired = "ca_retired"
+    # Spec 0021 FR-14: cabin signed, or an operator imported, a second
+    # certificate for an existing root. Deliberately separate from
+    # ca_created/ca_imported: extending what an existing root vouches for is
+    # a materially different act from creating a hierarchy, and a log that
+    # cannot tell them apart cannot answer the one question anybody will ask
+    # it afterwards.
+    ca_cross_signed = "ca_cross_signed"
+    ca_cross_imported = "ca_cross_imported"
     settings_changed = "settings_changed"
     cert_issued = "cert_issued"
     cert_signed = "cert_signed"
     cert_revoked = "cert_revoked"
     token_created = "token_created"
     token_revoked = "token_revoked"
+    # Spec 0018 FR-12: a user's or a token's issuer grants changed.
+    # Deliberately separate from user_role_changed/token_created: granting an
+    # issuer is a narrower, per-hierarchy permission change, not a role or
+    # lifecycle change, and an operator filtering the log wants to ask about
+    # it on its own.
+    user_issuers_changed = "user_issuers_changed"
+    token_issuers_changed = "token_issuers_changed"
     acme_account_created = "acme_account_created"
     acme_account_deactivated = "acme_account_deactivated"
     acme_order_created = "acme_order_created"
@@ -97,6 +115,15 @@ class AuditAction(StrEnum):
     acme_certificate_revoked = "acme_certificate_revoked"
     acme_eab_key_created = "acme_eab_key_created"
     acme_eab_key_revoked = "acme_eab_key_revoked"
+    # Spec 0022 FR-14: cabin's own TLS certificate, self-signed or
+    # CA-issued -- recorded with SYSTEM_ACTOR so the certificate the
+    # instance presents always has a written history.
+    tls_certificate_issued = "tls_certificate_issued"
+    # Spec 0018 FR-15: the same self-issuance reaches a terminal failure --
+    # recorded only on the transition into failure (not once per renewal
+    # tick), so an unattended instance does not bury the event that mattered
+    # under twenty-four identical ones a day.
+    tls_certificate_failed = "tls_certificate_failed"
 
 
 #: Accepted ``?action=`` / ``?actor_kind=`` values; "all" means "no filter".
@@ -193,7 +220,15 @@ def setting_change_detail(key: str, old: str | None, new: str | None) -> dict[st
     return {"key": key, "old": value(old), "new": value(new)}
 
 
-def certificate_detail(row: "Certificate", *, key_type: str | None = None) -> dict[str, Any]:
+def certificate_detail(
+    row: "Certificate",
+    *,
+    key_type: str | None = None,
+    # Spec 0017 FR-7: set by an issuance entry point only when the
+    # requested validity got clamped to the issuer's remaining life.
+    days_requested: int | None = None,
+    validity_capped_from: datetime | None = None,
+) -> dict[str, Any]:
     """FR-3/AC-3: everything an issuance, signing or revocation event says
     about a certificate -- and the one place to look to check that it is
     nothing else. Identifiers and metadata only: no private key, no CSR body,
@@ -208,6 +243,12 @@ def certificate_detail(row: "Certificate", *, key_type: str | None = None) -> di
     }
     if key_type is not None:
         detail["key_type"] = key_type
+    # AC-7: present only when the clamp actually fired, not `null`-and-present
+    # -- an issuance the issuer could fully grant must say nothing about a
+    # request it was never short on.
+    if validity_capped_from is not None:
+        detail["days_requested"] = days_requested
+        detail["validity_capped_from"] = validity_capped_from.isoformat()
     return detail
 
 

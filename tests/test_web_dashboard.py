@@ -7,19 +7,26 @@ authorisation: it aggregates data from pages with different roles attached,
 so every section has to keep the role its source page has.
 """
 
-import json
 import re
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import ca_fixtures
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
 from cabin.ca.certs import Certificate, CertStatus, list_certificates, status_counts
+from cabin.ca.service import CACertificate
+from cabin.ca.x509 import create_root
 from cabin.config import Config
+from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
 
@@ -57,12 +64,14 @@ def _superadmin(client: TestClient) -> None:
     )
 
 
-def _create_ca(client: TestClient, cfg: Config, intermediate_years: int = 10) -> None:
+def _create_ca(
+    client: TestClient, cfg: Config, name: str = "cabin", intermediate_years: int = 10
+) -> None:
     assert (
         client.post(
             "/ca/create",
             data={
-                "name": "cabin",
+                "name": name,
                 "key_type": "ecdsa-p256",
                 "root_years": 20,
                 "intermediate_years": intermediate_years,
@@ -71,6 +80,95 @@ def _create_ca(client: TestClient, cfg: Config, intermediate_years: int = 10) ->
         ).status_code
         == 303
     )
+
+
+def _key_pem_bytes(key: object) -> bytes:
+    return key.private_bytes(  # type: ignore[attr-defined]
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+
+
+def _cert_pem_str(cert: object) -> str:
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")  # type: ignore[attr-defined]
+
+
+def _direct_issuer(
+    db: Session, secrets: SecretStore, name: str, *, status: str, delta: timedelta
+) -> CACertificate:
+    """A root + intermediate inserted directly, with the intermediate's
+    ``not_after`` set to ``delta`` from now (may be negative, i.e. already
+    expired) and ``status`` set explicitly. Local to this file: FR-14's
+    "retired only flagged once actually expired" rule needs expiry states
+    (already-expired, near-expiry-but-retired) that ca_fixtures does not
+    parametrize and create_root/create_intermediate can't express (they only
+    take whole years)."""
+    root_cert, root_key = create_root(f"{name} Root CA", "ecdsa-p256", years=20)
+    root_ski = root_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    key_usage = x509.KeyUsage(
+        digital_signature=False,
+        content_commitment=False,
+        key_encipherment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=True,
+        crl_sign=True,
+        encipher_only=False,
+        decipher_only=False,
+    )
+    intermediate_cert = (
+        x509.CertificateBuilder()
+        .subject_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"{name} Intermediate CA")])
+        )
+        .issuer_name(root_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        # Fixed, generous backdate so a negative delta (already expired)
+        .not_valid_before(now - timedelta(days=3))
+        .not_valid_after(now + delta)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(key_usage, critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(root_ski),
+            critical=False,
+        )
+        .sign(root_key, algorithm=hashes.SHA256())
+    )
+
+    root_row = CACertificate(
+        kind="root",
+        name=f"{name} Root CA",
+        status="active",
+        cert_pem=_cert_pem_str(root_cert),
+        key_sealed=secrets.seal(_key_pem_bytes(root_key)),
+    )
+    db.add(root_row)
+    db.flush()
+    intermediate_row = CACertificate(
+        kind="intermediate",
+        name=f"{name} Intermediate CA",
+        parent_id=root_row.id,
+        status=status,
+        cert_pem=_cert_pem_str(intermediate_cert),
+        key_sealed=secrets.seal(_key_pem_bytes(key)),
+    )
+    db.add(intermediate_row)
+    db.commit()
+    return intermediate_row
+
+
+def _window(html: str, marker: str, size: int = 400) -> str:
+    """The text following ``marker``'s first occurrence -- scopes an
+    assertion to the row that marker belongs to, instead of the whole page
+    (spec 0017: a dashboard warning must be attached to the *right* issuer,
+    not just present somewhere on the page)."""
+    idx = html.index(marker)
+    return html[idx : idx + size]
 
 
 def _insert(
@@ -82,29 +180,25 @@ def _insert(
     sans: int = 1,
 ) -> None:
     """A row straight into the table: the dashboard only reads columns, and
-    a real issuance per fixture would buy nothing but runtime."""
+    a real issuance per fixture would buy nothing but runtime. issuer_id
+    points at ca_fixtures' sole stub issuer when a test builds no real
+    hierarchy of its own (spec 0017 FR-1)."""
     db = _db(cfg)
     # X.509 validity is second-granular and so is every not_after cabin
     # stores; keeping microseconds here would make the fixture compare
     # differently to a real certificate at the exact 30-day boundary.
     now = datetime.now(UTC).replace(microsecond=0)
     try:
-        db.add(
-            Certificate(
-                serial_hex=f"beef{abs(hash(name)) % 10**12:012x}",
-                subject_cn=name,
-                sans_json=json.dumps([f"DNS:{name}"] * sans),
-                profile="server",
-                not_before=now.isoformat(),
-                not_after=(now + expires_in).isoformat(),
-                cert_pem="-----BEGIN CERTIFICATE-----\nstub\n-----END CERTIFICATE-----\n",
-                key_sealed=None,
-                created_at=now.replace(tzinfo=None),
-                revoked_at=(now.replace(tzinfo=None) if revoked else None),
-                revocation_reason=("superseded" if revoked else None),
-            )
+        ca_fixtures.insert_cert(
+            db,
+            issuer_id=ca_fixtures.sole_active_issuer(db),
+            cn=name,
+            sans=[f"DNS:{name}"] * sans,
+            serial=f"beef{abs(hash(name)) % 10**12:012x}",
+            created_at=now,
+            expires_in=expires_in,
+            revoked_at=(now if revoked else None),
         )
-        db.commit()
     finally:
         db.close()
 
@@ -238,6 +332,72 @@ def test_dashboard_ca_far_out_is_not_warned(client: TestClient, cfg: Config) -> 
     page = client.get("/").text
     # No CA warning; the only tags on a quiet dashboard are neutral ones.
     assert "tag-warn" not in page
+
+
+# --- spec 0017 FR-14: warnings are per issuer, not "the" CA ------------------
+
+
+def test_dashboard_warns_per_issuer(client: TestClient, cfg: Config) -> None:
+    """CA_WARN_DAYS applies per active issuer. The row belonging to the
+    issuer set up to be near expiry must carry the warning treatment, and
+    the row belonging to a healthy issuer must not -- a test that can't
+    distinguish the two issuers proves nothing."""
+    _superadmin(client)
+    _create_ca(client, cfg, name="warn", intermediate_years=1)
+    _create_ca(client, cfg, name="healthy", intermediate_years=10)
+
+    page = client.get("/").text
+    warn_window = _window(page, "warn Intermediate CA")
+    healthy_window = _window(page, "healthy Intermediate CA")
+
+    assert "tag-warn" in warn_window
+    assert "tag-warn" not in healthy_window
+
+
+def test_dashboard_retired_issuer_only_flagged_when_expired(
+    client: TestClient, cfg: Config
+) -> None:
+    """FR-14: a retired row within the warn window is not flagged -- its
+    remaining job is signing its CRL, and a year's notice on something
+    already stood down is noise. The same row once actually expired IS
+    flagged. Both halves, on two isolated rows so neither result depends on
+    the other."""
+    _superadmin(client)
+    _create_ca(client, cfg)  # an active hierarchy, so the dashboard renders
+    secrets = SecretStore.open(cfg.data_dir, None)
+    db = _db(cfg)
+    try:
+        _direct_issuer(db, secrets, "near-retired", status="retired", delta=timedelta(days=5))
+        _direct_issuer(db, secrets, "expired-retired", status="retired", delta=-timedelta(hours=1))
+    finally:
+        db.close()
+
+    page = client.get("/").text
+    near_window = _window(page, "near-retired Intermediate CA")
+    expired_window = _window(page, "expired-retired Intermediate CA")
+
+    assert "tag-warn" not in near_window
+    assert "tag-bad" not in near_window
+    assert "tag-bad" in expired_window
+
+
+def test_dashboard_lists_one_entry_per_ca_row(client: TestClient, cfg: Config) -> None:
+    """FR-14: the dashboard used to show the pair [intermediate, root] of
+    "the" hierarchy; now it must show one entry per ca_certificates row --
+    all four rows of two hierarchies, not just the first hierarchy's two."""
+    _superadmin(client)
+    _create_ca(client, cfg, name="alpha")
+    _create_ca(client, cfg, name="beta")
+
+    page = client.get("/").text
+    section = page.split("The CA itself")[1].split("Revocation")[0]
+    for name in (
+        "alpha Root CA",
+        "alpha Intermediate CA",
+        "beta Root CA",
+        "beta Intermediate CA",
+    ):
+        assert name in section, name
 
 
 # --- FR-5 / AC-5: revocation ---------------------------------------------------

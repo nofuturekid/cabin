@@ -1,0 +1,164 @@
+{% extends "layout.html" %}
+{% set nav_current = "ca" %}
+{% block title %}CA — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Certificate Authority</h1>
+    <p class="sub">Every hierarchy this cabin knows, grouped under its root.</p>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+{% macro constraints_block(row) %}{% if row.has_constraints %}<div class="constraints"><p class="help">Permitted:{% if row.permitted_dns or row.permitted_ip %} <span class="mono">{{ (row.permitted_dns + row.permitted_ip) | join(", ") }}</span>{% else %} <span class="mono">none set -- every name of a constrained form is permitted</span>{% endif %}</p>{% if row.excluded_dns or row.excluded_ip %}<p class="help">Excluded: <span class="mono">{{ (row.excluded_dns + row.excluded_ip) | join(", ") }}</span></p>{% endif %}</div>{% endif %}{% endmacro %}
+{% for group in groups %}
+{% set root = group.root %}
+<div class="section">
+<div><h2>{{ root.name }}</h2> <span class="tag">root</span> <span class="tag{% if root.status == "retired" %} tag-bad{% endif %}">{{ root.status }}</span> <span class="nowrap">until {{ root.not_valid_after }}</span></div>
+<p class="help">Serving: {% if group.chain.default_via_cross %}the long chain, via <b>{{ group.chain.default_name }}</b>{% else %}the short chain (this root, self-signed){% endif %}.{% if group.chain.alternates %} Also available: {% for alt in group.chain.alternates %}{% if alt.via_cross %}the long chain via <b>{{ alt.name }}</b>{% else %}the short chain{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.{% endif %}</p>
+<div>
+{% if root.can_renew or root.can_retire %}<form method="post"><input type=hidden name=csrf_token value="{{ csrf_token }}">{% if root.can_renew %}<input type=number name=years value=10 min=1 max=50><button formaction="/ca/{{ root.id }}/renew">Renew</button>{% endif %}{% if root.can_retire %}<button formaction="/ca/{{ root.id }}/retire" class=danger>Retire</button>{% endif %}</form>{% endif %}
+{% if root.can_create_intermediate %}<details><summary>Add intermediate</summary><form method=post action=/ca/{{ root.id }}/intermediate><input type=hidden name=csrf_token value="{{ csrf_token }}"><div class="field"><label for="int-name-{{ root.id }}">Name</label><input id="int-name-{{ root.id }}" name=name required></div><div class="field"><label for="int-key-type-{{ root.id }}">Key type</label><select id="int-key-type-{{ root.id }}" name=key_type><option value="ecdsa-p256" selected>ECDSA P-256</option><option value="ecdsa-p384">ECDSA P-384</option><option value="rsa-4096">RSA 4096</option><option value="ed25519">Ed25519</option></select></div><div class="field"><label for="int-years-{{ root.id }}">Validity (years)</label><input id="int-years-{{ root.id }}" type=number name=years min=1 max=50 value=10 required></div><div class="field"><label for="int-permitted-{{ root.id }}">Permitted names</label><textarea id="int-permitted-{{ root.id }}" name=permitted_names rows=4 placeholder="example.com&#10;10.0.0.0/8"></textarea><span class="hint">One DNS suffix or IP network per line. Empty means every name of that form is permitted. Fixed once the intermediate is created.</span></div><div class="field"><label for="int-excluded-{{ root.id }}">Excluded names</label><textarea id="int-excluded-{{ root.id }}" name=excluded_names rows=4 placeholder="secret.example.com"></textarea><span class="hint">One DNS suffix or IP network per line. Refused even if covered by a permitted entry above.</span></div><div class="actions"><button type=submit class=primary>Create intermediate</button></div></form></details>{% endif %}
+{% if group.cross_sign_candidates %}<details><summary>Cross-sign with another root</summary><form method=post action=/ca/{{ root.id }}/cross-sign><input type=hidden name=csrf_token value="{{ csrf_token }}"><div class="field"><label for="xs-signer-{{ root.id }}">Signing root</label><select id="xs-signer-{{ root.id }}" name=signing_root_id required>{% for c in group.cross_sign_candidates %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select></div><div class="field"><label for="xs-years-{{ root.id }}">Validity (years)</label><input id="xs-years-{{ root.id }}" type=number name=years min=1 max=50 value=10 required><span class="hint">Clamped to the signing root's own expiry -- a cross certificate that outlived the root that signed it would look like a path and never be one.</span></div><p class="note">Creates a second certificate for this root, signed by the chosen one, so relying parties that trust only the older root can still build a path to this one. Two hierarchies side by side is the better transition; this is for devices whose trust store cannot be reached.</p><div class="actions"><button type=submit class=primary>Cross-sign</button></div></form></details>{% else %}<p class="note">No other root on this instance can sign this one -- cross-signing needs a different root with a stored key and a path_length of at least 2. Widen path_length the next time a root is created, or run two hierarchies side by side instead.</p>{% endif %}
+<p><a href="/ca/{{ root.id }}.pem">root.pem</a> <span class="help mono">{{ root.subject }} · {{ root.fingerprint }}</span></p>
+{{ constraints_block(root) }}
+
+{% for i in group.intermediates %}
+<div class="ca-row">
+<p><b>{{ i.name }}</b> <span class="tag">intermediate</span> <span class="tag{% if i.status == "retired" %} tag-bad{% endif %}">{{ i.status }}</span> <span class="nowrap">until {{ i.not_valid_after }}</span></p>
+{% if i.can_renew or i.can_retire %}<form method="post" class="inline-form"><input type=hidden name=csrf_token value="{{ csrf_token }}">{% if i.can_renew %}<input type=number name=years value=10 min=1 max=50 size=2><button formaction="/ca/{{ i.id }}/renew">Renew</button>{% endif %}{% if i.can_retire %}<button formaction="/ca/{{ i.id }}/retire" class=danger>Retire</button>{% endif %}</form>{% endif %}
+<p><a href="/ca/{{ i.id }}.pem">cert.pem</a> <a href="/ca/{{ i.id }}/chain.pem">chain.pem</a> <span class="help mono">{{ i.subject }} · {{ i.fingerprint }}</span></p>
+{% if i.crl_url %}
+<p class="help mono">CRL: <a href="{{ i.crl_url }}">{{ i.crl_url }}</a><br>AIA: <a href="{{ i.ca_url }}">{{ i.ca_url }}</a></p>
+{% else %}
+<p class="note">No base URL is set, so this issuer publishes no CRL distribution point or CA issuer URL. Set one under <a href="/settings">Settings</a>.</p>
+{% endif %}
+{% if i.acme_directory_url %}
+<p class="help mono">ACME: <a href="{{ i.acme_directory_url }}">{{ i.acme_directory_url }}</a></p>
+{% endif %}
+{{ constraints_block(i) }}
+</div>
+{% endfor %}
+
+{% for x in group.cross_certificates %}
+<div class="ca-row">
+<p><b>{{ x.name }}</b> <span class="tag">cross</span> <span class="tag{% if x.status == "retired" %} tag-bad{% endif %}">{{ x.status }}</span> <span class="nowrap">until {{ x.not_valid_after }}</span></p>
+<p class="help">Signed by <b>{{ x.signed_by }}</b>, in place of {{ root.name }}'s own signature.{% if x.status == "active" %}{% if x.served == "default" %} <span class="tag tag-valid">serving -- default chain</span>{% elif x.served == "alternate" %} <span class="tag">serving -- alternate chain</span>{% else %} <span class="tag tag-warn">not served</span> -- outside its validity window ({{ x.not_valid_before }} to {{ x.not_valid_after }}), dropped automatically, no action needed to fall back to the short chain{% endif %}{% endif %}</p>
+{% if x.can_renew or x.can_retire %}<form method="post" class="inline-form"><input type=hidden name=csrf_token value="{{ csrf_token }}">{% if x.can_renew %}<input type=number name=years value=10 min=1 max=50 size=2><button formaction="/ca/{{ x.id }}/renew">Renew</button>{% endif %}{% if x.can_retire %}<button formaction="/ca/{{ x.id }}/retire" class=danger>Retire</button>{% endif %}</form>{% endif %}
+{% if x.can_retire %}<p class="note">Retiring takes this path out of every chain cabin serves; it is not revocation. cabin publishes no CRL for a root, so anyone who already has this certificate can keep presenting it -- only whoever signed it, {{ x.signed_by }}, could truly revoke it.</p>{% endif %}
+<p><a href="/ca/{{ x.id }}.pem">cert.pem</a> <span class="help mono">{{ x.subject }} · {{ x.fingerprint }}</span></p>
+</div>
+{% endfor %}
+</div>
+</div>
+{% endfor %}
+
+<div class="section">
+  <div>
+    <h2>Create a new CA</h2>
+    <p class="help">A further hierarchy, side by side with what is already here.</p>
+  </div>
+  <div>
+    <form method="post" action="/ca/create">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="name">CA name</label>
+        <input id="name" type="text" name="name" placeholder="cabin" required />
+      </div>
+      <div class="field">
+        <label for="key_type">Key type</label>
+        <select id="key_type" name="key_type">
+          <option value="ecdsa-p256" selected>ECDSA P-256</option>
+          <option value="ecdsa-p384">ECDSA P-384</option>
+          <option value="rsa-4096">RSA 4096</option>
+          <option value="ed25519">Ed25519</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="root_years">Root validity (years)</label>
+        <input id="root_years" type="number" name="root_years" min="1" max="50" value="20" required />
+      </div>
+      <div class="field">
+        <label for="intermediate_years">Intermediate validity (years)</label>
+        <input id="intermediate_years" type="number" name="intermediate_years" min="1" max="50" value="10" required />
+      </div>
+      <div class="field">
+        <label for="path_length">Path length</label>
+        <input id="path_length" type="number" name="path_length" min="1" max="4" value="1" required />
+        <span class="hint">How many further intermediates may sign under the root. Cannot be changed later. A root that may ever need to cross-sign an older one needs at least 2 -- planned one root generation ahead, since this cannot be widened afterwards.</span>
+      </div>
+      <div class="field">
+        <label for="permitted_names">Permitted names</label>
+        <textarea id="permitted_names" name="permitted_names" rows="4" placeholder="example.com&#10;10.0.0.0/8"></textarea>
+        <span class="hint">One DNS suffix or IP network per line. Empty means every name of that form is permitted. Fixed once the intermediate is created.</span>
+      </div>
+      <div class="field">
+        <label for="excluded_names">Excluded names</label>
+        <textarea id="excluded_names" name="excluded_names" rows="4" placeholder="secret.example.com"></textarea>
+        <span class="hint">One DNS suffix or IP network per line. Refused even if covered by a permitted entry above.</span>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create CA</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Import an existing CA</h2>
+    <p class="help">
+      Import a signing CA certificate and private key (optionally
+      passphrase-protected), plus its parent/root certificate.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/ca/import">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="cert_pem">Signing CA certificate (PEM)</label>
+        <textarea id="cert_pem" name="cert_pem" rows="8" required></textarea>
+      </div>
+      <div class="field">
+        <label for="key_pem">Signing CA private key (PEM)</label>
+        <textarea id="key_pem" name="key_pem" rows="8" required></textarea>
+      </div>
+      <div class="field">
+        <label for="key_passphrase">Private key passphrase (if encrypted)</label>
+        <input id="key_passphrase" type="password" name="key_passphrase" />
+      </div>
+      <div class="field">
+        <label for="chain_pem">Parent/root certificate (PEM)</label>
+        <textarea id="chain_pem" name="chain_pem" rows="8" required></textarea>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Import CA</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Import a cross certificate</h2>
+    <p class="help">
+      A cross certificate produced elsewhere, for a root already on this
+      instance -- no key, no name. cabin checks that it really is another
+      certificate for that root, the same subject and the same public key,
+      and refuses it otherwise: a mistyped paste must not staple a
+      stranger's CA into the chain cabin serves to every client.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/ca/cross-import">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="cross_pem">Cross certificate (PEM)</label>
+        <textarea id="cross_pem" name="cross_pem" rows="8" required></textarea>
+      </div>
+      <div class="field">
+        <label for="issuer_pem">Signing root certificate (PEM)</label>
+        <textarea id="issuer_pem" name="issuer_pem" rows="8" required></textarea>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Import cross certificate</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

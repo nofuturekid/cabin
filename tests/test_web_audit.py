@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -21,6 +22,7 @@ from cabin import audit
 from cabin.api_tokens import create_token
 from cabin.app import create_app
 from cabin.audit import AuditAction, AuditEvent
+from cabin.ca import service as ca_service
 from cabin.ca.x509 import create_intermediate, create_root
 from cabin.config import Config
 from cabin.sessions import get_session
@@ -158,6 +160,20 @@ def _api_token(cfg: Config, role: Role = Role.admin) -> str:
         db.close()
 
 
+def _granted_api_token(cfg: Config, role: Role = Role.admin) -> str:
+    """Like :func:`_api_token`, but also granted the instance's sole active
+    issuer -- spec 0018 requires an explicit grant before a token may issue
+    or revoke, and this file's audit assertions are about the event, not
+    about that permission check."""
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, f"{role.value}-token", role)
+        grant_fixtures.grant_token(db, token, ca_service.active_issuers(db)[0].id)
+        return secret
+    finally:
+        db.close()
+
+
 def _auth(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
 
@@ -266,7 +282,9 @@ def test_ca_create_import_recorded(client: TestClient, cfg: Config) -> None:
 
     created = _one(cfg, AuditAction.ca_created)
     assert created.actor_label == "alice"
-    assert created.target_type == "ca"
+    # spec 0017 FR-15: target_type="ca" is replaced by "ca_certificate" --
+    # one table, one target type, shared with cert issuance's "certificate".
+    assert created.target_type == "ca_certificate"
     assert created.detail is not None
     assert created.detail["name"] == "Acme"
     assert created.detail["key_type"] == "ecdsa-p256"
@@ -298,10 +316,92 @@ def test_ca_import_recorded(client: TestClient, cfg: Config) -> None:
 
     imported = _one(cfg, AuditAction.ca_imported)
     assert "Import Intermediate CA" in imported.summary
+    assert imported.target_type == "ca_certificate"
     assert imported.detail is not None
     # FR-3: the imported private key must not survive anywhere in the log.
     blob = imported.summary + (imported.detail_json or "")
     assert "PRIVATE KEY" not in blob
+
+
+def test_ca_created_and_imported_use_the_ca_certificate_target_type(
+    client: TestClient, cfg: Config
+) -> None:
+    """FR-15 replaces target_type="ca" with "ca_certificate" at both
+    web/ca_ui.py:135 (create) and :187 (import) -- checked together, and
+    checked that the old label is gone entirely rather than merely unused by
+    these two particular events."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, name="created-target")
+
+    root_cert, root_key = create_root("Import Target Root CA", "ecdsa-p256")
+    intermediate_cert, intermediate_key = create_intermediate(
+        root_cert, root_key, "Import Target Intermediate CA", "ecdsa-p256"
+    )
+    key_pem = intermediate_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    resp = client.post(
+        "/ca/import",
+        data={
+            "cert_pem": _pem_cert(intermediate_cert),
+            "key_pem": key_pem,
+            "chain_pem": _pem_cert(root_cert),
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+
+    created = _one(cfg, AuditAction.ca_created)
+    imported = _one(cfg, AuditAction.ca_imported)
+    assert created.target_type == "ca_certificate"
+    assert imported.target_type == "ca_certificate"
+    assert all(event.target_type != "ca" for event in _events(cfg))
+
+
+def test_audit_ca_renewed_and_retired(client: TestClient, cfg: Config) -> None:
+    """AC-14: ca_renewed/ca_retired carry target_type="ca_certificate" and
+    the row id, and are selectable in the audit filter -- which is generated
+    from AuditAction, so this is an assertion on the rendered options."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, name="rotate")
+    # a second active issuer, so retiring "rotate"'s intermediate does not
+    # trip AC-5's "the last active intermediate cannot be retired" refusal
+    _create_ca(client, cfg, name="spare")
+
+    dbsession = _db(cfg)
+    try:
+        rows = ca_service.list_cas(dbsession)
+        root = next(r for r in rows if r.name == "rotate Root CA")
+        intermediate = next(r for r in rows if r.name == "rotate Intermediate CA")
+        root_id, intermediate_id = root.id, intermediate.id
+    finally:
+        dbsession.close()
+
+    renewed = client.post(
+        f"/ca/{root_id}/renew",
+        data={"years": "25", "csrf_token": _csrf(client, cfg)},
+    )
+    assert renewed.status_code == 303
+
+    retired = client.post(
+        f"/ca/{intermediate_id}/retire",
+        data={"csrf_token": _csrf(client, cfg)},
+    )
+    assert retired.status_code == 303
+
+    renewed_event = _one(cfg, AuditAction.ca_renewed)
+    assert renewed_event.target_type == "ca_certificate"
+    assert renewed_event.target_id == str(root_id)
+
+    retired_event = _one(cfg, AuditAction.ca_retired)
+    assert retired_event.target_type == "ca_certificate"
+    assert retired_event.target_id == str(intermediate_id)
+
+    options = client.get("/audit").text
+    assert '<option value="ca_renewed"' in options
+    assert '<option value="ca_retired"' in options
 
 
 def test_settings_change_recorded(client: TestClient, cfg: Config) -> None:
@@ -432,7 +532,7 @@ def test_cert_revoked_recorded_ui_and_api(client: TestClient, cfg: Config) -> No
     )
     assert resp.status_code == 303
 
-    secret = _api_token(cfg)
+    secret = _granted_api_token(cfg)
     client.cookies.clear()
     for _ in range(2):
         resp = client.post(
@@ -460,7 +560,7 @@ def test_cert_revoked_recorded_ui_and_api(client: TestClient, cfg: Config) -> No
 def test_api_issue_and_sign_recorded_as_token_actor(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
     _create_ca(client, cfg)
-    secret = _api_token(cfg)
+    secret = _granted_api_token(cfg)
     client.cookies.clear()
 
     resp = client.post(
@@ -562,7 +662,11 @@ def test_failed_operations_are_not_recorded(client: TestClient, cfg: Config) -> 
         client.post("/certs/issue", data={"subject_cn": "x.lan", "csrf_token": "wrong"}).status_code
         == 403
     )
-    assert client.post("/ca/create", data={"name": "second", "csrf_token": csrf}).status_code == 409
+    # spec 0017 FR-2: CAExistsError is gone -- a second /ca/create now
+    # succeeds (and is covered by its own recorded-event test), so it is no
+    # longer an example of a failure here. A CA action against an id that
+    # does not exist still is one.
+    assert client.post("/ca/999999/retire", data={"csrf_token": csrf}).status_code == 404
 
     assert len(_events(cfg)) == before
 

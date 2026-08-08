@@ -52,6 +52,16 @@ def upgrade() -> None:
         ),
         sa.Column("bound_at", _TIMESTAMP, nullable=True),
         sa.Column("revoked_at", _TIMESTAMP, nullable=True),
+        # Spec 0019 FR-1/FR-7: which issuer this key authorizes registration
+        # against. Named for the column it references rather than
+        # "issuer_id", matching 0018's join tables (user_issuers,
+        # token_issuers) -- a key names a CA row, and only FR-8 decides
+        # whether that row is a usable issuer. NOT NULL, no server default
+        # and no ondelete, for the same reasons as acme_accounts.issuer_id
+        # in migration 0008.
+        sa.Column(
+            "ca_certificate_id", sa.Integer(), sa.ForeignKey("ca_certificates.id"), nullable=False
+        ),
     )
     # One account per key, enforced by the database rather than by the code
     # that races for it: two simultaneous registrations must not both bind.

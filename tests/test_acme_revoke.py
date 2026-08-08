@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from cabin.app import create_app
 from cabin.audit import AuditAction, AuditEvent
+from cabin.ca import crl as ca_crl
 from cabin.ca import service as ca_service
 from cabin.ca.certs import Certificate
 from cabin.ca.revocation import RevocationReason
@@ -42,17 +43,26 @@ def client(cfg: Config) -> Iterator[TestClient]:
         try:
             set_setting(db, BASE_URL, BASE)
             set_setting(db, ACME_ENABLED, TRUE)
-            ca_service.create_hierarchy(
-                db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
-            )
         finally:
             db.close()
         yield c
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    db = create_session_factory(cfg.db_url)()
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
 
 
 def issue(acme: Acme, cfg: Config, name: str = "nas.lan", key: AcmeKey | None = None) -> Flow:
@@ -74,10 +84,25 @@ def revoke(acme: Acme, flow: Flow, der: bytes, reason: object = None) -> Respons
     return acme.post(REVOKE_PATH, flow.key, payload, kid=flow.kid)
 
 
-def crl_serials(client: TestClient) -> set[int]:
-    response = client.get("/crl")
-    assert response.status_code == 200, response.text
-    crl = x509.load_der_x509_crl(response.content)
+def crl_serials(cfg: Config) -> set[int]:
+    """The serials on the CRL of whichever issuer signed the one certificate
+    these tests issue.
+
+    ``GET /crl`` is gone with no alias (spec 0017 AC-10); the replacement
+    route ``/crl/{issuer_id}`` lives in ``web/crl_ui.py``, which is Security's
+    file under the spec 0017 work split, so this goes through the service
+    layer (:mod:`cabin.ca.crl`, Backend's) instead of a second front door's
+    HTTP route.
+    """
+    issuer_id = stored(cfg).issuer_id
+    db = db_session(cfg)
+    try:
+        state = ca_crl.current_crl(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), issuer_id
+        )
+    finally:
+        db.close()
+    crl = x509.load_der_x509_crl(state.crl_der)
     return {entry.serial_number for entry in crl}
 
 
@@ -96,7 +121,7 @@ def test_revoke_by_account(acme: Acme, cfg: Config, client: TestClient) -> None:
     serial is on the CRL afterwards -- a revocation nobody can see is not one."""
     flow = issue(acme, cfg)
     der = leaf_der(flow)
-    assert int(stored(cfg).serial_hex, 16) not in crl_serials(client)
+    assert int(stored(cfg).serial_hex, 16) not in crl_serials(cfg)
 
     revoked = revoke(acme, flow, der, reason=1)
 
@@ -105,7 +130,7 @@ def test_revoke_by_account(acme: Acme, cfg: Config, client: TestClient) -> None:
     after = stored(cfg)
     assert after.revoked_at is not None
     assert after.revocation_reason == RevocationReason.key_compromise
-    assert int(after.serial_hex, 16) in crl_serials(client)
+    assert int(after.serial_hex, 16) in crl_serials(cfg)
 
 
 def test_revoke_by_certificate_key(acme: Acme, cfg: Config, client: TestClient) -> None:
@@ -120,7 +145,7 @@ def test_revoke_by_certificate_key(acme: Acme, cfg: Config, client: TestClient) 
 
     assert revoked.status_code == 200, revoked.text
     assert stored(cfg).revoked_at is not None
-    assert int(stored(cfg).serial_hex, 16) in crl_serials(client)
+    assert int(stored(cfg).serial_hex, 16) in crl_serials(cfg)
 
 
 def test_revoke_by_a_key_that_is_not_the_certificates(acme: Acme, cfg: Config) -> None:

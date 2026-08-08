@@ -26,8 +26,6 @@ from cabin.secrets import SecretStore
 from cabin.settings import ACME_ENABLED, ACME_REQUIRE_EAB, BASE_URL, TRUE, set_setting
 from cabin.store import create_session_factory
 
-NEW_ACCOUNT_URL = f"{BASE}/acme/new-account"
-
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
@@ -43,26 +41,38 @@ def client(cfg: Config) -> Iterator[TestClient]:
             set_setting(db, BASE_URL, BASE)
             set_setting(db, ACME_ENABLED, TRUE)
             set_setting(db, ACME_REQUIRE_EAB, TRUE)
-            ca_service.create_hierarchy(
-                db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
-            )
         finally:
             db.close()
         yield c
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    db = create_session_factory(cfg.db_url)()
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
 
 
-def new_eab_key(cfg: Config, label: str = "nas.lan") -> tuple[str, bytes]:
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
+
+
+def new_eab_key(cfg: Config, issuer_id: int, label: str = "nas.lan") -> tuple[str, bytes]:
     """One operator-issued credential: its key id and the HMAC key bytes the
     client is given (base64url on screen, raw here)."""
     db = db_session(cfg)
     try:
         row, secret = eab.create_key(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), label=label
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            label=label,
+            ca_certificate_id=issuer_id,
         )
         return row.id, base64.urlsafe_b64decode(secret + "=" * (-len(secret) % 4))
     finally:
@@ -76,13 +86,13 @@ def register(
     fields: dict[str, Any] = {
         "kid": key_id,
         "mac_key": mac_key,
-        "url": NEW_ACCOUNT_URL,
+        "url": acme.url(acme.new_account_path),
         "jwk": account.jwk,
         **overrides,
     }
     binding = external_account_binding(**fields)
     payload = {"termsOfServiceAgreed": True, "externalAccountBinding": binding}
-    return account, acme.post("/acme/new-account", account, payload)
+    return account, acme.post(acme.new_account_path, account, payload)
 
 
 def eab_row(cfg: Config, key_id: str) -> AcmeEabKey:
@@ -109,7 +119,7 @@ def test_eab_required_rejects_plain_registration(acme: Acme, cfg: Config) -> Non
     and the directory says so up front, so a client need not guess."""
     assert acme.directory()["meta"]["externalAccountRequired"] is True
 
-    refused = acme.post("/acme/new-account", rsa_key(), {"termsOfServiceAgreed": True})
+    refused = acme.post(acme.new_account_path, rsa_key(), {"termsOfServiceAgreed": True})
 
     assert_problem(refused, "externalAccountRequired", 403)
     assert account_count(cfg) == 0
@@ -117,7 +127,7 @@ def test_eab_required_rejects_plain_registration(acme: Acme, cfg: Config) -> Non
 
 def test_eab_valid_binds_key(acme: Acme, cfg: Config) -> None:
     """AC-6: a correct binding registers the account and marks the key used."""
-    key_id, mac_key = new_eab_key(cfg)
+    key_id, mac_key = new_eab_key(cfg, acme.issuer_id)
 
     account, registered = register(acme, key_id, mac_key)
 
@@ -127,7 +137,7 @@ def test_eab_valid_binds_key(acme: Acme, cfg: Config) -> None:
     assert row.bound_account_id == account_id
     assert row.bound_at is not None
     # ...and the account keeps working without presenting the binding again
-    again = acme.post("/acme/new-account", account, {"termsOfServiceAgreed": True})
+    again = acme.post(acme.new_account_path, account, {"termsOfServiceAgreed": True})
     assert again.status_code == 200, again.text
 
     # ...and re-registering is not a second account, so not a second event
@@ -144,7 +154,7 @@ def test_eab_valid_binds_key(acme: Acme, cfg: Config) -> None:
 def test_eab_key_single_use(acme: Acme, cfg: Config) -> None:
     """AC-6: a key that has bound an account cannot bind a second one -- the
     operator handed out one credential, not a reusable one."""
-    key_id, mac_key = new_eab_key(cfg)
+    key_id, mac_key = new_eab_key(cfg, acme.issuer_id)
     _, first = register(acme, key_id, mac_key)
     assert first.status_code == 201, first.text
     bound_to = eab_row(cfg, key_id).bound_account_id
@@ -170,7 +180,7 @@ def test_a_second_key_for_one_account_is_refused_rather_than_crashing(
     from the existing account long before the binding is looked at, so the
     losing half of the race cannot be timed from outside.
     """
-    key_id, mac_key = new_eab_key(cfg)
+    key_id, mac_key = new_eab_key(cfg, acme.issuer_id)
     _, registered = register(acme, key_id, mac_key)
     assert registered.status_code == 201, registered.text
 
@@ -179,7 +189,10 @@ def test_a_second_key_for_one_account_is_refused_rather_than_crashing(
         account = db.scalars(select(AcmeAccount)).one()
         account_id = account.id
         second, _secret = eab.create_key(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), label="second"
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            label="second",
+            ca_certificate_id=account.issuer_id,
         )
         second_id = second.id
         with pytest.raises(AcmeError) as refused:
@@ -196,7 +209,7 @@ def test_a_second_key_for_one_account_is_refused_rather_than_crashing(
 
 def test_eab_revoked_key_rejected(acme: Acme, cfg: Config) -> None:
     """AC-6: revoking a key in the UI takes it out of service immediately."""
-    key_id, mac_key = new_eab_key(cfg)
+    key_id, mac_key = new_eab_key(cfg, acme.issuer_id)
     db = db_session(cfg)
     try:
         eab.revoke_key(db, eab.get_key(db, key_id))
@@ -213,7 +226,7 @@ def test_eab_tampered_signature_rejected(acme: Acme, cfg: Config) -> None:
     """AC-6: every part of the binding is checked -- the MAC, the key id, the
     URL it was made for, the algorithm, and that it really carries *this*
     account's key."""
-    key_id, mac_key = new_eab_key(cfg)
+    key_id, mac_key = new_eab_key(cfg, acme.issuer_id)
 
     _, wrong_mac = register(acme, key_id, b"not the hmac key at all")
     assert_problem(wrong_mac, "unauthorized", 403)
@@ -234,7 +247,7 @@ def test_eab_tampered_signature_rejected(acme: Acme, cfg: Config) -> None:
     # a flipped signature byte
     account = rsa_key()
     binding = external_account_binding(
-        kid=key_id, mac_key=mac_key, url=NEW_ACCOUNT_URL, jwk=account.jwk
+        kid=key_id, mac_key=mac_key, url=acme.url(acme.new_account_path), jwk=account.jwk
     )
     # Flipped in the decoded MAC, not in its base64url: the last character of
     # a 43-character encoding carries padding bits, so changing *it* can
@@ -243,7 +256,7 @@ def test_eab_tampered_signature_rejected(acme: Acme, cfg: Config) -> None:
     mac[0] ^= 0x01
     binding["signature"] = base64.urlsafe_b64encode(bytes(mac)).rstrip(b"=").decode("ascii")
     flipped = acme.post(
-        "/acme/new-account",
+        acme.new_account_path,
         account,
         {"termsOfServiceAgreed": True, "externalAccountBinding": binding},
     )
@@ -256,13 +269,13 @@ def test_eab_tampered_signature_rejected(acme: Acme, cfg: Config) -> None:
 def test_eab_outer_jws_still_refuses_hmac(acme: Acme, cfg: Config) -> None:
     """The binding is the *only* place an HMAC is accepted: the outer JWS
     allowlist must not have been widened to let one in."""
-    key_id, mac_key = new_eab_key(cfg)
+    key_id, mac_key = new_eab_key(cfg, acme.issuer_id)
     account = rsa_key()
     binding = external_account_binding(
-        kid=key_id, mac_key=mac_key, url=NEW_ACCOUNT_URL, jwk=account.jwk
+        kid=key_id, mac_key=mac_key, url=acme.url(acme.new_account_path), jwk=account.jwk
     )
     refused = acme.post(
-        "/acme/new-account",
+        acme.new_account_path,
         account,
         {"termsOfServiceAgreed": True, "externalAccountBinding": binding},
         alg="HS256",
@@ -280,10 +293,10 @@ def test_eab_is_optional_until_it_is_required(acme: Acme, cfg: Config) -> None:
         db.close()
 
     assert acme.directory()["meta"]["externalAccountRequired"] is False
-    plain = acme.post("/acme/new-account", rsa_key(), {"termsOfServiceAgreed": True})
+    plain = acme.post(acme.new_account_path, rsa_key(), {"termsOfServiceAgreed": True})
     assert plain.status_code == 201, plain.text
 
     # ...but a binding that *is* presented is still verified
-    key_id, _ = new_eab_key(cfg)
+    key_id, _ = new_eab_key(cfg, acme.issuer_id)
     _, refused = register(acme, key_id, b"wrong key")
     assert_problem(refused, "unauthorized", 403)

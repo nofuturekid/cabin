@@ -34,7 +34,13 @@ from cabin.secrets import SecretStore
 from cabin.settings import ACME_ENABLED, ACME_REQUIRE_EAB, BASE_URL, TRUE, set_setting
 from cabin.store import create_session_factory
 
-DIRECTORY_URL = "http://testserver/acme/directory"
+
+def directory_url(issuer_id: int) -> str:
+    """Spec 0019 FR-2: the single string the certbot library is handed by
+    :func:`_connect` no longer names a global directory -- it names one
+    issuer's."""
+    return f"http://testserver/acme/ca/{issuer_id}/directory"
+
 
 #: Headers the transport below owns; letting the client's copies through
 #: would have httpx describe a body it is not sending.
@@ -85,12 +91,21 @@ def client(cfg: Config) -> Iterator[TestClient]:
         try:
             set_setting(db, BASE_URL, "http://testserver")
             set_setting(db, ACME_ENABLED, TRUE)
-            ca_service.create_hierarchy(
-                db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
-            )
         finally:
             db.close()
         yield c
+
+
+@pytest.fixture
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    db = create_session_factory(cfg.db_url)()
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
 
 
 def _csr(*names: str) -> bytes:
@@ -107,19 +122,19 @@ def _csr(*names: str) -> bytes:
     return csr.public_bytes(serialization.Encoding.PEM)
 
 
-def _connect(client: TestClient) -> acme_client.ClientV2:
+def _connect(client: TestClient, issuer_id: int) -> acme_client.ClientV2:
     account_key = jose.JWKRSA(key=rsa.generate_private_key(public_exponent=65537, key_size=2048))
     net = acme_client.ClientNetwork(key=account_key, user_agent="cabin-interop-test")
     net.session.mount("http://", AsgiAdapter(client))
-    directory = acme_client.ClientV2.get_directory(DIRECTORY_URL, net)
+    directory = acme_client.ClientV2.get_directory(directory_url(issuer_id), net)
     return acme_client.ClientV2(directory, net)
 
 
-def test_real_client_account_and_order(client: TestClient) -> None:
+def test_real_client_account_and_order(client: TestClient, issuer_id: int) -> None:
     """AC-7: account registration and order placement, driven end to end by
     the certbot ACME library -- nonces, JWS, kid handling, POST-as-GET and
     every URL in between are the client's reading of them, not ours."""
-    acme = _connect(client)
+    acme = _connect(client, issuer_id)
 
     assert acme.directory["newNonce"] == "http://testserver/acme/new-nonce"
 
@@ -181,11 +196,11 @@ def test_real_client_account_and_order(client: TestClient) -> None:
     }
 
 
-def test_real_client_sees_problem_documents(client: TestClient) -> None:
+def test_real_client_sees_problem_documents(client: TestClient, issuer_id: int) -> None:
     """A client only recovers from an error it can parse: the problem
     document has to deserialize into ``messages.Error``, with a fresh nonce
     alongside it so the next request is not stuck."""
-    acme = _connect(client)
+    acme = _connect(client, issuer_id)
     acme.new_account(messages.NewRegistration.from_data(terms_of_service_agreed=True))
 
     with pytest.raises(messages.Error) as caught:
@@ -197,7 +212,9 @@ def test_real_client_sees_problem_documents(client: TestClient) -> None:
     assert order.body.status == messages.STATUS_PENDING
 
 
-def test_client_completes_http01(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_client_completes_http01(
+    client: TestClient, issuer_id: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Spec 0011 AC-8: trigger, validate, poll -- driven end to end by the
     certbot library against a real local web server.
 
@@ -205,7 +222,7 @@ def test_client_completes_http01(client: TestClient, monkeypatch: pytest.MonkeyP
     serves it at its own idea of the well-known path; cabin has to agree with
     both, and with the ``up`` Link the client insists on when answering.
     """
-    acme = _connect(client)
+    acme = _connect(client, issuer_id)
     acme.new_account(messages.NewRegistration.from_data(terms_of_service_agreed=True))
     order = acme.new_order(_csr("nas.lan"))
     authzr = order.authorizations[0]
@@ -254,15 +271,15 @@ def _answer_http01(
 def _root_certificate(cfg: Config) -> x509.Certificate:
     db = create_session_factory(cfg.db_url)()
     try:
-        hierarchy = ca_service.get_ca(db)
-        assert hierarchy is not None
-        return x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii"))
+        intermediate = ca_service.active_issuers(db)[0]
+        root = ca_service.chain_for(db, intermediate.id)[-1]  # nearest first, root last
+        return x509.load_pem_x509_certificate(root.cert_pem.encode("ascii"))
     finally:
         db.close()
 
 
 def test_client_full_flow_to_certificate(
-    client: TestClient, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, issuer_id: int, cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Spec 0012 AC-1: account, order, http-01, finalize, download -- every
     step driven by the certbot ACME library, and the chain it gets back has
@@ -272,7 +289,7 @@ def test_client_full_flow_to_certificate(
     carries no subject at all: the names live in the SAN extension, exactly
     as RFC 8555 7.4 allows.
     """
-    acme = _connect(client)
+    acme = _connect(client, issuer_id)
     acme.new_account(messages.NewRegistration.from_data(terms_of_service_agreed=True))
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     csr_pem = crypto_util.make_csr(
@@ -306,7 +323,7 @@ def test_client_full_flow_to_certificate(
 
 
 def test_client_full_flow_with_eab(
-    client: TestClient, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, issuer_id: int, cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Spec 0012 AC-8: with external account binding required, the real
     client registers when it is given the key id and HMAC key -- and cannot
@@ -315,13 +332,16 @@ def test_client_full_flow_with_eab(
     try:
         set_setting(db, ACME_REQUIRE_EAB, TRUE)
         row, secret = eab.create_key(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), label="certbot"
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            label="certbot",
+            ca_certificate_id=issuer_id,
         )
         key_id = row.id
     finally:
         db.close()
 
-    acme = _connect(client)
+    acme = _connect(client, issuer_id)
     assert acme.directory.meta.external_account_required is True
 
     with pytest.raises(messages.Error) as refused:

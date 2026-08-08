@@ -12,16 +12,19 @@ from datetime import UTC, datetime
 from cryptography import x509
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import audit, sessions, settings, users
+from cabin import audit, issuer_grants, sessions, settings, users
 from cabin.audit import Actor, ActorKind, AuditAction
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
+from cabin.ca.certs import Certificate
 from cabin.ca.service import CACertificate
+from cabin.tls import TlsMode
 from cabin.users import (
     InvalidCredentialsError,
     LastSuperadminError,
@@ -82,12 +85,61 @@ def _login_and_redirect(request: Request, db: Session, user: User, to: str) -> R
     return resp
 
 
-def _anon_context(error: str | None) -> dict[str, object]:
+def _tls_mode(request: Request) -> TlsMode | None:
+    """Spec 0022 FR-14 / Interface Contract R1: `app.state.tls` is `None`
+    when TLS is off, and its own `.mode` is `None` before the first
+    `ensure_current` has decided anything -- both collapse to "nothing to
+    show" for the pages that read this.
+    """
+    tls = request.app.state.tls
+    return tls.mode if tls is not None else None
+
+
+def _tls_banner(request: Request, db: Session) -> dict[str, object] | None:
+    """Spec 0022 FR-14: what the dashboard's TLS banner says, or None when
+    there is nothing to say (TLS off, or no material decided yet).
+
+    Self-signed and CA-issued must read differently -- a banner identical in
+    both states is worse than none. For CA-issued, the root to link is read
+    off the most recently issued ``source == "system"`` certificate (FR-6's
+    ``CertSource.system``) rather than assumed to be "the" CA, since an
+    instance can hold more than one hierarchy.
+    """
+    mode = _tls_mode(request)
+    if mode is None:
+        return None
+    if mode == TlsMode.self_signed:
+        return {"mode": mode.value, "root_cer_url": None}
+    system_cert = db.scalar(
+        select(Certificate).where(Certificate.source == "system").order_by(Certificate.id.desc())
+    )
+    root_cer_url = None
+    if system_cert is not None:
+        # Spec 0021 FR-8: deliberately `chains_for(...).self_signed`, NOT
+        # `chain_for`'s new default (`web/ca_ui.py`'s chain.pem route uses
+        # that default on purpose -- do not "fix" this to match it). Once a
+        # cross certificate exists, the default chain runs through it to an
+        # older root; inheriting that here would tell an operator to install
+        # the OLD root to keep trusting this instance, when the right answer
+        # is the root that will outlive the cross certificate. This banner's
+        # only job is "which root keeps this instance trusted", and that is
+        # always the self-signed one, whatever else is being served.
+        self_signed = ca_service.chains_for(db, system_cert.issuer_id).self_signed
+        root_cer_url = f"/ca/{self_signed.anchor_id}.cer"
+    return {"mode": mode.value, "root_cer_url": root_cer_url}
+
+
+def _anon_context(request: Request, error: str | None) -> dict[str, object]:
     """Context for pre-auth pages (setup/login): no user yet, but
     layout.html's ``{% if user %}`` still needs the key to exist now that
-    undefined variables are a hard error.
+    undefined variables are a hard error. ``tls_self_signed`` is spec 0022
+    FR-14's flag for setup.html's first-run warning note.
     """
-    return {"user": None, "error": error}
+    return {
+        "user": None,
+        "error": error,
+        "tls_self_signed": _tls_mode(request) == TlsMode.self_signed,
+    }
 
 
 # --- first-run setup -------------------------------------------------------
@@ -97,7 +149,7 @@ def _anon_context(error: str | None) -> dict[str, object]:
 def setup_form(request: Request, db: Session = Depends(get_db)) -> Response:
     if users.count_users(db) > 0:
         raise HTTPException(status_code=404)
-    return templates.TemplateResponse(request, "setup.html", _anon_context(None))
+    return templates.TemplateResponse(request, "setup.html", _anon_context(request, None))
 
 
 @router.post("/setup")
@@ -114,14 +166,14 @@ def setup_submit(
             user = users.create_user(db, username, password, Role.superadmin)
         except WeakPasswordError as exc:
             return templates.TemplateResponse(
-                request, "setup.html", _anon_context(str(exc)), status_code=400
+                request, "setup.html", _anon_context(request, str(exc)), status_code=400
             )
         except (UserExistsError, IntegrityError):
             db.rollback()
             return templates.TemplateResponse(
                 request,
                 "setup.html",
-                _anon_context("setup already completed by another request"),
+                _anon_context(request, "setup already completed by another request"),
                 status_code=400,
             )
     # Nobody is logged in yet, so the actor is cabin itself: an audit trail
@@ -145,7 +197,7 @@ def setup_submit(
 
 @router.get("/login")
 def login_form(request: Request, _: None = Depends(redirect_if_no_users)) -> Response:
-    return templates.TemplateResponse(request, "login.html", _anon_context(None))
+    return templates.TemplateResponse(request, "login.html", _anon_context(request, None))
 
 
 @router.post("/login")
@@ -174,7 +226,7 @@ def login_submit(
         return templates.TemplateResponse(
             request,
             "login.html",
-            _anon_context("invalid username or password"),
+            _anon_context(request, "invalid username or password"),
             status_code=401,
         )
     # Re-logging in while already holding a session for the SAME user
@@ -224,17 +276,30 @@ def _days_until(moment: datetime) -> int:
 
 
 def _ca_expiry(row: CACertificate, now: datetime) -> dict[str, object]:
-    """One CA certificate as the dashboard states it (spec 0016 FR-4)."""
+    """One CA certificate as the dashboard states it (spec 0016 FR-4; spec
+    0017 FR-14: per issuer, not "the" CA).
+
+    A retired row is flagged only once it has actually expired: its
+    remaining job is signing its CRL, and a year's notice on something
+    already stood down is noise -- so ``CA_WARN_DAYS`` only applies while
+    the row is still active.
+    """
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     not_after = cert.not_valid_after_utc
     days = (not_after - now).days
-    return {
-        "kind": row.kind,
-        "not_after": not_after.replace(microsecond=0).isoformat(),
-        "days": days,
+    if row.status == "retired":
+        tag = "tag-bad" if days <= 0 else ""
+    else:
         # Replacing a CA is not a five-minute job, so the warning comes a
         # year out rather than at the 30 days a leaf gets.
-        "tag": "tag-bad" if days <= 0 else ("tag-warn" if days <= CA_WARN_DAYS else ""),
+        tag = "tag-bad" if days <= 0 else ("tag-warn" if days <= CA_WARN_DAYS else "")
+    return {
+        "name": row.name,
+        "kind": row.kind,
+        "status": row.status,
+        "not_after": not_after.replace(microsecond=0).isoformat(),
+        "days": days,
+        "tag": tag,
     }
 
 
@@ -252,17 +317,42 @@ def dashboard(
     a tick (FR-8, the rule spec 0006 set for the inventory).
     """
     now = datetime.now(UTC)
-    hierarchy = ca_service.get_ca(db)
+    rows = ca_service.list_cas(db)
     context = base_context(request, user)
-    context["ca_configured"] = hierarchy is not None
-    if hierarchy is None:
+    context["ca_configured"] = bool(rows)
+    # Spec 0022 FR-14: which certificate cabin itself is serving right now,
+    # shown regardless of whether a CA hierarchy exists yet -- stage 1
+    # (self-signed) is exactly the state before one does.
+    context["tls_banner"] = _tls_banner(request, db)
+    if not rows:
         # Nothing to summarise before there is a CA (AC-8).
         return templates.TemplateResponse(request, "dashboard.html", context)
 
     expiring = certs_service.expiring_soon(db, now, limit=EXPIRING_SHOWN)
     counts = certs_service.status_counts(db, now)
-    crl_state = crl_service.stored_crl(db)
     events, _ = audit.list_events(db, page=1, per_page=RECENT_EVENTS)
+    # Spec 0017 FR-14: one CRL block per issuer, not "the" CRL -- every
+    # intermediate signs and serves its own.
+    crls = [
+        {
+            "issuer_name": intermediate.name,
+            "state": (
+                {
+                    "number": state.crl_number,
+                    "generated_at": state.generated_at.replace(
+                        tzinfo=UTC, microsecond=0
+                    ).isoformat(),
+                    "next_update": state.next_update.replace(microsecond=0).isoformat(),
+                    "stale": state.next_update <= now,
+                }
+                if (state := crl_service.stored_crl(db, intermediate.id)) is not None
+                else None
+            ),
+            "url": crl_service.distribution_url(db, intermediate.id),
+        }
+        for intermediate in rows
+        if intermediate.kind == "intermediate"
+    ]
     context.update(
         {
             "expiring": [
@@ -277,23 +367,10 @@ def dashboard(
             ],
             "expiring_more": counts["expiring"] > len(expiring),
             "counts": counts,
-            "ca_certs": [
-                _ca_expiry(hierarchy.intermediate, now),
-                _ca_expiry(hierarchy.root, now),
-            ],
-            "crl": (
-                {
-                    "number": crl_state.crl_number,
-                    "generated_at": crl_state.generated_at.replace(
-                        tzinfo=UTC, microsecond=0
-                    ).isoformat(),
-                    "next_update": crl_state.next_update.replace(microsecond=0).isoformat(),
-                    "stale": crl_state.next_update <= now,
-                }
-                if crl_state is not None
-                else None
-            ),
-            "crl_url": crl_service.distribution_url(db),
+            # Spec 0017 FR-14: one entry per ca_certificates row, not the
+            # pair [intermediate, root] of a single hierarchy.
+            "ca_certs": [_ca_expiry(row, now) for row in rows],
+            "crls": crls,
             "events": [
                 {
                     "occurred_at": event.occurred_at,
@@ -324,6 +401,33 @@ def dashboard(
 # --- user management (superadmin only for mutations) --------------------------
 
 
+def _user_issuers_view(
+    db: Session, row: User, active_ids: set[int], all_intermediates: dict[int, CACertificate]
+) -> dict[str, object]:
+    """Spec 0018 FR-11: one user's row on the grants column -- the ids for
+    the checkbox checked-state, the names for the read-only view, and any
+    grant on a since-retired intermediate kept separate so the edit form
+    (only active intermediates get a checkbox) can preserve it as a hidden
+    field instead of silently dropping it on the next save.
+    """
+    is_superadmin = Role(row.role) == Role.superadmin
+    granted_ids = (
+        [] if is_superadmin else issuer_grants.issuers_of(db, issuer_grants.user_principal(row))
+    )
+    return {
+        "is_superadmin": is_superadmin,
+        "granted_ids": granted_ids,
+        "granted_names": [
+            all_intermediates[gid].name for gid in granted_ids if gid in all_intermediates
+        ],
+        "retired_grants": [
+            {"id": gid, "name": all_intermediates[gid].name}
+            for gid in granted_ids
+            if gid not in active_ids and gid in all_intermediates
+        ],
+    }
+
+
 def _users_page(
     request: Request,
     db: Session,
@@ -331,13 +435,27 @@ def _users_page(
     error: str | None,
     status_code: int = 200,
 ) -> Response:
+    active_intermediates = ca_service.active_issuers(db)
+    active_ids = {row.id for row in active_intermediates}
+    all_intermediates = {row.id: row for row in ca_service.list_cas(db, kind="intermediate")}
+    rows = [
+        {
+            "id": row.id,
+            "username": row.username,
+            "role": row.role,
+            "created_at": row.created_at,
+            **_user_issuers_view(db, row, active_ids, all_intermediates),
+        }
+        for row in users.list_users(db)
+    ]
     context = base_context(request, user)
     context.update(
         {
-            "users": users.list_users(db),
+            "users": rows,
             "roles": list(Role),
             "error": error,
             "can_manage": Role(user.role) == Role.superadmin,
+            "active_intermediates": active_intermediates,
         }
     )
     return templates.TemplateResponse(request, "users.html", context, status_code=status_code)
@@ -458,6 +576,42 @@ def reset_password_route(
         detail={"username": target.username},
         ip=client_ip(request, db),
     )
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/issuers")
+def update_user_issuers_route(
+    user_id: int,
+    request: Request,
+    issuer_id: list[int] = Form([]),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """Spec 0018 FR-11: replace ``target``'s whole grant set. An empty post
+    (no ``issuer_id`` field at all) is how a grant is taken away entirely."""
+    try:
+        target = users.get_user(db, user_id)
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=404) from exc
+    try:
+        change = issuer_grants.set_issuers(db, issuer_grants.user_principal(target), issuer_id)
+    except ValueError as exc:
+        return _users_page(request, db, user, str(exc), status_code=400)
+    # Re-posting a set that is already in place changes nothing, so it is not
+    # an event -- the same no-op rule update_role_route already follows.
+    if change.changed:
+        audit.record(
+            db,
+            actor,
+            AuditAction.user_issuers_changed,
+            summary=f"changed issuer grants for {target.username!r}",
+            target_type="user",
+            target_id=target.id,
+            detail={"added": change.added, "removed": change.removed, "issuers": change.issuers},
+            ip=client_ip(request, db),
+        )
     return RedirectResponse("/users", status_code=303)
 
 

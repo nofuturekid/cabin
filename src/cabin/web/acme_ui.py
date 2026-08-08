@@ -18,6 +18,17 @@ Admin-only, like every page that exists to change something. The HMAC
 secret of a new key is rendered exactly once, into the response of the
 request that created it -- never stored in the clear, never redirected
 through a URL, never shown again (see :mod:`cabin.acme.eab`).
+
+**Spec 0019** gives an EAB key exactly one issuer (FR-1/FR-7) and makes
+minting one a granted operation (FR-8): the issuer select on the create form
+comes from this principal's own granted issuers, and the POST is refused --
+403, no row written -- for one it does not name. It also turns "the
+directory URL" into one row per intermediate (FR-13), because a directory
+belongs to one issuer and there is no longer a single instance-wide address
+to print. And it is where FR-12's boundary is stated in writing: with
+external account binding switched off, an issuer grant does not stop an
+ACME client from obtaining a certificate, and this page says so while the
+switch that would close it is right there to flip.
 """
 
 from datetime import datetime
@@ -29,8 +40,17 @@ from starlette.responses import Response
 
 from cabin import audit
 from cabin.acme import eab
-from cabin.acme.http import directory_url
+from cabin.acme import http as acme_http
 from cabin.audit import Actor, AuditAction
+from cabin.ca import service as ca_service
+from cabin.ca.service import IssuerRetiredError, UnknownIssuerError
+from cabin.issuer_grants import (
+    IssuerForbiddenError,
+    NoGrantedIssuerError,
+    Principal,
+    granted_issuers,
+    resolve_granted_issuer,
+)
 from cabin.settings import (
     ACME_ENABLED,
     ACME_REQUIRE_EAB,
@@ -46,6 +66,7 @@ from cabin.web.deps import (
     base_context,
     client_ip,
     current_actor,
+    current_principal,
     get_db,
     require_admin,
     verify_csrf,
@@ -58,15 +79,49 @@ PATH = "/acme/admin"
 router = APIRouter(prefix=PATH)
 
 _NO_BASE_URL = "set a base URL under Settings before enabling the ACME server"
+#: Spec 0019 FR-8: the two ways minting a key can be refused for a reason
+#: that is not "you may not do this" -- an unknown, non-intermediate or
+#: retired issuer, exactly like 0017's own issuance form (``certs_ui.py``).
+_ISSUER_ERRORS = (UnknownIssuerError, IssuerRetiredError)
+#: Spec 0019 FR-8: an authorization failure, not bad input -- 403, the
+#: status 0018 FR-14 fixed for exactly this shape of refusal.
+_GRANT_ERRORS = (IssuerForbiddenError, NoGrantedIssuerError)
+#: Spec 0019 FR-8: shown next to the create form when this principal holds
+#: no granted issuer at all -- the form still renders and the POST is still
+#: refused server-side (AC-6); this is what tells the operator why before
+#: they try.
+_NO_GRANTED_ISSUER = "no issuer is granted to you: ask a superadmin to grant one under Users"
 #: Placeholders in the onboarding snippets, so an operator can see the shape
 #: of the command before they have created a key.
 _KID_PLACEHOLDER = "<key id>"
 _HMAC_PLACEHOLDER = "<hmac key>"
+_DIRECTORY_PLACEHOLDER = "<the new key's own directory URL>"
 
 
-def _key_row(row: eab.AcmeEabKey) -> dict[str, object]:
+def _issuer_rows(db: Session) -> list[dict[str, object]]:
+    """Spec 0019 FR-13: one row per intermediate, active ones first --
+    ``list_cas`` already orders by id, and a stable sort on "not active"
+    keeps that order inside each of the two groups. Each row's URL is built
+    through :func:`cabin.acme.http.directory_url`, the same function the
+    ACME server itself resolves a directory with, never reassembled here.
+    """
+    intermediates = ca_service.list_cas(db, kind="intermediate")
+    ordered = sorted(intermediates, key=lambda row: row.status != "active")
+    return [
+        {
+            "id": row.id,
+            "name": row.name,
+            "status": row.status,
+            "directory_url": acme_http.directory_url(db, row.id),
+        }
+        for row in ordered
+    ]
+
+
+def _key_row(row: eab.AcmeEabKey, issuer_names: dict[int, str]) -> dict[str, object]:
     """One table line, fully computed here: the template renders values, it
-    does not decide them."""
+    does not decide them. ``issuer_names`` is looked up once per page render
+    (spec 0019 FR-13's Issuer column) rather than once per row."""
     return {
         "id": row.id,
         "label": row.label,
@@ -77,6 +132,8 @@ def _key_row(row: eab.AcmeEabKey) -> dict[str, object]:
             "revoked" if row.revoked_at else ("bound" if row.bound_account_id else "unused")
         ),
         "can_revoke": row.revoked_at is None,
+        "issuer_id": row.ca_certificate_id,
+        "issuer_name": issuer_names.get(row.ca_certificate_id, f"#{row.ca_certificate_id}"),
     }
 
 
@@ -91,15 +148,19 @@ def _page(
     request: Request,
     db: Session,
     user: User,
+    principal: Principal,
     *,
     acme_enabled: bool | None = None,
     require_eab: bool | None = None,
     error: str | None = None,
     secret: str | None = None,
     secret_key_id: str | None = None,
+    secret_issuer_id: int | None = None,
     status_code: int = 200,
 ) -> Response:
-    directory = directory_url(db)
+    keys = eab.list_keys(db)
+    issuer_names = {row.id: row.name for row in ca_service.list_cas(db, kind="intermediate")}
+    issuer_options = granted_issuers(db, principal)
     context = base_context(request, user)
     context.update(
         {
@@ -109,16 +170,24 @@ def _page(
             "acme_require_eab": (
                 get_flag(db, ACME_REQUIRE_EAB) if require_eab is None else require_eab
             ),
-            "acme_directory_url": directory,
+            "issuers": _issuer_rows(db),
             "base_url": get_setting(db, BASE_URL) or "",
-            "keys": [_key_row(row) for row in eab.list_keys(db)],
+            "keys": [_key_row(row, issuer_names) for row in keys],
+            "issuer_options": issuer_options,
+            "no_granted_issuer": _NO_GRANTED_ISSUER if not issuer_options else None,
             "secret": secret,
             "secret_key_id": secret_key_id,
             "error": error,
             # Shown with placeholders until a key exists, and with the real
-            # key id right after one is created -- an operator pasting the
-            # command then has to substitute one thing, not two.
-            "snippet_directory": directory or "<base URL>/acme/directory",
+            # key's own values right after one is created (spec 0019 FR-13):
+            # an operator pasting the command then has to substitute
+            # nothing, and cannot pair the right key with the wrong CA by
+            # copying the wrong line.
+            "snippet_directory": (
+                acme_http.directory_url(db, secret_issuer_id)
+                if secret_issuer_id is not None
+                else _DIRECTORY_PLACEHOLDER
+            ),
             "snippet_kid": secret_key_id or _KID_PLACEHOLDER,
             "snippet_hmac": secret or _HMAC_PLACEHOLDER,
         }
@@ -136,8 +205,9 @@ def acme_page(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    principal: Principal = Depends(current_principal),
 ) -> Response:
-    return _page(request, db, user)
+    return _page(request, db, user, principal)
 
 
 @router.post("")
@@ -147,6 +217,7 @@ def acme_settings(
     acme_require_eab: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    principal: Principal = Depends(current_principal),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
@@ -165,6 +236,7 @@ def acme_settings(
             request,
             db,
             user,
+            principal,
             acme_enabled=wants_acme,
             require_eab=wants_eab,
             error=_NO_BASE_URL,
@@ -193,16 +265,37 @@ def acme_settings(
 def create_eab_key(
     request: Request,
     label: str = Form(""),
+    issuer_id: int = Form(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
+    principal: Principal = Depends(current_principal),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
-    """Renders the page rather than redirecting: the secret exists only in
-    this response, and a 303 would either lose it or leak it into a URL."""
-    row, secret = eab.create_key(db, request.app.state.secrets, label=label)
-    # That a credential was minted and for whom -- never the credential
-    # itself (spec 0009 FR-3).
+    """Spec 0019 FR-8: minting an EAB key is a granted operation -- the
+    issuer this key will authorize has to be one 0018 granted this
+    principal, resolved through the same
+    :func:`cabin.issuer_grants.resolve_granted_issuer` every other granted
+    door calls, not a second check invented here. An unknown, non-
+    intermediate or retired issuer is 0017's own refusal (400); one that
+    exists and is usable but is simply not granted to this principal is
+    0018's (403). No key row is written on either.
+
+    Renders the page rather than redirecting on success: the secret exists
+    only in this response, and a 303 would either lose it or leak it into a
+    URL.
+    """
+    try:
+        issuer = resolve_granted_issuer(db, principal, issuer_id)
+    except _GRANT_ERRORS as exc:
+        return _page(request, db, user, principal, error=str(exc), status_code=403)
+    except _ISSUER_ERRORS as exc:
+        return _page(request, db, user, principal, error=str(exc), status_code=400)
+    row, secret = eab.create_key(
+        db, request.app.state.secrets, label=label, ca_certificate_id=issuer.id
+    )
+    # That a credential was minted, for whom and for which issuer -- never
+    # the credential itself (spec 0009 FR-3; spec 0019 FR-14).
     audit.record(
         db,
         actor,
@@ -210,10 +303,18 @@ def create_eab_key(
         summary=f"created ACME external account key {row.label!r}",
         target_type="acme_eab_key",
         target_id=row.id,
-        detail={"key_id": row.id, "label": row.label},
+        detail={"key_id": row.id, "label": row.label, "issuer_id": issuer.id},
         ip=client_ip(request, db),
     )
-    return _page(request, db, user, secret=secret, secret_key_id=row.id)
+    return _page(
+        request,
+        db,
+        user,
+        principal,
+        secret=secret,
+        secret_key_id=row.id,
+        secret_issuer_id=issuer.id,
+    )
 
 
 @router.post("/eab-keys/{key_id}/revoke")
