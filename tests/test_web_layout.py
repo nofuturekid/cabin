@@ -156,18 +156,54 @@ def _csrf(client: TestClient, cfg: Config) -> str:
 
 def _root_id(cfg: Config) -> int:
     """``_populate``'s own hierarchy's root id -- what ``/ca/{id}`` (spec
-    0023's per-hierarchy detail page) is addressed by."""
+    0023's per-hierarchy detail page) is addressed by.
+
+    Ordered by id and takes the first rather than ``.one()``: with
+    ``second_issuer=True`` (``test_no_horizontal_overflow``), ``_populate``
+    adds a second root as a cross-sign candidate, and the earliest one --
+    created first, lowest id -- is always the hierarchy the rest of
+    ``_populate`` (the issued certificate, the token, the EAB key) builds
+    on.
+    """
     db: Session = create_session_factory(cfg.db_url)()
     try:
-        row = db.scalars(select(CACertificate).where(CACertificate.kind == "root")).one()
+        row = db.scalars(
+            select(CACertificate).where(CACertificate.kind == "root").order_by(CACertificate.id)
+        ).first()
+        assert row is not None, "no root row exists"
         return row.id
     finally:
         db.close()
 
 
-def _populate(client: TestClient, cfg: Config) -> str:
+def _populate(client: TestClient, cfg: Config, *, second_issuer: bool = False) -> str:
     """A CA, a certificate with a long name and several SANs, a token and an
-    EAB key — the data that made the old layout break."""
+    EAB key — the data that made the old layout break.
+
+    ``second_issuer`` (default off, so every other caller in this file is
+    unaffected): adds a second root, eligible to cross-sign the first, and
+    an intermediate under it. Added only after the certificate above is
+    issued, because issuing with no ``issuer_id`` resolves to "the sole
+    active issuer" and turns ambiguous the moment a second one exists (spec
+    0017). Two active issuers is what ``certs_new.html``/``certs_sign.html``
+    need before their own issuer ``<select>`` renders at all (FR-14), and a
+    second root with ``path_length=2`` is what makes ``ca_detail.html``
+    offer one to cross-sign the first (spec 0021 FR-13) -- the two
+    ``<select>``s ``test_no_horizontal_overflow`` would otherwise never
+    render at all.
+
+    Both new names are freshly made up rather than reusing the intermediate
+    name above, and deliberately close to ``_MAX_NAME_BYTES`` (64):
+    measured directly (headless Chrome, 390px), that 56-byte name alone
+    does not overflow either of these two selects' own ``.field`` -- its
+    rendered width lands just *under* the grid cell here, where it only
+    clears it in ``transfer_ca_key.html`` because that page appends
+    ``" (kind)"`` to every option. A shorter name would make this test pass
+    for the wrong reason (spec 0015 AC-1/AC-2 says "no overflow", not "no
+    overflow of names this short"); these two are picked long enough that
+    the select itself, not a suffix some other page happens to add, is what
+    crosses the line.
+    """
     assert (
         client.post("/setup", data={"username": "alice", "password": "correcthorse1"}).status_code
         == 303
@@ -252,6 +288,43 @@ def _populate(client: TestClient, cfg: Config) -> str:
             "csrf_token": _csrf(client, cfg),
         },
     )
+    if second_issuer:
+        assert (
+            client.post(
+                "/ca/create",
+                data={
+                    "name": "Beta Worldwide Corporation Internal Issuing Authority Root CA",
+                    "key_type": "ecdsa-p256",
+                    "root_years": 20,
+                    "path_length": 2,
+                    "csrf_token": _csrf(client, cfg),
+                },
+            ).status_code
+            == 303
+        )
+        db: Session = create_session_factory(cfg.db_url)()
+        try:
+            second_root = db.scalars(
+                select(CACertificate)
+                .where(CACertificate.kind == "root")
+                .order_by(CACertificate.id.desc())
+            ).first()
+            assert second_root is not None, "second root was not created"
+            second_root_id = second_root.id
+        finally:
+            db.close()
+        assert (
+            client.post(
+                f"/ca/{second_root_id}/intermediate",
+                data={
+                    "name": "Beta Worldwide Corporation Internal Issuing Sub-Authority CA",
+                    "key_type": "ecdsa-p256",
+                    "years": 10,
+                    "csrf_token": _csrf(client, cfg),
+                },
+            ).status_code
+            == 303
+        )
     return issued.headers["location"]
 
 
@@ -553,44 +626,56 @@ def test_rail_stays_in_view_on_a_long_page(client: TestClient, cfg: Config, tmp_
 
 @pytest.mark.skipif(not Path(CHROME).exists(), reason="headless Chrome not installed")
 @pytest.mark.parametrize("width,height", [(1440, 1150), (390, 900)])
-def test_no_horizontal_overflow(
-    client: TestClient, cfg: Config, tmp_path: Path, width: int, height: int
-) -> None:
+def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int) -> None:
     """AC-1/AC-2: with real data, nothing is drawn outside its container at
     either a desktop or a phone width.
 
     This test is the reason spec 0015 exists: before it, /certs drew its last
     three columns 275px outside the card and off the screen.
-    """
-    cert_path = _populate(client, cfg)
-    root = tmp_path / "pages"
-    root.mkdir()
-    shutil.copytree(STATIC, root / "static")
 
-    pages = {
-        "dashboard": "/",
-        "ca": "/ca",
-        "ca_new": "/ca/new",
-        "ca_detail": f"/ca/{_root_id(cfg)}",
-        "transfer_ca_import": "/transfer/ca-import",
-        "transfer_cross_import": "/transfer/cross-import",
-        "transfer_trust_bundle": "/transfer/trust-bundle",
-        "transfer_ca_key": "/transfer/ca-key",
-        "transfer_inventory": "/transfer/inventory",
-        "certs": "/certs",
-        "certs_new": "/certs/new",
-        "certs_sign": "/certs/sign",
-        "cert_detail": cert_path,
-        "users": "/users",
-        "audit": "/audit",
-        "settings": "/settings",
-        "acme": "/acme/admin",
-        "tokens": "/tokens",
-    }
-    for name, path in pages.items():
-        resp = client.get(path)
-        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-        (root / f"{name}.html").write_text(resp.text.replace("</body>", PROBE + "</body>"))
+    ``.field select`` in cabin.css exists because a native ``<select>`` won't
+    shrink below its longest option, and a CA name is the thing long enough
+    to force that. Five pages carry such a select. Four of them only render
+    it in a state ``_populate`` alone doesn't reach -- more than one active
+    issuer (``certs_new.html``/``certs_sign.html``), TLS on
+    (``settings.html``), or a second root eligible to cross-sign the first
+    (``ca_detail.html``) -- so this test builds its own TLS-enabled
+    ``Config`` and calls ``_populate(..., second_issuer=True)`` rather than
+    using the file's shared ``cfg``/``client`` fixtures, which stay
+    single-issuer, TLS-off for every other test here.
+    """
+    data_dir = tmp_path / "data"
+    cfg = Config(port=8080, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db", tls=True)
+    with TestClient(create_app(cfg), follow_redirects=False) as client:
+        cert_path = _populate(client, cfg, second_issuer=True)
+        root = tmp_path / "pages"
+        root.mkdir()
+        shutil.copytree(STATIC, root / "static")
+
+        pages = {
+            "dashboard": "/",
+            "ca": "/ca",
+            "ca_new": "/ca/new",
+            "ca_detail": f"/ca/{_root_id(cfg)}",
+            "transfer_ca_import": "/transfer/ca-import",
+            "transfer_cross_import": "/transfer/cross-import",
+            "transfer_trust_bundle": "/transfer/trust-bundle",
+            "transfer_ca_key": "/transfer/ca-key",
+            "transfer_inventory": "/transfer/inventory",
+            "certs": "/certs",
+            "certs_new": "/certs/new",
+            "certs_sign": "/certs/sign",
+            "cert_detail": cert_path,
+            "users": "/users",
+            "audit": "/audit",
+            "settings": "/settings",
+            "acme": "/acme/admin",
+            "tokens": "/tokens",
+        }
+        for name, path in pages.items():
+            resp = client.get(path)
+            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+            (root / f"{name}.html").write_text(resp.text.replace("</body>", PROBE + "</body>"))
 
     httpd, port = _serve(root)
     try:
