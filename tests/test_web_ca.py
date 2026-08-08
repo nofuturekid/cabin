@@ -244,7 +244,7 @@ def test_ca_wizard_ui_flow(client: TestClient, cfg: Config) -> None:
     assert resp.status_code == 200
     empty_state = _row(resp.text, "No hierarchy exists yet.", class_name="note", tag="p")
     assert '<a href="/ca/new">' in empty_state
-    assert '<a href="/ca/import">' in empty_state
+    assert '<a href="/transfer/ca-import">' in empty_state
 
     _create_ca(client, cfg, "cabin")
 

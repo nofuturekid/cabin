@@ -624,7 +624,7 @@ def test_import_form_offers_no_constraint_field(client: TestClient, cfg: Config)
     """
     _setup_superadmin(client)
 
-    import_html = client.get("/ca/import").text
+    import_html = client.get("/transfer/ca-import").text
     import_form = _fields_of_form(import_html, "/ca/import")
     assert import_form.found_form is True
     assert "permitted_names" not in import_form.field_names
@@ -652,7 +652,7 @@ def test_import_form_offers_no_constraint_field(client: TestClient, cfg: Config)
 
     # unchanged once a hierarchy exists too -- the import page is not
     # conditional on there being anything to import alongside.
-    import_html_after = client.get("/ca/import").text
+    import_html_after = client.get("/transfer/ca-import").text
     import_form_after = _fields_of_form(import_html_after, "/ca/import")
     assert import_form_after.found_form is True
     assert "permitted_names" not in import_form_after.field_names

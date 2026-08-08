@@ -262,7 +262,11 @@ def test_nav_current_marked_once_per_page(client: TestClient, cfg: Config) -> No
         "/": "Dashboard",
         "/ca": "Hierarchies",
         "/ca/new": "Create",
-        "/ca/import": "Import",
+        "/transfer/ca-import": "Import a CA",
+        "/transfer/cross-import": "Import a cross certificate",
+        "/transfer/trust-bundle": "Trust bundle",
+        "/transfer/ca-key": "CA key",
+        "/transfer/inventory": "Inventory export",
         "/certs": "Inventory",
         cert_path: "Inventory",
         "/certs/new": "Issue",
@@ -291,6 +295,15 @@ def test_nav_entries_still_role_gated(client: TestClient, cfg: Config) -> None:
             "csrf_token": _csrf(client, cfg),
         },
     )
+    client.post(
+        "/users",
+        data={
+            "username": "adam",
+            "password": "correcthorse1x",
+            "role": "admin",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
     client.post("/logout", data={"csrf_token": _csrf(client, cfg)})
     client.post("/login", data={"username": "vera", "password": "correcthorse1x"})
 
@@ -305,9 +318,21 @@ def test_nav_entries_still_role_gated(client: TestClient, cfg: Config) -> None:
         # spec 0023: the two new create/import entries are as admin-only as
         # the forms they now point at.
         'href="/ca/new"',
-        'href="/ca/import"',
+        'href="/transfer/ca-import"',
+        # spec 0025: the CA key export is superadmin-only.
+        'href="/transfer/ca-key"',
     ):
         assert hidden not in rail
+
+    client.post("/logout", data={"csrf_token": _csrf(client, cfg)})
+    client.post("/login", data={"username": "adam", "password": "correcthorse1x"})
+
+    admin_rail = client.get("/certs").text
+    assert 'href="/ca/new"' in admin_rail
+    assert 'href="/transfer/ca-import"' in admin_rail
+    # spec 0025 FR-6: the CA key export is the one entry an admin -- not just
+    # a viewer -- must not see either, the first such case in this file.
+    assert 'href="/transfer/ca-key"' not in admin_rail
 
 
 def test_signing_is_its_own_page(client: TestClient, cfg: Config) -> None:
@@ -443,6 +468,7 @@ window.addEventListener('load', function () {
     window.scrollTo(0, document.body.scrollHeight);
     setTimeout(function () {
       var button = document.querySelector('.rail-foot button');
+      var nav = document.querySelector('.rail nav');
       var r = button ? button.getBoundingClientRect() : null;
       var out = document.createElement('div');
       out.id = 'probe-result';
@@ -451,7 +477,9 @@ window.addEventListener('load', function () {
         scrolled: Math.round(window.scrollY),
         top: r ? Math.round(r.top) : null,
         bottom: r ? Math.round(r.bottom) : null,
-        viewport: document.documentElement.clientHeight
+        viewport: document.documentElement.clientHeight,
+        navScrollHeight: nav ? nav.scrollHeight : null,
+        navClientHeight: nav ? nav.clientHeight : null
       });
       document.body.appendChild(out);
     }, 200);
@@ -489,6 +517,13 @@ def test_rail_stays_in_view_on_a_long_page(client: TestClient, cfg: Config, tmp_
     A certificate detail page carries two PEM blocks and is several viewports
     tall; scrolled to its end, the logout button — the last thing in the rail,
     and therefore the first to disappear — has to still be on screen.
+
+    ``_populate`` sets up and stays logged in as the superadmin, so this is
+    already the sixteen-entry rail (spec 0025 AC-13). The logout button
+    staying on screen is not enough on its own — a viewport the rail merely
+    fits into would pass that without the rail's own internal scroll
+    (``cabin.css:143-152``) ever engaging — so this also asserts the
+    ``<nav>`` itself is actually taller than its own box.
     """
     cert_path = _populate(client, cfg)
     root = tmp_path / "sticky"
@@ -508,6 +543,11 @@ def test_rail_stays_in_view_on_a_long_page(client: TestClient, cfg: Config, tmp_
     assert result["scrolled"] > 400, f"page was not long enough to test: {result}"
     assert result["top"] >= 0 and result["bottom"] <= result["viewport"], (
         f"logout button left the viewport after scrolling: {result}"
+    )
+    assert result["navScrollHeight"] is not None and result["navClientHeight"] is not None
+    assert result["navScrollHeight"] > result["navClientHeight"], (
+        f"the rail's nav list is not actually scrolling -- the criterion "
+        f"would pass vacuously on a viewport it merely fit into: {result}"
     )
 
 
@@ -531,8 +571,12 @@ def test_no_horizontal_overflow(
         "dashboard": "/",
         "ca": "/ca",
         "ca_new": "/ca/new",
-        "ca_import": "/ca/import",
         "ca_detail": f"/ca/{_root_id(cfg)}",
+        "transfer_ca_import": "/transfer/ca-import",
+        "transfer_cross_import": "/transfer/cross-import",
+        "transfer_trust_bundle": "/transfer/trust-bundle",
+        "transfer_ca_key": "/transfer/ca-key",
+        "transfer_inventory": "/transfer/inventory",
         "certs": "/certs",
         "certs_new": "/certs/new",
         "certs_sign": "/certs/sign",

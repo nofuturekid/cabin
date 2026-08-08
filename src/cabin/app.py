@@ -28,6 +28,8 @@ from cabin.web.crl_ui import router as crl_router
 from cabin.web.deps import SESSION_COOKIE, AuthRedirect, set_session_cookie
 from cabin.web.settings_ui import router as settings_router
 from cabin.web.tokens_ui import router as tokens_router
+from cabin.web.transfer_ui import ca_router as transfer_ca_router
+from cabin.web.transfer_ui import router as transfer_router
 from cabin.web.ui import router as ui_router
 
 
@@ -101,6 +103,12 @@ def create_app(config: Config, tls: TlsManager | None = None) -> FastAPI:
 
     app.include_router(ui_router)
     app.include_router(ca_router)
+    # Spec 0025 Interface Contract: both of transfer_ui's routers go here,
+    # right after ca_router -- ca_router's own `/ca/{ca_id:int}` cannot ever
+    # match `/ca/import` or `/ca/cross-import` (the `:int` converter), so
+    # transfer_ca_router's two POSTs are never shadowed regardless of order.
+    app.include_router(transfer_router)
+    app.include_router(transfer_ca_router)
     app.include_router(certs_router)
     app.include_router(certs_download_router)
     app.include_router(settings_router)

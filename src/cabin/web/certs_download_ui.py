@@ -48,7 +48,7 @@ _UNKNOWN_ANCHOR = "no such chain for this certificate"
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 
 
-def _slug(subject_cn: str) -> str:
+def slug(subject_cn: str) -> str:
     """CN -> filename-safe token. The result is ``[a-z0-9-]`` only, which is
     also what keeps the Content-Disposition filename below free of quotes,
     separators and non-ASCII."""
@@ -56,10 +56,10 @@ def _slug(subject_cn: str) -> str:
 
 
 def _filename(row: Certificate, suffix: str) -> str:
-    return f"{_slug(row.subject_cn)}-{row.serial_hex[:SERIAL_CHARS]}{suffix}"
+    return f"{slug(row.subject_cn)}-{row.serial_hex[:SERIAL_CHARS]}{suffix}"
 
 
-def _attachment(body: bytes, media_type: str, filename: str) -> Response:
+def attachment(body: bytes, media_type: str, filename: str) -> Response:
     """FR-4: every download is saved, never rendered, and never cached."""
     return Response(
         content=body,
@@ -115,7 +115,7 @@ def download_cert_pem(
     _user: User = Depends(get_current_user),
 ) -> Response:
     row = certificate_or_404(db, cert_id)
-    return _attachment(
+    return attachment(
         row.cert_pem.encode("ascii"), "application/x-pem-file", _filename(row, ".pem")
     )
 
@@ -144,7 +144,7 @@ def download_chain_pem(
     body = row.cert_pem + "".join(
         cert.public_bytes(serialization.Encoding.PEM).decode("ascii") for cert in _certs(chain)
     )
-    return _attachment(body.encode("ascii"), "application/x-pem-file", _filename(row, "-chain.pem"))
+    return attachment(body.encode("ascii"), "application/x-pem-file", _filename(row, "-chain.pem"))
 
 
 @router.get("/{cert_id}/download/key.pem")
@@ -155,7 +155,7 @@ def download_key_pem(
     _user: User = Depends(require_admin),
 ) -> Response:
     row = certificate_or_404(db, cert_id)
-    return _attachment(
+    return attachment(
         _key_pem(request, row).encode("ascii"),
         "application/x-pem-file",
         _filename(row, "-key.pem"),
@@ -203,4 +203,4 @@ def download_bundle_p12(
         # pyca/cryptography refuses it, and that must be a clean 400, never
         # a traceback (FR-5).
         raise HTTPException(status_code=400, detail=_P12_UNSUPPORTED) from exc
-    return _attachment(bundle, "application/x-pkcs12", _filename(row, ".p12"))
+    return attachment(bundle, "application/x-pkcs12", _filename(row, ".p12"))

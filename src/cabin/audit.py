@@ -90,6 +90,12 @@ class AuditAction(StrEnum):
     # it afterwards.
     ca_cross_signed = "ca_cross_signed"
     ca_cross_imported = "ca_cross_imported"
+    # Spec 0025 FR-8: a deliberate deviation from spec 0009 FR-4's "reads are
+    # not audited" -- a leaf key download is a read a viewer's page refresh
+    # could trigger and that changes nothing, but a CA key export is a
+    # superadmin-only POST with CSRF that permanently changes what somebody
+    # outside cabin can do, which is exactly what that rule covers.
+    ca_key_exported = "ca_key_exported"
     settings_changed = "settings_changed"
     cert_issued = "cert_issued"
     cert_signed = "cert_signed"

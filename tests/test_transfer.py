@@ -265,8 +265,13 @@ def test_import_forms_are_two_pages_and_errors_stay_on_them(
     client: TestClient, cfg: Config
 ) -> None:
     assert not (TEMPLATES_DIR / "ca_import.html").exists()
+    # A bare substring check would also match "transfer_ca_import.html", the
+    # filename FR-1 itself mandates for the page that replaces this one --
+    # so this looks for "ca_import.html" as its own token (not preceded by
+    # a word character), which "transfer_ca_import.html" never is.
+    old_page_reference = re.compile(r"(?<![\w])ca_import\.html")
     for py in WEB_DIR.rglob("*.py"):
-        assert "ca_import.html" not in py.read_text(), py
+        assert old_page_reference.search(py.read_text()) is None, py
 
     ca_import_templates: set[str] = set()
     cross_import_templates: set[str] = set()

@@ -1269,9 +1269,13 @@ def test_no_horizontal_overflow(
     pages = {
         "ca": "/ca",
         "ca_new": "/ca/new",
-        "ca_import": "/ca/import",
         "ca_detail_a": f"/ca/{root_a}",
         "ca_detail_b": f"/ca/{root_b}",
+        "transfer_ca_import": "/transfer/ca-import",
+        "transfer_cross_import": "/transfer/cross-import",
+        "transfer_trust_bundle": "/transfer/trust-bundle",
+        "transfer_ca_key": "/transfer/ca-key",
+        "transfer_inventory": "/transfer/inventory",
     }
     for name, path in pages.items():
         resp = client.get(path)

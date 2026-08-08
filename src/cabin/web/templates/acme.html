@@ -176,7 +176,7 @@
       <div class="field">
         <label for="issuer_id">Issuer</label>
         {% if issuer_options %}
-        <select id="issuer_id" name="issuer_id" required style="min-width: 0;">
+        <select id="issuer_id" name="issuer_id" required>
           {% for opt in issuer_options %}
           <option value="{{ opt.id }}">{{ opt.name }}</option>
           {% endfor %}

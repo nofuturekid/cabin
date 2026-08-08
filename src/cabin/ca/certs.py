@@ -473,6 +473,29 @@ def list_certificates(
     return list(rows), total
 
 
+def export_certificates(
+    db: Session, *, q: str = "", status: str = "all", now: datetime | None = None
+) -> list[Certificate]:
+    """Spec 0025 FR-5: every row :func:`list_certificates` would return
+    across every one of its pages, in the same order -- built from the same
+    :func:`_filters` so the export and the paginated list can never disagree
+    about what a filter means.
+
+    Unpaginated on purpose: :func:`list_certificates` clamps ``page`` to
+    :data:`MAX_PAGE` and always returns at most ``per_page`` rows, which is
+    exactly right for a page of the inventory and exactly wrong for an
+    export that claims to be "the whole filtered set" -- a caller passing a
+    large ``per_page`` there would silently get a truncated file.
+    """
+    conditions = _filters(q, status, now or datetime.now(UTC))
+    rows = db.scalars(
+        select(Certificate)
+        .where(*conditions)
+        .order_by(Certificate.created_at.desc(), Certificate.id.desc())
+    ).all()
+    return list(rows)
+
+
 def status_counts(db: Session, now: datetime | None = None) -> dict[str, int]:
     """How many certificates are in each state at ``now`` (spec 0016 FR-3).
 

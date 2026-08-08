@@ -331,6 +331,14 @@ button.danger {
   color: var(--faint);
 }
 
+/* A native select won't shrink below the intrinsic width of its longest
+   option; as a grid item that leaves it (and .field) pushing past a narrow
+   viewport instead of wrapping. A CA with a long name is the case that
+   surfaces it, not a hypothetical. */
+.field select {
+  min-width: 0;
+}
+
 .field-check {
   display: flex;
   align-items: flex-start;

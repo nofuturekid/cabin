@@ -26,13 +26,11 @@ from cabin.web.deps import (
     client_ip,
     current_actor,
     get_db,
-    require_role,
+    require_superadmin,
     verify_csrf,
 )
 
 router = APIRouter(prefix="/tokens")
-
-require_superadmin = require_role(Role.superadmin)
 
 _BAD_ROLE = "unknown role: {!r}"
 _BAD_DATE = "the expiry date must look like 2026-12-31"

@@ -1,10 +1,13 @@
-"""UI routes for the CA hierarchies (spec 0023): a list with no forms
-(`GET /ca`), one hierarchy in full with its own actions (`GET /ca/{ca_id}`),
-a create page (`GET /ca/new`) and an import page (`GET /ca/import`). GETs
-need only a logged-in session (viewer included, `/ca/new` and `/ca/import`
-admin-only); the mutating POSTs need role admin or superadmin plus CSRF, and
-keep the paths they had before this spec (FR-7) -- only where a response
-goes changed.
+"""UI routes for the CA hierarchies (spec 0023, narrowed by spec 0025 FR-2):
+a list with no forms (`GET /ca`), one hierarchy in full with its own actions
+(`GET /ca/{ca_id}`), and a create page (`GET /ca/new`). GETs need only a
+logged-in session (viewer included, `/ca/new` admin-only); the mutating
+POSTs need role admin or superadmin plus CSRF, and keep the paths they had
+before spec 0023 (FR-7) -- only where a response goes changed.
+
+The import page and both import POSTs moved to :mod:`cabin.web.transfer_ui`
+(spec 0025 FR-2): they answer under `/ca/import` and `/ca/cross-import`
+still, but this module no longer owns them.
 """
 
 from cryptography import x509
@@ -28,7 +31,6 @@ from cabin.ca.service import (
     RetireError,
     UnknownIssuerError,
 )
-from cabin.ca.x509 import CAImportError
 from cabin.issuer_grants import grant, user_principal
 from cabin.settings import ACME_ENABLED, TLS_ISSUER_ID, get_flag, get_setting
 from cabin.tls import TlsMode
@@ -434,14 +436,6 @@ def _new_page(request: Request, user: User, error: str | None, status_code: int 
     return templates.TemplateResponse(request, "ca_new.html", context, status_code=status_code)
 
 
-def _import_page(
-    request: Request, user: User, error: str | None, status_code: int = 200
-) -> Response:
-    context = base_context(request, user)
-    context["error"] = error
-    return templates.TemplateResponse(request, "ca_import.html", context, status_code=status_code)
-
-
 @router.get("")
 def ca_page(
     request: Request,
@@ -461,11 +455,6 @@ def ca_page(
 @router.get("/new")
 def ca_new_page(request: Request, user: User = Depends(require_admin)) -> Response:
     return _new_page(request, user, None)
-
-
-@router.get("/import")
-def ca_import_page(request: Request, user: User = Depends(require_admin)) -> Response:
-    return _import_page(request, user, None)
 
 
 @router.get("/{ca_id:int}")
@@ -566,53 +555,6 @@ def ca_create(
     # `ensure_current` itself and never turned into a 5xx -- the root *was*
     # created, and losing that outcome over a certificate swap would be the
     # worse error.
-    tls_manager = request.app.state.tls
-    if tls_manager is not None:
-        tls_manager.ensure_current(db, request.app.state.secrets)
-    return RedirectResponse("/ca", status_code=303)
-
-
-@router.post("/import")
-def ca_import(
-    request: Request,
-    cert_pem: str = Form(...),
-    key_pem: str = Form(...),
-    key_passphrase: str = Form(""),
-    chain_pem: str = Form(...),
-    db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
-    actor: Actor = Depends(current_actor),
-    _csrf: None = Depends(verify_csrf),
-) -> Response:
-    try:
-        hierarchy = ca_service.import_hierarchy(
-            db,
-            request.app.state.secrets,
-            cert_pem,
-            key_pem,
-            key_passphrase or None,
-            chain_pem,
-        )
-    except CAImportError as exc:
-        return _import_page(request, user, str(exc), status_code=400)
-    # The subject only -- neither the submitted key nor its passphrase has any
-    # business in a log (spec 0004 FR-3).
-    subject = _subject(hierarchy.intermediate)
-    # Spec 0018 FR-8: same as ca_create above -- the importer is granted the
-    # new intermediate immediately.
-    grant(db, user_principal(user), hierarchy.intermediate.id)
-    audit.record(
-        db,
-        actor,
-        AuditAction.ca_imported,
-        summary=f"imported CA {subject}",
-        target_type="ca_certificate",
-        target_id=hierarchy.intermediate.id,
-        detail={"subject": subject, "granted_to": user.id},
-        ip=client_ip(request, db),
-    )
-    # Spec 0022 FR-6: same as ca_create above -- an imported CA is just as
-    # eligible to sign cabin's own certificate as a freshly generated one.
     tls_manager = request.app.state.tls
     if tls_manager is not None:
         tls_manager.ensure_current(db, request.app.state.secrets)
@@ -773,52 +715,6 @@ def ca_cross_sign(
         ip=client_ip(request, db),
     )
     return RedirectResponse(f"/ca/{ca_id}", status_code=303)
-
-
-@router.post("/cross-import")
-def ca_cross_import(
-    request: Request,
-    cross_pem: str = Form(...),
-    issuer_pem: str = Form(...),
-    db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
-    actor: Actor = Depends(current_actor),
-    _csrf: None = Depends(verify_csrf),
-) -> Response:
-    """Spec 0021 FR-5/FR-13: import a cross certificate produced elsewhere.
-    No key, no name -- the subject root is resolved by matching the
-    submitted certificate against what is already on this instance
-    (``import_cross``), and 0017's naming rule reads the row's name off its
-    own certificate. Refused the same way ``ca_cross_sign`` is refused, but
-    onto ``/ca/import``, the page this form lives on now: a re-render at 400,
-    no row written.
-    """
-    try:
-        row = ca_service.import_cross(db, cross_pem, issuer_pem)
-    except CAImportError as exc:
-        return _import_page(request, user, str(exc), status_code=400)
-    cross_info = ca_x509.describe_certificate(
-        x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
-    )
-    issuer_info = ca_x509.describe_certificate(
-        x509.load_pem_x509_certificate(issuer_pem.encode("utf-8"))
-    )
-    audit.record(
-        db,
-        actor,
-        AuditAction.ca_cross_imported,
-        summary=f"imported cross certificate for {row.name!r}",
-        target_type="ca_certificate",
-        target_id=row.id,
-        detail={
-            "subject_root_id": row.cross_of_id,
-            "signing_root_id": row.parent_id,
-            "cross_fingerprint": cross_info["fingerprint"],
-            "signing_fingerprint": issuer_info["fingerprint"],
-        },
-        ip=client_ip(request, db),
-    )
-    return RedirectResponse("/ca", status_code=303)
 
 
 @router.post("/{ca_id}/renew")

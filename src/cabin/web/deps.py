@@ -65,6 +65,12 @@ def base_context(request: Request, user: User) -> dict[str, object]:
         "nav": {
             "issue": role in ADMIN_ROLES,
             "ca_admin": role in ADMIN_ROLES,
+            # Spec 0025 FR-3: deliberately its own flag, not a reuse of
+            # `tokens` -- exporting a CA key and managing API tokens are
+            # different privileges that happen to share a holder today, and
+            # the day one stops being superadmin-only the flag that has to
+            # change must already exist on its own.
+            "ca_key": role == Role.superadmin,
             "settings": role in ADMIN_ROLES,
             "acme": role in ADMIN_ROLES,
             "tokens": role == Role.superadmin,
@@ -179,6 +185,12 @@ def require_role(*roles: Role) -> Callable[[User], User]:
 
 #: The guard for every mutating (and mutation-only) page.
 require_admin = require_role(*ADMIN_ROLES)
+
+#: Spec 0025 FR-13: the one definition, used to exist twice -- independently,
+#: in `ui.py` and `tokens_ui.py` -- which is exactly the drift `deps.py`'s own
+#: module docstring warns a guard defined more than once invites. Both now
+#: import it from here instead.
+require_superadmin = require_role(Role.superadmin)
 
 
 def current_principal(user: User = Depends(require_admin)) -> Principal:

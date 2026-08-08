@@ -1,0 +1,39 @@
+{% extends "layout.html" %}
+{% set nav_current = "trust_bundle" %}
+{% block title %}Trust bundle — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Trust bundle</h1>
+    <p class="sub">Every root this instance vouches for, as one PEM file.</p>
+  </div>
+  <a class="button-link" href="/transfer/trust-bundle.pem">Download all roots</a>
+</div>
+
+{% if roots %}
+<div class="scroller">
+  <table>
+    <thead>
+      <tr>
+        <th>Root</th>
+        <th>Status</th>
+        <th>Intermediates</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for root in roots %}
+      <tr>
+        <td>{{ root.name }}</td>
+        <td><span class="tag{% if root.status == "retired" %} tag-bad{% endif %}">{{ root.status }}</span></td>
+        <td>{{ root.intermediate_count }}</td>
+        <td><a href="/transfer/trust-bundle.pem?ca={{ root.id }}">Download this hierarchy</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="note">No CA hierarchy has been created or imported yet.</p>
+{% endif %}
+{% endblock %}

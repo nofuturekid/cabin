@@ -1,13 +1,13 @@
 {% extends "layout.html" %}
-{% set nav_current = "ca_import" %}
+{% set nav_current = "transfer_ca_import" %}
 {% block title %}Import a CA — cabin{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
     <h1>Import a CA</h1>
     <p class="sub">
-      Bring a signing CA you already have, or a cross certificate produced
-      elsewhere. To generate a new hierarchy instead, <a href="/ca/new">create a CA</a>.
+      Bring a signing CA you already have. To generate a new hierarchy
+      instead, <a href="/ca/new">create a CA</a>.
     </p>
   </div>
 </div>
@@ -42,33 +42,6 @@
         <textarea id="chain_pem" name="chain_pem" rows="8" required></textarea>
       </div>
       <div class="actions"><button type="submit" class="primary">Import CA</button></div>
-    </form>
-  </div>
-</div>
-
-<div class="section">
-  <div>
-    <h2>Import a cross certificate</h2>
-    <p class="help">
-      A cross certificate produced elsewhere, for a root already on this
-      instance -- no key, no name. cabin checks that it really is another
-      certificate for that root, the same subject and the same public key,
-      and refuses it otherwise: a mistyped paste must not staple a
-      stranger's CA into the chain cabin serves to every client.
-    </p>
-  </div>
-  <div>
-    <form method="post" action="/ca/cross-import">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <div class="field">
-        <label for="cross_pem">Cross certificate (PEM)</label>
-        <textarea id="cross_pem" name="cross_pem" rows="8" required></textarea>
-      </div>
-      <div class="field">
-        <label for="issuer_pem">Signing root certificate (PEM)</label>
-        <textarea id="issuer_pem" name="issuer_pem" rows="8" required></textarea>
-      </div>
-      <div class="actions"><button type="submit" class="primary">Import cross certificate</button></div>
     </form>
   </div>
 </div>

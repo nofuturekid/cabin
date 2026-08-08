@@ -62,6 +62,9 @@ SPEC_ACTIONS = {
     "tls_certificate_issued",
     # spec 0018 FR-15: the same self-issuance reaching a terminal failure
     "tls_certificate_failed",
+    # spec 0025 FR-8: exporting a CA's own private key, a deviation from
+    # spec 0009 FR-4's usual "reads are not audited" rule
+    "ca_key_exported",
 }
 
 

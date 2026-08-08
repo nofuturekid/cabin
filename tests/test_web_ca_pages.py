@@ -405,7 +405,7 @@ def test_ca_list_empty_state_links_for_admin_and_not_for_viewer(
     admin_empty = _element(admin_html, "ca-empty")
     assert admin_empty.found is True
     assert "/ca/new" in admin_empty.anchor_hrefs
-    assert "/ca/import" in admin_empty.anchor_hrefs
+    assert "/transfer/ca-import" in admin_empty.anchor_hrefs
 
     _login(client, "vera", "whatever12345")
     viewer_resp = client.get("/ca")
@@ -413,7 +413,7 @@ def test_ca_list_empty_state_links_for_admin_and_not_for_viewer(
     viewer_empty = _element(viewer_resp.text, "ca-empty")
     assert viewer_empty.found is True
     assert "/ca/new" not in viewer_empty.anchor_hrefs
-    assert "/ca/import" not in viewer_empty.anchor_hrefs
+    assert "/transfer/ca-import" not in viewer_empty.anchor_hrefs
 
 
 # === AC-2: the detail page is one hierarchy, named by its root =============
@@ -564,7 +564,7 @@ def test_form_errors_render_the_page_that_owns_the_form(client: TestClient, cfg:
         },
     )
     assert import_resp.status_code == 400
-    assert _marked_labels(import_resp.text) == ["Import"]
+    assert _marked_labels(import_resp.text) == ["Import a CA"]
     assert "/ca/import" in _form_actions(import_resp.text)
 
     cross_import_resp = client.post(
@@ -576,7 +576,7 @@ def test_form_errors_render_the_page_that_owns_the_form(client: TestClient, cfg:
         },
     )
     assert cross_import_resp.status_code == 400
-    assert _marked_labels(cross_import_resp.text) == ["Import"]
+    assert _marked_labels(cross_import_resp.text) == ["Import a cross certificate"]
     assert "/ca/cross-import" in _form_actions(cross_import_resp.text)
 
     cross_sign_resp = client.post(
@@ -632,12 +632,12 @@ def test_viewer_rail_has_no_ca_new_or_ca_import(client: TestClient, cfg: Config)
     _login(client, "vera", "whatever12345")
 
     assert client.get("/ca/new").status_code == 403
-    assert client.get("/ca/import").status_code == 403
+    assert client.get("/transfer/ca-import").status_code == 403
 
     rail = client.get("/ca").text
     assert 'href="/ca"' in rail
     assert 'href="/ca/new"' not in rail
-    assert 'href="/ca/import"' not in rail
+    assert 'href="/transfer/ca-import"' not in rail
 
 
 # === AC-7: cross-sign candidates come from every row, not from the group ===
@@ -668,7 +668,11 @@ def test_ca_routes_are_not_shadowed_by_the_detail_route(client: TestClient, cfg:
     alpha_root, alpha_int, _beta_root, _beta_int = _seed_two_hierarchies(cfg)
 
     assert client.get("/ca/new").status_code == 200
-    assert client.get("/ca/import").status_code == 200
+    # FR-2: GET /ca/import is gone -- POST /ca/import still lives at this
+    # exact path. The right answer is 405 (no GET handler), never a 422 from
+    # the detail route's int conversion swallowing the literal path, which
+    # is exactly the shape the 0017 /crl/7.pem bug had.
+    assert client.get("/ca/import").status_code == 405
 
     pem_resp = client.get(f"/ca/{alpha_root}.pem")
     assert pem_resp.status_code == 200
@@ -707,21 +711,30 @@ def test_new_and_import_pages_own_their_forms_and_link_each_other(
     new_page = client.get("/ca/new").text
     assert "/ca/create" in _form_actions(new_page)
     assert "/ca/import" not in _form_actions(new_page)
-    assert 'href="/ca/import"' in new_page
+    assert 'href="/transfer/ca-import"' in new_page
 
-    import_page = client.get("/ca/import").text
+    # FR-2 split the one import page in two -- each owns exactly its own
+    # form now, not both.
+    import_page = client.get("/transfer/ca-import").text
     assert "/ca/import" in _form_actions(import_page)
-    assert "/ca/cross-import" in _form_actions(import_page)
+    assert "/ca/cross-import" not in _form_actions(import_page)
     assert "/ca/create" not in _form_actions(import_page)
     assert 'href="/ca/new"' in import_page
 
-    # neither the list nor a detail page carries either form
+    cross_import_page = client.get("/transfer/cross-import").text
+    assert "/ca/cross-import" in _form_actions(cross_import_page)
+    assert "/ca/import" not in _form_actions(cross_import_page)
+    assert "/ca/create" not in _form_actions(cross_import_page)
+
+    # neither the list nor a detail page carries any of the three forms
     list_page = client.get("/ca").text
     assert "/ca/create" not in _form_actions(list_page)
     assert "/ca/import" not in _form_actions(list_page)
+    assert "/ca/cross-import" not in _form_actions(list_page)
     detail_page = client.get(f"/ca/{alpha_root}").text
     assert "/ca/create" not in _form_actions(detail_page)
     assert "/ca/import" not in _form_actions(detail_page)
+    assert "/ca/cross-import" not in _form_actions(detail_page)
 
     templates_dir = Path(__file__).resolve().parents[1] / "src/cabin/web/templates"
     assert not (templates_dir / "ca_setup.html").exists()

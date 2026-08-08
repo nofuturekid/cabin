@@ -564,8 +564,13 @@ def test_ca_key_export_password_is_required_and_checked(client: TestClient, cfg:
     assert missing.status_code == 400  # not 422 -- FastAPI's default-empty-Form defect
     assert missing.headers.get("content-type") != "application/x-pkcs12"
     assert "/transfer/ca-key" in _form_actions(missing.text)
-    error = _row(missing.text, str(MIN_P12_PASSWORD), class_name="error", tag=None)
-    assert str(MIN_P12_PASSWORD) in error
+    # Anchored to the error box itself: "8" alone would match `charset="utf-8"`
+    # in the page head first, and "at least 8 characters" also appears in the
+    # password field's own label. "must be at least ... characters" is the
+    # handler's own wording and appears nowhere else on the page.
+    message = f"must be at least {MIN_P12_PASSWORD} characters"
+    error = _row(missing.text, message, class_name="error", tag=None)
+    assert message in error
 
     short = client.post(
         "/transfer/ca-key",

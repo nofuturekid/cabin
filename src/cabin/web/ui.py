@@ -43,7 +43,7 @@ from cabin.web.deps import (
     get_current_user,
     get_db,
     redirect_if_no_users,
-    require_role,
+    require_superadmin,
     set_session_cookie,
     verify_csrf,
 )
@@ -56,8 +56,6 @@ EXPIRING_SHOWN = 10
 RECENT_EVENTS = 5
 #: A CA replacement needs planning, so its warning starts a year out (FR-4).
 CA_WARN_DAYS = 365
-
-require_superadmin = require_role(Role.superadmin)
 
 # Serializes first-run setup's check-then-create so two near-simultaneous
 # requests can't both see zero users and both try to create a superadmin.
