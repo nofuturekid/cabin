@@ -6,6 +6,20 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Spec 0024's dashboard "no active issuer" notice was computed
+  instance-wide.** `ca_has_issuer` was `bool(ca_service.active_issuers(db))`
+  over the whole instance, so once any one hierarchy had an active issuer the
+  notice stopped rendering at all — a second hierarchy's bare root, or a
+  hierarchy whose only intermediate was later retired, went unmentioned on
+  the dashboard even though its own detail page was unaffected. The context
+  now carries the list of hierarchies that currently lack an active issuer
+  (`ca_no_issuer_roots`), computed from the same `active_issuers` query
+  against the roots the handler already has, and the template names every
+  one of them under `#ca-no-issuer` instead of picking the first root with
+  `| first`. Spec 0024's Interface Contract is corrected to match.
+
 ## [0.2.0] - 2026-08-08
 
 Six specifications, 0017–0022. cabin stops assuming there is one CA: it runs

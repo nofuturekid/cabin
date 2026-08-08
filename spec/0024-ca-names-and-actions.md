@@ -500,6 +500,19 @@ The dashboard context keeps `ca_configured` (`bool(rows)`, unchanged
 meaning) and gains one flag for "an active issuer exists". No other key
 changes.
 
+> **Correction (post-implementation):** the flag above is the wrong shape.
+> "An active issuer exists" is an instance-wide question; the notice it
+> drives is about one hierarchy at a time. Read literally, a single boolean
+> is `True` the moment any one hierarchy gets an active issuer, which hides
+> every other hierarchy's own bare root from the notice for as long as that
+> stays true. The dashboard context instead gains a list of the hierarchies
+> (root rows) that currently have no active issuer — empty when every
+> hierarchy has one, one entry for a single bare root (the AC-8 case below
+> is unaffected), more than one when several are bare. A hierarchy whose
+> only intermediate was retired belongs on this list on the same grounds as
+> one that was never given an intermediate — both are "no active issuer",
+> which is what `active_issuers` already tests for. No other key changes.
+
 ### Schema, API, MCP, ACME
 
 Unchanged. No migration, no column. `api/views.py:36`'s `NO_CA` already

@@ -327,13 +327,23 @@ def dashboard(
         # Nothing to summarise before there is a CA (AC-8).
         return templates.TemplateResponse(request, "dashboard.html", context)
 
-    # Spec 0024 FR-7: `ca_configured` alone is `True` for a lone root, which
-    # used to render a full body including a `Revocation` section with an
-    # empty issuer table -- a heading, an explanation and nothing. This
-    # second flag is what lets the template say "this hierarchy has no
-    # issuer yet" instead, and gate the revocation section's own tables on
-    # there being at least one to show.
-    context["ca_has_issuer"] = bool(ca_service.active_issuers(db))
+    # Spec 0024 FR-7 (amended, see spec's Change log): `ca_configured` alone
+    # is `True` for a lone root, which used to render a full body including
+    # a `Revocation` section with an empty issuer table -- a heading, an
+    # explanation and nothing. The notice must be per hierarchy, not
+    # instance-wide: an instance-wide flag goes True the moment ANY
+    # hierarchy gets an active issuer, hiding every other hierarchy's own
+    # bare root. A retired-only hierarchy counts the same as a bare one --
+    # `active_issuers` already filters on status == "active", so a root
+    # whose only intermediate was retired falls out of this the same way an
+    # never-issued root does.
+    #
+    # One query (`active_issuers`) plus the `rows` this handler already
+    # fetched -- no query per hierarchy.
+    roots_with_active_issuer = {row.parent_id for row in ca_service.active_issuers(db)}
+    context["ca_no_issuer_roots"] = [
+        row for row in rows if row.kind == "root" and row.id not in roots_with_active_issuer
+    ]
 
     expiring = certs_service.expiring_soon(db, now, limit=EXPIRING_SHOWN)
     counts = certs_service.status_counts(db, now)

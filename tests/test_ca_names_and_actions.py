@@ -842,6 +842,168 @@ def test_dashboard_distinguishes_no_ca_from_no_issuer(client: TestClient, cfg: C
     assert _count_tag(revocation_after, "table") == 1
 
 
+# --- FR-7/AC-8, per hierarchy: `ui.py`'s `ca_has_issuer` is computed
+# instance-wide (`bool(ca_service.active_issuers(db))`, `ui.py:336`), which
+# was verified against a single hierarchy but is wrong the moment a second
+# one exists. Once ANY hierarchy has an active issuer, the flag is True for
+# the whole page and the notice never renders again -- a freshly created
+# bare root becomes invisible on the dashboard even though its own detail
+# page is unaffected. These four tests pin the per-hierarchy reading: the
+# notice must name the hierarchy that actually lacks an issuer, name every
+# one that does, stay silent once none do, and leave the genuinely-empty
+# instance's own distinct message alone. --------------------------------
+
+
+def _intermediate_id_under(cfg: Config, root_id: int) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(CACertificate).where(
+                CACertificate.kind == "intermediate", CACertificate.parent_id == root_id
+            )
+        ).one()
+        return row.id
+    finally:
+        db.close()
+
+
+def test_dashboard_no_issuer_notice_names_the_bare_hierarchy_not_the_configured_one(
+    client: TestClient, cfg: Config
+) -> None:
+    """The defect this pins: with Alpha fully configured and Bravo a bare
+    root, `ca_has_issuer` reads `bool(active_issuers(db))` over the whole
+    instance -- Alpha's active intermediate makes it True, so the notice
+    does not render at all and Bravo's missing issuer is invisible. A fix
+    that renders *some* notice without checking which hierarchy it is about
+    would still pass a test that only asked "is there a notice" -- this one
+    asserts on the hrefs actually present, not merely on the id's presence.
+    """
+    _setup_superadmin(client)
+    assert _create_root(client, cfg, name="Alpha Root CA").status_code == 303
+    alpha_root_id = _last_root_id(cfg)
+    assert (
+        _create_intermediate(client, cfg, alpha_root_id, name="Alpha Issuing CA").status_code == 303
+    )
+
+    assert _create_root(client, cfg, name="Bravo Root CA").status_code == 303
+    bravo_root_id = _last_root_id(cfg)
+    assert bravo_root_id != alpha_root_id
+
+    page = client.get("/").text
+    notice = _element(page, "ca-no-issuer")
+    assert notice.found is True, "Bravo has no active issuer; the dashboard says nothing about it"
+    assert f"/ca/{bravo_root_id}" in notice.anchor_hrefs
+    assert f"/ca/{alpha_root_id}" not in notice.anchor_hrefs
+
+
+def test_dashboard_surfaces_every_bare_root_not_just_the_first(
+    client: TestClient, cfg: Config
+) -> None:
+    """Today's template also only ever reads the *first* root out of
+    `ca_certs` (`no_issuer_root = ... | first`) once the flag says to render
+    anything at all -- so even the "no active issuer anywhere" case, where
+    the instance-wide flag happens to be correct, only ever names one bare
+    root. A second one must be surfaced too, not silently dropped.
+    """
+    _setup_superadmin(client)
+    assert _create_root(client, cfg, name="Alpha Root CA").status_code == 303
+    alpha_root_id = _last_root_id(cfg)
+    assert _create_root(client, cfg, name="Bravo Root CA").status_code == 303
+    bravo_root_id = _last_root_id(cfg)
+    assert alpha_root_id != bravo_root_id
+
+    page = client.get("/").text
+    notice = _element(page, "ca-no-issuer")
+    assert notice.found is True
+    assert f"/ca/{alpha_root_id}" in notice.anchor_hrefs
+    assert f"/ca/{bravo_root_id}" in notice.anchor_hrefs
+
+
+def test_dashboard_notice_covers_a_hierarchy_whose_only_issuer_was_retired(
+    client: TestClient, cfg: Config
+) -> None:
+    """This spec's own Context section names retirement in the same breath
+    as a bare root: "'A CA exists but has no active issuer' is reachable
+    today ... [and] retiring one hierarchy's intermediate leaves that
+    hierarchy without one" -- so a hierarchy whose only intermediate was
+    retired gets the same treatment a bare root does, not a pass.
+
+    Bravo's intermediate is retired while Alpha's stays active, so the
+    instance-wide invariant `ca_service.retire()` itself enforces (a retire
+    may never leave the *whole instance* without an active issuer,
+    `service.py:831-856`) does not block the retire -- this is squarely the
+    per-hierarchy state the fix must detect, not a state production refuses
+    to reach.
+    """
+    _setup_superadmin(client)
+    assert _create_root(client, cfg, name="Alpha Root CA").status_code == 303
+    alpha_root_id = _last_root_id(cfg)
+    assert (
+        _create_intermediate(client, cfg, alpha_root_id, name="Alpha Issuing CA").status_code == 303
+    )
+
+    assert _create_root(client, cfg, name="Bravo Root CA").status_code == 303
+    bravo_root_id = _last_root_id(cfg)
+    assert (
+        _create_intermediate(client, cfg, bravo_root_id, name="Bravo Issuing CA").status_code == 303
+    )
+    bravo_intermediate_id = _intermediate_id_under(cfg, bravo_root_id)
+
+    retire_resp = client.post(
+        f"/ca/{bravo_intermediate_id}/retire",
+        data={"confirm": "on", "csrf_token": _csrf(client, cfg)},
+    )
+    assert retire_resp.status_code == 303
+    assert _status_of(cfg, bravo_intermediate_id) == "retired"
+
+    page = client.get("/").text
+    notice = _element(page, "ca-no-issuer")
+    assert notice.found is True, "Bravo's only issuer is retired; the dashboard says nothing"
+    assert f"/ca/{bravo_root_id}" in notice.anchor_hrefs
+    assert f"/ca/{alpha_root_id}" not in notice.anchor_hrefs
+
+
+def test_dashboard_no_notice_when_every_hierarchy_has_an_issuer(
+    client: TestClient, cfg: Config
+) -> None:
+    """The counterpart to the three tests above: once both hierarchies have
+    an active issuer, nothing is missing and the notice must not appear --
+    a fix that renders a notice per hierarchy unconditionally, or that never
+    clears the flag once it has been true, would fail this one."""
+    _setup_superadmin(client)
+    assert _create_root(client, cfg, name="Alpha Root CA").status_code == 303
+    alpha_root_id = _last_root_id(cfg)
+    assert (
+        _create_intermediate(client, cfg, alpha_root_id, name="Alpha Issuing CA").status_code == 303
+    )
+    assert _create_root(client, cfg, name="Bravo Root CA").status_code == 303
+    bravo_root_id = _last_root_id(cfg)
+    assert (
+        _create_intermediate(client, cfg, bravo_root_id, name="Bravo Issuing CA").status_code == 303
+    )
+
+    page = client.get("/").text
+    assert _element(page, "ca-no-issuer").found is False
+
+
+def test_dashboard_empty_instance_keeps_its_own_distinct_message(
+    client: TestClient, cfg: Config
+) -> None:
+    """AC-8's other half, pinned again here because the per-hierarchy fix
+    touches the same `dashboard()` branch this depends on: an instance with
+    zero `ca_certificates` rows keeps the "CA: not set up" message
+    (`ca_configured`, unchanged by this defect) and must not also satisfy
+    the per-hierarchy no-issuer notice, which has nothing to iterate over.
+    """
+    _setup_superadmin(client)
+    page = client.get("/")
+    assert page.status_code == 200
+    error = _error_box(page.text)
+    assert error is not None
+    assert "CA: not set up" in error[0]
+    assert _element(page.text, "ca-no-issuer").found is False
+
+
 def test_no_ca_and_no_issuer_are_distinct_at_every_call_site(
     client: TestClient, cfg: Config
 ) -> None:
