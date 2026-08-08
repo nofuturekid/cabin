@@ -13,6 +13,35 @@ server, an MCP server, direct issuance, CSR signing, revocation and a CRL.
   first-run wizard creates the superadmin, then walks you through creating a
   root + intermediate CA (ECDSA P-256/P-384, RSA-4096 or Ed25519) or
   importing an existing one. Roles: superadmin, admin, viewer.
+- **Multiple CA hierarchies** — root and intermediate CAs run side by side
+  rather than one of each. Adding a new intermediate under an existing root
+  and retiring the old one is how rotation works, with nothing already
+  issued invalidated. Which issuer signs is explicit on every request and
+  defaults only when exactly one is active; with several active, leaving it
+  out is refused rather than guessed. A root chooses its `path_length` at
+  creation — 1 to 4, default 1 — and it never changes afterwards; see
+  Cross-signing below for why that matters.
+- **Per-issuer permissions** — grants, not just roles, decide who may issue
+  or revoke on which CA, held by users and API tokens alike and checked
+  fresh on every request, so withdrawing one takes effect on the next
+  request rather than the next login. They do not bind ACME unless
+  `acme_require_eab` is on: with it off, any account still registers at any
+  issuer's directory and obtains a certificate regardless of grants, so
+  "cabin has per-issuer permissions" is only true for ACME once that
+  setting is on.
+- **Name constraints** — an intermediate can be restricted, at creation, to
+  the DNS names and IP ranges it may sign. cabin checks its own
+  constraints before every issuance, ACME included, rather than trusting a
+  client to respect them. Roots take none, and renewal carries an
+  intermediate's constraints over unchanged.
+- **Cross-signing** — a root can sign another root, or import a
+  cross-certificate produced elsewhere, so devices that still trust the old
+  root have a path to certificates issued under the new one. It only works
+  if the signing root was created with a `path_length` of at least 2 —
+  cabin's default is 1, renewal carries that forward unchanged, and there
+  is no way to repair it afterwards, so this has to be planned a root
+  generation ahead. For anything else, running two hierarchies side by
+  side (above) is the simpler transition.
 - **Certificates** — issue `server`/`client` leaves with a server-generated
   key or by signing a pasted CSR, browse and search the inventory, download
   the leaf, the chain, the private key or a password-protected **PKCS#12**
@@ -28,12 +57,25 @@ server, an MCP server, direct issuance, CSR signing, revocation and a CRL.
   for that CA, so an identity holding no grant on it obtains no certificate
   over ACME; with EAB not required, anyone who can reach the port may
   register and order from any issuer's directory. Verified against certbot
-  and acme.sh, not just unit tests.
+  and acme.sh, not just unit tests. Two things to know before pointing a
+  client at it: `http-01` always dials port 80 on the resolved address
+  (RFC 8555 8.3) — never the port cabin listens on, and not one the client
+  gets to pick — so a host where port 80 is taken or unreachable from cabin
+  just fails the challenge, with nothing in the error saying why. And
+  loopback identifiers (`localhost`, `127.0.0.1`) are refused
+  unconditionally as an SSRF guard. There is a setting that widens what
+  validation may reach (`allow_private_validation_targets`, on by default),
+  but it only covers RFC 1918 addresses — loopback stays blocked either
+  way. Test with a name that resolves elsewhere instead, e.g. wildcard DNS
+  to a LAN address (`*.example.test` → `192.168.1.20`).
 - **MCP server** — `/mcp` (streamable HTTP), six tools so an AI assistant can
-  look at the CA and issue, sign or revoke certificates under an API token's
-  role.
-- **Revocation and CRL** — reason codes, a monotonic CRL number and a public
-  `/crl` (DER) / `/crl.pem` that regenerates itself when stale.
+  look at the CAs and issue, sign or revoke certificates under an API
+  token's role and issuer grants.
+- **Revocation and CRL** — reason codes, a monotonic CRL number per issuer,
+  and a public `/crl/<issuer id>` (DER) / `/crl/<issuer id>.pem` per
+  intermediate that regenerates itself when stale. `/ca/<id>.cer` serves
+  any row's own certificate, root or intermediate, so a client can complete
+  a chain from a leaf's AIA URL.
 - **Audit log** — who did what, from which front door (UI, API, ACME, MCP).
 - **Secrets encrypted at rest** — AES-256-GCM, master key in
   `/data/secret.key`, optionally wrapped with a passphrase-derived KEK.
