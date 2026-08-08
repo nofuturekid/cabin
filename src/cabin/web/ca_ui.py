@@ -23,6 +23,7 @@ from cabin.ca.service import (
     CACertificate,
     CAHierarchy,
     CANotConfiguredError,
+    CrossSignError,
     RetireError,
     UnknownIssuerError,
 )
@@ -184,7 +185,13 @@ def _row_view(
     directory is (spec 0019 FR-13: a directory belongs to one issuer, so it
     is shown in that issuer's own row rather than once for the whole page).
     Built through the same helper the ACME server itself resolves a
-    directory with, never by reassembling the string here."""
+    directory with, never by reassembling the string here.
+
+    Works unchanged for a ``kind == "cross"`` row (spec 0021 FR-13): it has
+    no key of its own, so ``parent_has_key`` -- the *signing* root's key
+    state for a cross row, the group's own root's for an intermediate --
+    decides ``can_renew`` exactly the way FR-11 moved the guard.
+    """
     has_key = row.key_sealed is not None
     signing_key_available = has_key if row.kind == "root" else parent_has_key
     is_intermediate = row.kind == "intermediate"
@@ -205,33 +212,120 @@ def _row_view(
     }
 
 
+def _cross_sign_candidates(
+    rows: list[CACertificate], subject: CACertificate
+) -> list[dict[str, object]]:
+    """FR-13: the roots that could sign ``subject`` -- a different root,
+    with a stored key (FR-4), whose ``path_length`` can carry the extra hop
+    (FR-3, ``cross_path_length_error``). A root that cannot sign is not
+    offered in the select rather than offered and then refused.
+    """
+    subject_cert = x509.load_pem_x509_certificate(subject.cert_pem.encode("utf-8"))
+    candidates: list[dict[str, object]] = []
+    for row in rows:
+        if row.kind != "root" or row.id == subject.id or row.key_sealed is None:
+            continue
+        issuer_cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+        if ca_x509.cross_path_length_error(subject_cert, issuer_cert) is None:
+            candidates.append({"id": row.id, "name": row.name})
+    return candidates
+
+
 def _groups(
     db: Session, rows: list[CACertificate], *, acme_enabled: bool
 ) -> list[dict[str, object]]:
-    """Every row grouped under its root, root first then its intermediates
-    in creation order (AC-12) -- ``list_cas`` already orders by id, so both
-    the roots and each root's own children come out in that order too."""
+    """Every row grouped under its root: root first, then its intermediates
+    in creation order (AC-12), then the cross certificates that duplicate it
+    (spec 0021 FR-13) -- each rendered under the root it *duplicates*
+    (``cross_of_id``), since that is where an operator looks for "what
+    paths does this hierarchy have". ``list_cas`` already orders by id, so
+    every one of these comes out in that order too.
+
+    Before this spec a cross row was invisible here: children were
+    collected only for ``kind == "intermediate"`` and a group was built
+    only for ``kind == "root"``, so a certificate cabin serves to every
+    client would show on no page at all.
+    """
     key_sealed_by_id = {row.id: row.key_sealed is not None for row in rows}
+    rows_by_id = {row.id: row for row in rows}
     children: dict[int, list[CACertificate]] = {}
+    crosses: dict[int, list[CACertificate]] = {}
     for row in rows:
         if row.kind == "intermediate" and row.parent_id is not None:
             children.setdefault(row.parent_id, []).append(row)
-    return [
-        {
-            "root": _row_view(db, root, parent_has_key=False, acme_enabled=acme_enabled),
-            "intermediates": [
-                _row_view(
-                    db,
-                    child,
-                    parent_has_key=key_sealed_by_id.get(root.id, False),
-                    acme_enabled=acme_enabled,
-                )
-                for child in children.get(root.id, [])
-            ],
+        elif row.kind == "cross" and row.cross_of_id is not None:
+            crosses.setdefault(row.cross_of_id, []).append(row)
+
+    groups: list[dict[str, object]] = []
+    for root in rows:
+        if root.kind != "root":
+            continue
+        # FR-6/FR-7: the one place this reads which path is actually served
+        # -- computed fresh on every render, never cached on a row.
+        chain_set = ca_service.chains_for(db, root.id)
+        default_cross_id = chain_set.default.via_cross_id
+        alternate_cross_ids = {
+            alt.via_cross_id for alt in chain_set.alternates if alt.via_cross_id is not None
         }
-        for root in rows
-        if root.kind == "root"
-    ]
+        cross_rows: list[dict[str, object]] = []
+        for cross in crosses.get(root.id, []):
+            if cross.id == default_cross_id:
+                served = "default"
+            elif cross.id in alternate_cross_ids:
+                served = "alternate"
+            else:
+                served = "not_served"
+            # A cross row's parent_id always names its signing root (FR-1's
+            # first invariant) -- the `is not None` guards are for mypy's
+            # benefit, not because either lookup is ever expected to miss.
+            signer = rows_by_id.get(cross.parent_id) if cross.parent_id is not None else None
+            parent_has_key = (
+                key_sealed_by_id.get(cross.parent_id, False)
+                if cross.parent_id is not None
+                else False
+            )
+            cross_rows.append(
+                {
+                    **_row_view(
+                        db,
+                        cross,
+                        parent_has_key=parent_has_key,
+                        acme_enabled=acme_enabled,
+                    ),
+                    "signed_by": signer.name if signer is not None else "unknown",
+                    "served": served,
+                }
+            )
+        groups.append(
+            {
+                "root": _row_view(db, root, parent_has_key=False, acme_enabled=acme_enabled),
+                "intermediates": [
+                    _row_view(
+                        db,
+                        child,
+                        parent_has_key=key_sealed_by_id.get(root.id, False),
+                        acme_enabled=acme_enabled,
+                    )
+                    for child in children.get(root.id, [])
+                ],
+                "cross_certificates": cross_rows,
+                "chain": {
+                    "default_name": chain_set.default.rows[-1].name,
+                    "default_id": chain_set.default.rows[-1].id,
+                    "default_via_cross": chain_set.default.via_cross_id is not None,
+                    "alternates": [
+                        {
+                            "name": alt.rows[-1].name,
+                            "id": alt.rows[-1].id,
+                            "via_cross": alt.via_cross_id is not None,
+                        }
+                        for alt in chain_set.alternates
+                    ],
+                },
+                "cross_sign_candidates": _cross_sign_candidates(rows, root),
+            }
+        )
+    return groups
 
 
 def _list_page(
@@ -456,6 +550,101 @@ def ca_create_intermediate(
     return RedirectResponse("/ca", status_code=303)
 
 
+@router.post("/{ca_id}/cross-sign")
+def ca_cross_sign(
+    ca_id: int,
+    request: Request,
+    signing_root_id: int = Form(...),
+    years: int = Form(10),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """Spec 0021 FR-4/FR-13: cabin signs a second certificate for
+    ``ca_id``'s root, using ``signing_root_id``'s key. Every refusal --
+    unknown id, not a root, no stored key, ``path_length`` too small, an
+    active cross certificate for this pair already existing -- re-renders
+    the list page at 400 with the message, before any row is written, the
+    same way ``ca_create``'s form errors do (FR-13); nothing here is a bare
+    HTTPException, because the action lives inside a details block on
+    ``/ca`` rather than on its own page.
+    """
+    form_error = _year_bounds_error(years, "years")
+    if form_error is not None:
+        return _list_page(request, db, user, form_error, status_code=400)
+    try:
+        row = ca_service.cross_sign_root(
+            db, request.app.state.secrets, ca_id, signing_root_id, years
+        )
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, CANotConfiguredError, CrossSignError) as exc:
+        return _list_page(request, db, user, str(exc), status_code=400)
+    produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    audit.record(
+        db,
+        actor,
+        AuditAction.ca_cross_signed,
+        summary=f"cross-signed {row.name!r} with root {signing_root_id}",
+        target_type="ca_certificate",
+        target_id=row.id,
+        detail={
+            "signing_root_id": signing_root_id,
+            "subject_root_id": ca_id,
+            "years": years,
+            "not_after": produced.not_valid_after_utc.replace(microsecond=0).isoformat(),
+        },
+        ip=client_ip(request, db),
+    )
+    return RedirectResponse("/ca", status_code=303)
+
+
+@router.post("/cross-import")
+def ca_cross_import(
+    request: Request,
+    cross_pem: str = Form(...),
+    issuer_pem: str = Form(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+    actor: Actor = Depends(current_actor),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """Spec 0021 FR-5/FR-13: import a cross certificate produced elsewhere.
+    No key, no name -- the subject root is resolved by matching the
+    submitted certificate against what is already on this instance
+    (``import_cross``), and 0017's naming rule reads the row's name off its
+    own certificate. Refused the same way ``ca_cross_sign`` is: a re-render
+    of the list page at 400, no row written.
+    """
+    try:
+        row = ca_service.import_cross(db, cross_pem, issuer_pem)
+    except CAImportError as exc:
+        return _list_page(request, db, user, str(exc), status_code=400)
+    cross_info = ca_x509.describe_certificate(
+        x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    )
+    issuer_info = ca_x509.describe_certificate(
+        x509.load_pem_x509_certificate(issuer_pem.encode("utf-8"))
+    )
+    audit.record(
+        db,
+        actor,
+        AuditAction.ca_cross_imported,
+        summary=f"imported cross certificate for {row.name!r}",
+        target_type="ca_certificate",
+        target_id=row.id,
+        detail={
+            "subject_root_id": row.cross_of_id,
+            "signing_root_id": row.parent_id,
+            "cross_fingerprint": cross_info["fingerprint"],
+            "signing_fingerprint": issuer_info["fingerprint"],
+        },
+        ip=client_ip(request, db),
+    )
+    return RedirectResponse("/ca", status_code=303)
+
+
 @router.post("/{ca_id}/renew")
 def ca_renew(
     ca_id: int,
@@ -538,12 +727,27 @@ def ca_cert_pem(
 @router.get("/{issuer_id}/chain.pem")
 def ca_chain_pem(
     issuer_id: int,
+    anchor: int | None = None,
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> PlainTextResponse:
+    """Spec 0021 FR-8: the default chain, or -- with ``?anchor=``, naming a
+    path by its topmost row's id (``ChainSet.by_anchor``) -- one specific
+    alternate. An ``anchor`` naming no path in this leaf's current
+    ``ChainSet`` is a 404, never a silent fallback to the default: a client
+    that asked for a specific anchor and got a different one has been
+    misinformed about the one thing it asked about.
+    """
     try:
-        chain = ca_service.chain_for(db, issuer_id)
+        chain_set = ca_service.chains_for(db, issuer_id)
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail="no such CA") from exc
+    if anchor is None:
+        chain = chain_set.default.rows
+    else:
+        found = chain_set.by_anchor(anchor)
+        if found is None:
+            raise HTTPException(status_code=404, detail="no such chain")
+        chain = found.rows
     body = "".join(row.cert_pem for row in chain)
     return PlainTextResponse(body, media_type="application/x-pem-file")

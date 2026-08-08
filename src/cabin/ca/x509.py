@@ -112,6 +112,15 @@ def _public_key_der(public_key: CertificatePublicKeyTypes) -> bytes:
     )
 
 
+def _name_constraints_or_none(
+    cert: x509.Certificate,
+) -> x509.Extension[x509.NameConstraints] | None:
+    try:
+        return cert.extensions.get_extension_for_class(x509.NameConstraints)
+    except x509.ExtensionNotFound:
+        return None
+
+
 def create_root(
     subject_cn: str, key_type: str, years: int = 20, path_length: int = 1
 ) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes]:
@@ -269,6 +278,108 @@ def renew_certificate(
     return builder.sign(parent_key, algorithm=signing_algorithm(parent_key))
 
 
+def cross_path_length_error(
+    subject_cert: x509.Certificate, issuer_cert: x509.Certificate
+) -> str | None:
+    """Whether ``issuer_cert`` can cross-sign ``subject_cert`` without
+    producing a path no validator will build (spec 0021 FR-3).
+
+    The cross path is one certificate longer than any path cabin builds
+    today -- ``A -> cross(B) -> intermediate(B) -> leaf`` -- so the signing
+    root ``issuer_cert`` needs ``path_length`` absent or >= 2 (the cross
+    certificate and B's intermediate both count; the leaf does not), and
+    the cross certificate -- which copies ``subject_cert``'s
+    BasicConstraints unchanged (:func:`cross_sign`) -- needs
+    ``path_length`` absent or >= 1. Checked before anything is signed or
+    written: a root's ``path_length`` cannot be changed afterwards by any
+    operation cabin has (:func:`renew_certificate` carries BasicConstraints
+    over unchanged), so the only remedy for a root that fails this is a
+    different root.
+
+    Returns a message naming ``path_length`` and the value the failing root
+    actually carries, or ``None`` when both hold. Shared by
+    :func:`cross_sign`'s caller, :func:`load_cross` and the UI's select of
+    roots that could sign a given one, so the arithmetic lives in one place.
+    """
+    issuer_length = issuer_cert.extensions.get_extension_for_class(
+        x509.BasicConstraints
+    ).value.path_length
+    if issuer_length is not None and issuer_length < 2:
+        return f"signing root's path_length is {issuer_length}, but cross-signing needs at least 2"
+    subject_length = subject_cert.extensions.get_extension_for_class(
+        x509.BasicConstraints
+    ).value.path_length
+    if subject_length is not None and subject_length < 1:
+        return f"root's path_length is {subject_length}, but a cross certificate needs at least 1"
+    return None
+
+
+def cross_sign(
+    subject_cert: x509.Certificate,
+    issuer_cert: x509.Certificate,
+    issuer_key: CertificateIssuerPrivateKeyTypes,
+    years: int = 10,
+) -> x509.Certificate:
+    """A second certificate for ``subject_cert``'s CA: same subject, same
+    public key, a new serial, signed by ``issuer_cert``/``issuer_key``
+    instead of ``subject_cert``'s own key (spec 0021 FR-2). Creates no new
+    CA and no new key -- there is no key to return, which is the difference
+    between this and :func:`create_intermediate`.
+
+    Deliberately not built on :func:`renew_certificate`, which is otherwise
+    the same shape: that function adds an AuthorityKeyIdentifier only when
+    the input already carried one, and a self-signed root (:func:`create_root`)
+    carries none -- so reusing it here would produce a cross certificate
+    with NO AuthorityKeyIdentifier, exactly the hint a path builder uses to
+    tell a root's two certificates apart (the DST Root CA X3 pathology in
+    miniature). This function always adds one, derived from the SIGNING
+    root through :func:`authority_key_identifier`.
+
+    Every other extension is copied from ``subject_cert`` byte for byte,
+    never rebuilt: a ``Name`` or a ``SubjectKeyIdentifier`` that renders
+    identically can encode differently, and to a path builder a differently
+    encoded one is a different CA. ``not_after`` is clamped to
+    ``issuer_cert``'s own, the same way :func:`create_intermediate` clamps
+    against its root, because a cross certificate outliving the root that
+    signed it would look like a path and never be one.
+
+    No CRL distribution point and no AuthorityInformationAccess: cabin
+    publishes neither for a root, so either would point at a document that
+    does not exist.
+
+    Raises ``ValueError`` if ``subject_cert`` carries no
+    SubjectKeyIdentifier -- a CA certificate without one cannot be
+    cross-signed usefully, and cabin writes one on every CA it creates.
+    """
+    try:
+        ski = subject_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    except x509.ExtensionNotFound as exc:
+        raise ValueError("subject certificate carries no SubjectKeyIdentifier") from exc
+    basic_constraints = subject_cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    key_usage = subject_cert.extensions.get_extension_for_class(x509.KeyUsage).value
+    name_constraints = _name_constraints_or_none(subject_cert)
+
+    now = datetime.now(UTC)
+    not_after = min(now + timedelta(days=_DAYS_PER_YEAR * years), issuer_cert.not_valid_after_utc)
+
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject_cert.subject)
+        .issuer_name(issuer_cert.subject)
+        .public_key(subject_cert.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - _BACKDATE)
+        .not_valid_after(not_after)
+        .add_extension(basic_constraints, critical=True)
+        .add_extension(key_usage, critical=True)
+        .add_extension(ski, critical=False)
+        .add_extension(authority_key_identifier(issuer_cert, issuer_key), critical=False)
+    )
+    if name_constraints is not None:
+        builder = builder.add_extension(name_constraints.value, critical=name_constraints.critical)
+    return builder.sign(issuer_key, algorithm=signing_algorithm(issuer_key))
+
+
 def load_import(
     cert_pem: bytes,
     key_pem: bytes,
@@ -342,6 +453,113 @@ def load_import(
             raise CAImportError(f"certificate does not chain to the given parent: {exc}") from exc
 
     return cert, key, parent
+
+
+def load_cross(
+    cross_pem: bytes,
+    subject_cert: x509.Certificate,
+    issuer_cert: x509.Certificate,
+) -> x509.Certificate:
+    """Parse and validate a cross certificate produced elsewhere, against
+    the two roots it claims to connect (spec 0021 FR-5).
+
+    Unlike :func:`load_import`, no private key is involved and none is
+    checked: nobody holds the private key of a cross certificate somebody
+    else produced, and cross-signing needs only a public key. What this
+    function exists to check instead is that ``cross_pem`` really is
+    another certificate for ``subject_cert``'s CA -- the same subject and
+    the same public key, compared as DER rather than as an RFC 4514 string
+    or a fingerprint of the subject alone -- and not an unrelated CA
+    certificate an operator could staple into the chain cabin serves to
+    every client because its subject CN happens to read the same.
+
+    Raises :class:`CAImportError`, with a message naming the reason -- the
+    existing type, not a new one, because the operator is doing the same
+    thing they do at ``/ca/import`` -- when: ``cross_pem`` doesn't parse;
+    its subject or its SubjectPublicKeyInfo don't match ``subject_cert``'s;
+    it wasn't signed by ``issuer_cert``
+    (:meth:`x509.Certificate.verify_directly_issued_by`); its
+    SubjectKeyIdentifier doesn't match ``subject_cert``'s -- equal public
+    keys don't force equal SKIs, and every intermediate under that root
+    carries an AuthorityKeyIdentifier naming the subject root's SKI, not its
+    public key; it has no ``BasicConstraints(ca=True)`` or its ``KeyUsage``
+    lacks ``keyCertSign``; it's expired or not yet valid;
+    :func:`cross_path_length_error` finds a problem with either root; or its
+    ``NameConstraints`` extension -- value and criticality both -- isn't
+    identical to ``subject_cert``'s, with both absent counting as identical
+    (spec 0020's deferred question, FR-12).
+    """
+    try:
+        cross = x509.load_pem_x509_certificate(cross_pem)
+    except ValueError as exc:
+        raise CAImportError(f"not a valid certificate PEM: {exc}") from exc
+
+    if cross.subject.public_bytes() != subject_cert.subject.public_bytes():
+        raise CAImportError("subject does not match the existing root's subject")
+    if _public_key_der(cross.public_key()) != _public_key_der(subject_cert.public_key()):
+        raise CAImportError("public key does not match the existing root's public key")
+
+    try:
+        cross.verify_directly_issued_by(issuer_cert)
+    except (ValueError, TypeError, InvalidSignature) as exc:
+        raise CAImportError(f"certificate was not signed by the given issuer: {exc}") from exc
+
+    try:
+        cross_ski = cross.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    except x509.ExtensionNotFound as exc:
+        raise CAImportError("certificate has no SubjectKeyIdentifier extension") from exc
+    try:
+        subject_ski = subject_cert.extensions.get_extension_for_class(
+            x509.SubjectKeyIdentifier
+        ).value
+    except x509.ExtensionNotFound as exc:
+        raise CAImportError(
+            "the existing root has no SubjectKeyIdentifier extension to compare against"
+        ) from exc
+    if cross_ski.public_bytes() != subject_ski.public_bytes():
+        raise CAImportError(
+            "SubjectKeyIdentifier does not match the existing root's -- "
+            "no intermediate under it would chain through this certificate"
+        )
+
+    try:
+        basic_constraints = cross.extensions.get_extension_for_class(x509.BasicConstraints).value
+    except x509.ExtensionNotFound as exc:
+        raise CAImportError("certificate has no BasicConstraints extension") from exc
+    if not basic_constraints.ca:
+        raise CAImportError("certificate is not a CA certificate (BasicConstraints ca=False)")
+
+    try:
+        key_usage = cross.extensions.get_extension_for_class(x509.KeyUsage).value
+    except x509.ExtensionNotFound as exc:
+        raise CAImportError(_KEY_USAGE_ERROR) from exc
+    if not key_usage.key_cert_sign:
+        raise CAImportError(_KEY_USAGE_ERROR)
+
+    now = datetime.now(UTC)
+    if now < cross.not_valid_before_utc:
+        raise CAImportError("certificate is not yet valid")
+    if now > cross.not_valid_after_utc:
+        raise CAImportError("certificate has expired")
+
+    path_length_error = cross_path_length_error(subject_cert, issuer_cert)
+    if path_length_error is not None:
+        raise CAImportError(path_length_error)
+
+    cross_nc = _name_constraints_or_none(cross)
+    subject_nc = _name_constraints_or_none(subject_cert)
+    mismatched = (cross_nc is None) != (subject_nc is None) or (
+        cross_nc is not None
+        and subject_nc is not None
+        and (
+            cross_nc.critical != subject_nc.critical
+            or cross_nc.value.public_bytes() != subject_nc.value.public_bytes()
+        )
+    )
+    if mismatched:
+        raise CAImportError("NameConstraints does not match the existing root's")
+
+    return cross
 
 
 def _key_type_label(public_key: CertificatePublicKeyTypes) -> str:

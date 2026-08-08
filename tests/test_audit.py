@@ -54,6 +54,10 @@ SPEC_ACTIONS = {
     # spec 0017 FR-15: renewing or retiring a CA hierarchy row
     "ca_renewed",
     "ca_retired",
+    # spec 0021 FR-14: cabin signed, or an operator imported, a second
+    # certificate for an existing root
+    "ca_cross_signed",
+    "ca_cross_imported",
     # spec 0022 FR-14: cabin's own TLS certificate, self-signed or CA-issued
     "tls_certificate_issued",
     # spec 0018 FR-15: the same self-issuance reaching a terminal failure

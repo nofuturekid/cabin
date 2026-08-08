@@ -115,8 +115,17 @@ def _tls_banner(request: Request, db: Session) -> dict[str, object] | None:
     )
     root_cer_url = None
     if system_cert is not None:
-        chain = ca_service.chain_for(db, system_cert.issuer_id)
-        root_cer_url = f"/ca/{chain[-1].id}.cer"
+        # Spec 0021 FR-8: deliberately `chains_for(...).self_signed`, NOT
+        # `chain_for`'s new default (`web/ca_ui.py`'s chain.pem route uses
+        # that default on purpose -- do not "fix" this to match it). Once a
+        # cross certificate exists, the default chain runs through it to an
+        # older root; inheriting that here would tell an operator to install
+        # the OLD root to keep trusting this instance, when the right answer
+        # is the root that will outlive the cross certificate. This banner's
+        # only job is "which root keeps this instance trusted", and that is
+        # always the self-signed one, whatever else is being served.
+        self_signed = ca_service.chains_for(db, system_cert.issuer_id).self_signed
+        root_cer_url = f"/ca/{self_signed.anchor_id}.cer"
     return {"mode": mode.value, "root_cer_url": root_cer_url}
 
 

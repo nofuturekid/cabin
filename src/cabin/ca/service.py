@@ -52,6 +52,12 @@ class RetireError(Exception):
     ``users.py:75-79``."""
 
 
+class CrossSignError(Exception):
+    """A cross certificate cannot be produced for these two roots: the
+    signing root's path_length cannot carry the subtree (spec 0021 FR-3),
+    or an active cross certificate for this pair already exists (FR-4)."""
+
+
 class CACertificate(Base):
     __tablename__ = "ca_certificates"
 
@@ -63,8 +69,17 @@ class CACertificate(Base):
     #: Not unique: a rotation deliberately produces a second row with the
     #: same name.
     name: Mapped[str] = mapped_column(sa.String(64), nullable=False)
-    #: Self-referential; NULL for a self-signed root (spec 0017 FR-1).
+    #: Self-referential; NULL for a self-signed root (spec 0017 FR-1). For a
+    #: cross row this names the root that SIGNED it, never a cross row
+    #: itself -- chain_for's parent_id walk never crosses two cross rows.
     parent_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("ca_certificates.id"), nullable=True
+    )
+    #: The self-signed row this row duplicates; set only for kind="cross"
+    #: (spec 0021 FR-1). NULL for every other row -- nullable even though a
+    #: cross row must always have one, because that pairing isn't
+    #: expressible as a single-row CHECK constraint.
+    cross_of_id: Mapped[int | None] = mapped_column(
         sa.ForeignKey("ca_certificates.id"), nullable=True
     )
     #: "active" or "retired" (spec 0017 FR-1/FR-4).
@@ -84,6 +99,58 @@ class CACertificate(Base):
 class CAHierarchy:
     root: CACertificate
     intermediate: CACertificate
+
+
+@dataclass(frozen=True)
+class Chain:
+    """One complete path from an issuer to its trust anchor (spec 0021
+    FR-6): ``rows`` is nearest-issuer-first with the anchor last, the order
+    every existing chain consumer already assumes. ``via_cross_id`` names
+    the cross row this path goes through, or ``None`` for the self-signed
+    path -- which is how :attr:`ChainSet.self_signed` finds it without
+    re-deriving anything from ``rows``."""
+
+    rows: tuple[CACertificate, ...]
+    via_cross_id: int | None
+
+    @property
+    def anchor_id(self) -> int:
+        """The id a client names this path by (FR-8, FR-9): the topmost
+        row's id, deliberately not an ordinal -- an ordinal shifts when a
+        cross certificate expires, and a client that remembered "alternate
+        1" would quietly start fetching a different chain."""
+        return self.rows[-1].id
+
+
+@dataclass(frozen=True)
+class ChainSet:
+    """The default path cabin serves for a CA and the alternates offered
+    alongside it (spec 0021 FR-6). The base (self-signed) path is always
+    present, whatever its own dates -- if the self-signed root has expired
+    there is nothing better to serve, and returning no chain at all would
+    turn a bad state into a 500 on every download."""
+
+    default: Chain
+    alternates: tuple[Chain, ...]
+
+    @property
+    def self_signed(self) -> Chain:
+        """The path whose ``via_cross_id`` is ``None``. Always present
+        (see class docstring), so this property is total and
+        ``web/ui.py``'s dashboard link can rely on it without a fallback."""
+        for chain in (self.default, *self.alternates):
+            if chain.via_cross_id is None:
+                return chain
+        raise AssertionError("ChainSet built with no self-signed path")
+
+    def by_anchor(self, anchor_id: int) -> Chain | None:
+        """The path whose topmost row has this id, or ``None`` when no path
+        in this set does (FR-8's and FR-9's 404s are built on this -- it
+        never falls back to the default)."""
+        for chain in (self.default, *self.alternates):
+            if chain.anchor_id == anchor_id:
+                return chain
+        return None
 
 
 def _cert_pem(cert: x509.Certificate) -> str:
@@ -148,15 +215,87 @@ def list_cas(
     return list(db.scalars(select(CACertificate).where(*conditions).order_by(CACertificate.id)))
 
 
-def chain_for(db: Session, ca_id: int) -> list[CACertificate]:
+def _parent_walk(db: Session, ca_id: int) -> list[CACertificate]:
     """``ca_id``'s row and its ancestors, nearest first, root last
     (spec 0017 FR-2/FR-8) -- walking ``parent_id`` rather than assuming the
-    one hierarchy this replaces did. Raises UnknownIssuerError for an
-    unknown id."""
+    one hierarchy this replaces did. No cross row can ever appear here:
+    nothing's ``parent_id`` names a cross row (spec 0021 FR-1's second
+    invariant), which is what keeps this walk from ever needing to know
+    about cross rows at all. Raises UnknownIssuerError for an unknown id.
+    """
     chain = [get_ca(db, ca_id)]
     while chain[-1].parent_id is not None:
         chain.append(get_ca(db, chain[-1].parent_id))
     return chain
+
+
+def chain_for(db: Session, ca_id: int) -> list[CACertificate]:
+    """``ca_id``'s row and its ancestors, nearest first, root last
+    (spec 0017 FR-2/FR-8) -- the DEFAULT chain (spec 0021 FR-6). Keeps its
+    exact pre-0021 signature and now delegates to :func:`chains_for`: every
+    existing chain-assembling call site serves the default without being
+    told to, and there is no argument a new one can forget to pass. Raises
+    UnknownIssuerError for an unknown id.
+    """
+    return list(chains_for(db, ca_id).default.rows)
+
+
+def _cert_valid_at(row: CACertificate, now: datetime) -> bool:
+    cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    return cert.not_valid_before_utc <= now <= cert.not_valid_after_utc
+
+
+def chains_for(db: Session, ca_id: int, now: datetime | None = None) -> ChainSet:
+    """Every path from ``ca_id`` to a trust anchor cabin currently serves,
+    and which one is the default (spec 0021 FR-6).
+
+    The base path is the plain ``parent_id`` walk (:func:`_parent_walk`,
+    unchanged since spec 0017). Each active cross row whose ``cross_of_id``
+    is the base path's topmost row -- taken in id order -- yields one
+    alternate: the base path with that top replaced by the cross row,
+    followed by the ``parent_id`` walk upward from the cross row's own
+    signing root. Only one hop: a cross row's signing root is never itself
+    searched for a further cross row, so the set of paths does not grow
+    with every generation of cross-signing.
+
+    An alternate is dropped when any row on it -- the cross certificate OR
+    the signing root above it -- isn't valid at ``now`` (FR-7, the DST Root
+    CA X3 requirement): evaluated fresh on every call, against ``now``
+    (defaulting to the current instant), with no cache and no column. The
+    surviving alternate whose cross row has the lowest id becomes the
+    default -- the oldest cross certificate, the one in the most trust
+    stores -- and the base path is always in ``alternates`` when it isn't
+    the default, because even an expired self-signed root is still the
+    only thing left to serve.
+
+    ``now`` lets a test name the instant directly rather than monkeypatching
+    a clock, so FR-7's boundary is measurable from both sides; production
+    callers omit it.
+    """
+    if now is None:
+        now = datetime.now(UTC)
+
+    base_rows = tuple(_parent_walk(db, ca_id))
+    base = Chain(rows=base_rows, via_cross_id=None)
+    top_id = base_rows[-1].id
+
+    cross_rows = db.scalars(
+        select(CACertificate)
+        .where(CACertificate.cross_of_id == top_id, CACertificate.status == "active")
+        .order_by(CACertificate.id)
+    )
+
+    surviving: list[Chain] = []
+    for cross_row in cross_rows:
+        assert cross_row.parent_id is not None  # FR-1: a cross row always has a signing root
+        signing_walk = tuple(_parent_walk(db, cross_row.parent_id))
+        if all(_cert_valid_at(row, now) for row in (cross_row, *signing_walk)):
+            rows = (*base_rows[:-1], cross_row, *signing_walk)
+            surviving.append(Chain(rows=rows, via_cross_id=cross_row.id))
+
+    if surviving:
+        return ChainSet(default=surviving[0], alternates=(base, *surviving[1:]))
+    return ChainSet(default=base, alternates=())
 
 
 def active_issuers(db: Session) -> list[CACertificate]:
@@ -411,6 +550,187 @@ def create_intermediate_under(
     return row
 
 
+def _same_ca(a: x509.Certificate, b: x509.Certificate) -> bool:
+    """Same subject -- compared as DER, never as an RFC 4514 string -- and
+    the same SubjectPublicKeyInfo (spec 0021 FR-5): the "these two
+    certificates are for the same logical CA" identity that resolving an
+    imported cross certificate's subject and signing root against existing
+    ``ca_certificates`` rows stands on. Without the public-key half, a CA
+    certificate whose subject CN happens to read the same as an existing
+    row's -- a string that isn't unique and that cabin itself generates
+    from an operator's label -- could be stapled into that row's identity.
+    """
+    a_key = a.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    b_key = b.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return a.subject.public_bytes() == b.subject.public_bytes() and a_key == b_key
+
+
+def cross_sign_root(
+    db: Session,
+    secrets: SecretStore,
+    ca_id: int,
+    signing_root_id: int,
+    years: int = 10,
+) -> CACertificate:
+    """Sign another root's certificate with this root's key, so a device
+    that only trusts ``signing_root_id`` can build a path to whatever
+    ``ca_id``'s hierarchy issues (spec 0021 FR-4). Writes one ``kind=
+    "cross"`` row: ``parent_id`` the signing root, ``cross_of_id`` the
+    subject root, ``key_sealed`` NULL -- the private key is the subject
+    root's own and is already sealed on that row.
+
+    ``ca_id``'s own private key is never needed and never touched: signing
+    a certificate for another CA's public key needs only that public key,
+    which is what lets cabin cross-sign an imported root. ``signing_root_id``
+    is the one whose key actually signs, so it must name a root with a
+    stored key -- CANotConfiguredError, naming the missing key, is raised
+    for the same reason :func:`create_intermediate_under` raises it for a
+    root with none.
+
+    Raises ``ValueError`` (naming "root") when ``ca_id`` or
+    ``signing_root_id`` doesn't name a ``kind == "root"`` row, or when they
+    name the same row -- cross-signing a root with itself would just be a
+    re-issued self-signed root, which is what :func:`renew_in_place` is
+    for. Raises :class:`CrossSignError` when
+    :func:`cabin.ca.x509.cross_path_length_error` finds a problem (FR-3),
+    or when an active cross certificate already exists for this exact pair
+    -- a second identical path serves nobody and makes FR-6's default rule
+    depend on a coin toss; renewing the existing one (FR-11) is what
+    extending it means.
+    """
+    ca = get_ca(db, ca_id)
+    if ca.kind != "root":
+        raise ValueError(f"CA certificate {ca_id} is not a root")
+    signing_root = get_ca(db, signing_root_id)
+    if signing_root.kind != "root":
+        raise ValueError(f"CA certificate {signing_root_id} is not a root")
+    if signing_root_id == ca_id:
+        raise ValueError(f"CA certificate {ca_id} cannot cross-sign itself")
+    if signing_root.key_sealed is None:
+        raise CANotConfiguredError(f"root {signing_root_id}'s private key is not available")
+
+    subject_cert = x509.load_pem_x509_certificate(ca.cert_pem.encode("utf-8"))
+    issuer_cert = x509.load_pem_x509_certificate(signing_root.cert_pem.encode("utf-8"))
+
+    path_length_error = ca_x509.cross_path_length_error(subject_cert, issuer_cert)
+    if path_length_error is not None:
+        raise CrossSignError(path_length_error)
+
+    existing = db.scalars(
+        select(CACertificate).where(
+            CACertificate.cross_of_id == ca_id,
+            CACertificate.parent_id == signing_root_id,
+            CACertificate.status == "active",
+        )
+    ).first()
+    if existing is not None:
+        raise CrossSignError(
+            f"an active cross certificate for CA {ca_id} signed by {signing_root_id} "
+            "already exists; renew it instead of cross-signing again"
+        )
+
+    issuer_key = _unseal_signing_key(secrets, signing_root.key_sealed)
+    cross_cert = ca_x509.cross_sign(subject_cert, issuer_cert, issuer_key, years)
+
+    row = CACertificate(
+        kind="cross",
+        name=_subject_name(cross_cert),
+        parent_id=signing_root_id,
+        cross_of_id=ca_id,
+        status="active",
+        cert_pem=_cert_pem(cross_cert),
+        key_sealed=None,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def import_cross(db: Session, cross_pem: str, issuer_pem: str) -> CACertificate:
+    """Store a cross certificate produced elsewhere (spec 0021 FR-5): the
+    old root belongs to somebody else, so there is no private key to submit
+    and nothing here ever touches one.
+
+    Resolves the SUBJECT root by comparing subject and public key
+    (:func:`_same_ca`) against every ``kind == "root"`` row cabin has:
+    exactly one must match, or the import is refused -- none matching means
+    this isn't a certificate for any CA on this instance, and more than one
+    matching is a duplicate-root state cabin cannot resolve. Reuses an
+    existing row for the SIGNING root by the same comparison, and otherwise
+    inserts it as a ``kind="root"`` row with ``key_sealed=None`` -- the same
+    shape :func:`import_hierarchy` already stores an imported parent in --
+    so two cross certificates from one old root don't produce two rows for
+    it and two entries on ``/ca``.
+
+    Raises :class:`cabin.ca.x509.CAImportError` for everything
+    :func:`cabin.ca.x509.load_cross` refuses, and for the "no matching root"
+    / "more than one matches" cases above.
+    """
+    try:
+        cross_preview = x509.load_pem_x509_certificate(cross_pem.encode("utf-8"))
+    except ValueError as exc:
+        raise ca_x509.CAImportError(f"not a valid certificate PEM: {exc}") from exc
+    try:
+        issuer_cert = x509.load_pem_x509_certificate(issuer_pem.encode("utf-8"))
+    except ValueError as exc:
+        raise ca_x509.CAImportError(f"not a valid issuer certificate PEM: {exc}") from exc
+
+    roots = list_cas(db, kind="root")
+    subject_rows = [
+        row
+        for row in roots
+        if _same_ca(x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8")), cross_preview)
+    ]
+    if not subject_rows:
+        raise ca_x509.CAImportError(
+            "this certificate's subject and public key do not match any CA on this instance"
+        )
+    if len(subject_rows) > 1:
+        raise ca_x509.CAImportError(
+            "more than one CA on this instance matches this certificate's subject and public key"
+        )
+    subject_row = subject_rows[0]
+    subject_cert = x509.load_pem_x509_certificate(subject_row.cert_pem.encode("utf-8"))
+
+    cross_cert = ca_x509.load_cross(cross_pem.encode("utf-8"), subject_cert, issuer_cert)
+
+    signing_rows = [
+        row
+        for row in roots
+        if row.id != subject_row.id
+        and _same_ca(x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8")), issuer_cert)
+    ]
+    if signing_rows:
+        signing_row = signing_rows[0]
+    else:
+        signing_row = CACertificate(
+            kind="root",
+            name=_subject_name(issuer_cert),
+            status="active",
+            cert_pem=_cert_pem(issuer_cert),
+            key_sealed=None,
+        )
+        db.add(signing_row)
+        db.flush()  # assigns signing_row.id, needed for the cross row's parent_id
+
+    row = CACertificate(
+        kind="cross",
+        name=_subject_name(cross_cert),
+        parent_id=signing_row.id,
+        cross_of_id=subject_row.id,
+        status="active",
+        cert_pem=_cert_pem(cross_cert),
+        key_sealed=None,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
 def retire_targets(db: Session, ca_id: int) -> set[int]:
     """The ids :func:`retire` would stand down for ``ca_id``: the row
     itself, plus its intermediates when it is a root (spec 0017 FR-4's
@@ -467,18 +787,28 @@ def renew_in_place(db: Session, secrets: SecretStore, ca_id: int, years: int) ->
     ``ca/x509.py:renew_certificate(cert, parent_cert, parent_key, years)``
     rather than assembling a ``CertificateBuilder`` here. ``parent_key`` is
     the only key that ever signs: for a root that is its own unsealed key
-    (self-renewal); for an intermediate it is the row ``parent_id`` names --
-    never the intermediate's own key, which only ever supplies its already-
-    signed public key via ``cert``. Requires the signing key: raises
-    CANotConfiguredError, naming the reason, for a row with no stored key
-    (an imported root) or an intermediate whose imported parent has none.
+    (self-renewal); for an intermediate or a cross row it is the row
+    ``parent_id`` names -- never the row's own key, which only ever
+    supplies its already-signed public key via ``cert``. Requires the
+    signing key: raises CANotConfiguredError, naming the reason, for a root
+    with no stored key (an imported root) or a non-root row whose parent
+    has none (an intermediate under an imported root, or a cross
+    certificate whose signing root has no key).
+
+    The ``key_sealed is None`` check lives in the ``kind == "root"`` branch
+    rather than up front (spec 0021 FR-11): a cross row's own ``key_sealed``
+    is always NULL -- its key belongs to the subject root's row, not to
+    this one (spec 0021 FR-1) -- so a top-of-function check on this row
+    would refuse a cross row's renewal outright. The non-root branch below
+    already checks the PARENT's key, which is what really guards the
+    signature, so nothing changes for any intermediate that exists today.
     """
     row = get_ca(db, ca_id)
-    if row.key_sealed is None:
-        raise CANotConfiguredError(f"CA certificate {ca_id}'s private key is not available")
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
 
     if row.kind == "root":
+        if row.key_sealed is None:
+            raise CANotConfiguredError(f"CA certificate {ca_id}'s private key is not available")
         parent_cert = cert
         parent_key = _unseal_signing_key(secrets, row.key_sealed)
         effective_years = years

@@ -475,8 +475,10 @@ def test_create_intermediate_under_applies_constraints(db: Session, secrets: Sec
 
 def test_no_constraint_column_exists_in_the_migrated_schema(db: Session) -> None:
     """Against the schema a fresh database migrates to -- not the
-    migrations' source text. ``ca_certificates`` gains no column,
-    ``certificates`` gains no column, and the chain still ends at 0010."""
+    migrations' source text. ``certificates`` gains no column and the chain
+    still ends at 0010. ``ca_certificates`` gains no column for *this*
+    spec -- ``cross_of_id`` is spec 0021 FR-1 editing migration 0003 again,
+    the same way this spec's own AC-9 anticipated a later edit to it."""
     inspector = inspect(db.get_bind())
     ca_columns = {col["name"] for col in inspector.get_columns("ca_certificates")}
     assert ca_columns == {
@@ -484,6 +486,7 @@ def test_no_constraint_column_exists_in_the_migrated_schema(db: Session) -> None
         "kind",
         "name",
         "parent_id",
+        "cross_of_id",
         "status",
         "cert_pem",
         "key_sealed",

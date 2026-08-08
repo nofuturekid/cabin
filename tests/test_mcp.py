@@ -500,6 +500,44 @@ def test_mcp_ca_info_matches_rest(mcp: TestClient, cfg: Config) -> None:
     assert mcp_by_id == rest_by_id
 
 
+def test_mcp_ca_info_matches_rest_for_cross_rows(mcp: TestClient, cfg: Config) -> None:
+    """AC-17: the same agreement as :func:`test_mcp_ca_info_matches_rest`,
+    extended to ``kind == "cross"`` and its ``cross_of_id`` -- the two
+    fields spec 0021 adds to both surfaces. Compares MCP directly against
+    REST rather than checking each against a literal id copied into this
+    test, because two assertions that each look right against a copied
+    literal can still drift from each other without either one failing.
+    """
+    from cabin.ca.service import create_hierarchy, cross_sign_root
+
+    admin = _token(cfg, Role.admin)
+    db = _db(cfg)
+    secrets = SecretStore.open(cfg.data_dir, cfg.master_passphrase)
+    try:
+        subject_root = db.scalars(select(CACertificate).where(CACertificate.kind == "root")).one()
+        # path_length=2: room for the cross certificate and the subject's
+        # own intermediate below it (spec 0021 FR-3).
+        signer = create_hierarchy(db, secrets, "signer", path_length=2)
+        cross = cross_sign_root(db, secrets, subject_root.id, signer.root.id)
+        cross_id, subject_root_id = cross.id, subject_root.id
+    finally:
+        db.close()
+
+    mcp_info = _call(mcp, "get_ca_info", token=admin)
+    resp = mcp.get("/api/v1/ca", headers={"Authorization": f"Bearer {admin}"})
+    assert resp.status_code == 200
+
+    mcp_by_id = {
+        row["id"]: (row["kind"], row.get("cross_of_id"))  # type: ignore[union-attr]
+        for row in mcp_info["issuers"]  # type: ignore[union-attr]
+    }
+    rest_by_id = {
+        row["id"]: (row["kind"], row.get("cross_of_id")) for row in resp.json()["issuers"]
+    }
+    assert mcp_by_id == rest_by_id
+    assert mcp_by_id[cross_id] == ("cross", subject_root_id)
+
+
 def test_mcp_list_and_get_certificate(mcp: TestClient, cfg: Config) -> None:
     """FR-3: the spec-0006 inventory with its filters, and one certificate
     with its chain."""

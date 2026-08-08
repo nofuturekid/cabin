@@ -42,6 +42,7 @@ from cabin.acme.http import (
     not_found,
     order_json,
     owned_order,
+    url,
     verified,
 )
 from cabin.acme.jws import KeyMode, VerifiedRequest, b64decode, key_mode
@@ -358,22 +359,38 @@ def _certificate_of(db: Session, raw_id: str, account_id: str) -> Certificate:
     return row
 
 
-def chain_pem(db: Session, row: Certificate) -> str:
-    """FR-2/FR-8: leaf, then the chain of *its own* issuer, nearest first,
-    root last.
+def _chain_set(db: Session, row: Certificate) -> "ca_service.ChainSet":
+    """Spec 0021 FR-6: the leaf's full set of paths -- the default and its
+    alternates -- built from *its own* issuer, root last."""
+    try:
+        return ca_service.chains_for(db, row.issuer_id)
+    except ca_service.UnknownIssuerError as exc:  # pragma: no cover - FK guarantees the row
+        raise AcmeError(
+            ErrorType.server_internal, "no CA is configured on this cabin instance"
+        ) from exc
+
+
+def chain_pem(db: Session, row: Certificate, chain: "ca_service.Chain | None" = None) -> str:
+    """FR-2/FR-8: leaf, then a chain of *its own* issuer's ancestors, nearest
+    first, root last. ``chain`` defaults to the leaf's default path (spec
+    0021 FR-6); the alternate route below passes a specific one instead.
 
     The root is included. For a public CA it would be redundant, but cabin's
     root is exactly what a client's trust store may not have yet, and an
     operator pointing a service at ``fullchain.pem`` should not have to go
     and fetch it separately.
     """
-    try:
-        chain = ca_service.chain_for(db, row.issuer_id)
-    except ca_service.UnknownIssuerError as exc:  # pragma: no cover - FK guarantees the row
-        raise AcmeError(
-            ErrorType.server_internal, "no CA is configured on this cabin instance"
-        ) from exc
-    return row.cert_pem + "".join(ca.cert_pem for ca in chain)
+    if chain is None:
+        chain = _chain_set(db, row).default
+    return row.cert_pem + "".join(ca.cert_pem for ca in chain.rows)
+
+
+def _alternate_url(db: Session, cert_id: str, anchor_id: int) -> str:
+    """FR-9: the URL an alternate path is fetched from -- built by the same
+    helper that verifies a POST-as-GET against it below, so the two can
+    never drift apart (the JWS ``url`` header is compared against exactly
+    what cabin publishes, RFC 8555 6.4)."""
+    return url(db, f"{CERT_PREFIX}{cert_id}/{anchor_id}")
 
 
 @router.post("/cert/{cert_id}")
@@ -392,13 +409,57 @@ def certificate_resource(
             "a certificate is fetched with a POST-as-GET request, which carries no payload",
         )
     row = _certificate_of(db, cert_id, account.id)
-    return Response(
-        content=chain_pem(db, row),
+    chain_set = _chain_set(db, row)
+    response = Response(
+        content=chain_pem(db, row, chain_set.default),
         media_type=PEM_CHAIN_CONTENT_TYPE,
-        # No Link rel="alternate": cabin publishes one chain (see the spec's
-        # Out of Scope), and offering a link to nothing would be worse than
-        # offering none.
     )
+    # Spec 0021 FR-9: one Link rel="alternate" per surviving alternate path.
+    # Appended, never assigned -- the response middleware appends a
+    # rel="index" link of its own (acme/http.py:246-252), and several
+    # alternates each need their own header line.
+    for alt in chain_set.alternates:
+        response.headers.append(
+            "Link", f'<{_alternate_url(db, cert_id, alt.anchor_id)}>;rel="alternate"'
+        )
+    return response
+
+
+@router.post("/cert/{cert_id}/{anchor_id}")
+def certificate_alternate(
+    cert_id: str,
+    anchor_id: str,
+    request: Request,
+    body: bytes = Depends(acme_body),
+    db: Session = Depends(get_db),
+) -> Response:
+    """RFC 8555 7.4.2's alternate link, fetched (spec 0021 FR-9).
+
+    Same JWS verification and the same ownership check as
+    :func:`certificate_resource`; the only difference is which of the
+    leaf's paths goes in the body. ``anchor_id`` is parsed by the
+    **existing** :func:`_certificate_id` -- not a second copy of the same
+    idea -- because a superscript digit, a zero-padded number and an
+    oversized integer each escape as a bare 500 with no problem document
+    and no ``Replay-Nonce`` otherwise, stranding a client that has already
+    spent one.
+    """
+    verification = verified(db, body, f"{CERT_PREFIX}{cert_id}/{anchor_id}", KeyMode.kid)
+    account = account_of(verification)
+    if verification.payload is not None:
+        raise AcmeError(
+            ErrorType.malformed,
+            "a certificate is fetched with a POST-as-GET request, which carries no payload",
+        )
+    row = _certificate_of(db, cert_id, account.id)
+    anchor_id_int = _certificate_id(anchor_id)
+    chain = _chain_set(db, row).by_anchor(anchor_id_int)
+    if chain is None:
+        # A cross certificate that expired between the Link header being
+        # read and this URL being fetched lands here too (FR-9) -- that is
+        # the correct outcome, not a fallback to the default.
+        raise not_found("certificate chain")
+    return Response(content=chain_pem(db, row, chain), media_type=PEM_CHAIN_CONTENT_TYPE)
 
 
 # --- FR-3: revocation ----------------------------------------------------------------

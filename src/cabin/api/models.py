@@ -53,9 +53,15 @@ class IssuerInfo(BaseModel):
 
     id: int
     name: str
-    kind: Literal["root", "intermediate"]
+    kind: Literal["root", "intermediate", "cross"]
     status: Literal["active", "retired"]
     parent_id: int | None
+    #: Spec 0021 FR-14: the self-signed row this certificate duplicates --
+    #: set only for ``kind == "cross"``, and omitted from the JSON rather
+    #: than kept present the way ``parent_id`` is, because ``kind`` already
+    #: tells a root from an intermediate and a field present only where it
+    #: means something is the smaller change.
+    cross_of_id: int | None = None
     subject: str
     issuer: str
     serial: str

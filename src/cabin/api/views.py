@@ -53,6 +53,7 @@ def issuer_info(db: Session, row: CACertificate) -> IssuerInfo:
             "kind": row.kind,
             "status": row.status,
             "parent_id": row.parent_id,
+            "cross_of_id": row.cross_of_id,
             "crl_url": crl_service.distribution_url(db, row.id)
             if row.kind == "intermediate"
             else None,

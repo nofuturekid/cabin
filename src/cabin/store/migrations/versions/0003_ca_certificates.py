@@ -16,6 +16,13 @@ deliberately produces a second row with the same label), parent_id
 (self-referential, NULL for a self-signed root), and status (active/retired,
 so a rotated-out issuer keeps serving its chain and CRL without being
 offered for new issuance).
+
+Edited in place again for spec 0021 FR-1 (cross-signing): kind's CHECK
+gains 'cross', and a new nullable cross_of_id column (self-referential FK)
+names the self-signed row a cross row duplicates -- parent_id already names
+the root that signed it. Edited rather than added as revision 0011 for the
+same reason 0019 FR-1 gave for 0008/0009: nothing in this release cycle has
+shipped, and spec 0020 AC-9 asserts the migration chain still ends at 0010.
 """
 
 import sqlalchemy as sa
@@ -39,11 +46,19 @@ def upgrade() -> None:
             sa.ForeignKey("ca_certificates.id"),
             nullable=True,
         ),
+        sa.Column(
+            "cross_of_id",
+            sa.Integer(),
+            sa.ForeignKey("ca_certificates.id"),
+            nullable=True,
+        ),
         sa.Column("status", sa.String(length=16), nullable=False, server_default="active"),
         sa.Column("cert_pem", sa.Text(), nullable=False),
         sa.Column("key_sealed", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.CheckConstraint("kind IN ('root', 'intermediate')", name="ck_ca_certificates_kind"),
+        sa.CheckConstraint(
+            "kind IN ('root', 'intermediate', 'cross')", name="ck_ca_certificates_kind"
+        ),
         sa.CheckConstraint("status IN ('active', 'retired')", name="ck_ca_certificates_status"),
     )
 

@@ -51,7 +51,7 @@
       <div class="field">
         <label for="path_length">Path length</label>
         <input id="path_length" type="number" name="path_length" min="1" max="4" value="1" required />
-        <span class="hint">How many further intermediates may sign under the root. Cannot be changed later.</span>
+        <span class="hint">How many further intermediates may sign under the root. Cannot be changed later. A root that may ever need to cross-sign an older one needs at least 2 -- planned one root generation ahead, since this cannot be widened afterwards.</span>
       </div>
       <div class="field">
         <label for="permitted_names">Permitted names</label>

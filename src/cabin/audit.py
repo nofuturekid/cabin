@@ -82,6 +82,14 @@ class AuditAction(StrEnum):
     # Spec 0017 FR-15: rotation and retirement of a CA hierarchy row.
     ca_renewed = "ca_renewed"
     ca_retired = "ca_retired"
+    # Spec 0021 FR-14: cabin signed, or an operator imported, a second
+    # certificate for an existing root. Deliberately separate from
+    # ca_created/ca_imported: extending what an existing root vouches for is
+    # a materially different act from creating a hierarchy, and a log that
+    # cannot tell them apart cannot answer the one question anybody will ask
+    # it afterwards.
+    ca_cross_signed = "ca_cross_signed"
+    ca_cross_imported = "ca_cross_imported"
     settings_changed = "settings_changed"
     cert_issued = "cert_issued"
     cert_signed = "cert_signed"
