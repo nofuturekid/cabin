@@ -76,21 +76,25 @@ def _csrf(client: TestClient, cfg: Config) -> str:
         db.close()
 
 
-def _configured(client: TestClient, cfg: Config) -> None:
+def _configured(client: TestClient, cfg: Config) -> int:
     """Superadmin, a real signed hierarchy built directly against the ORM
     (``/ca/create`` belongs to Frontend and is irrelevant to what this file
     tests -- the same shortcut ``test_acme_finalize.py`` already takes), an
-    https:// base URL, and ACME/MCP switched on so all four doors answer."""
+    https:// base URL, and ACME/MCP switched on so all four doors answer.
+
+    Returns the intermediate's id -- spec 0019 gives the ACME door a
+    per-issuer path, so the caller needs it to drive that door at all."""
     assert (
         client.post("/setup", data={"username": "alice", "password": "correcthorse1"}).status_code
         == 303
     )
     db = _db(cfg)
     try:
-        ca_service.create_hierarchy(db, _secrets(cfg), "cabin")
+        hierarchy = ca_service.create_hierarchy(db, _secrets(cfg), "cabin")
         set_setting(db, BASE_URL, HTTPS_BASE_URL)
         set_setting(db, ACME_ENABLED, TRUE)
         set_setting(db, MCP_ENABLED, TRUE)
+        return hierarchy.intermediate.id
     finally:
         db.close()
 
@@ -156,7 +160,7 @@ def test_issuance_entry_points_use_the_forced_http_origin(client: TestClient, cf
     A wrong implementation that gets public_http_origin exactly right but
     forgets to route one door through it fails exactly one of these four
     assertions and no other test in the project."""
-    _configured(client, cfg)
+    issuer_id = _configured(client, cfg)
 
     # --- web/certs_ui.py ---------------------------------------------------
     web_resp = client.post(
@@ -208,7 +212,7 @@ def test_issuance_entry_points_use_the_forced_http_origin(client: TestClient, cf
     # client has to sign its JWS "url" headers against that same origin
     # instead of Acme's "http://testserver" default, or every request 403s
     # before it gets near issuance.
-    acme = Acme(client, base=HTTPS_BASE_URL)
+    acme = Acme(client, base=HTTPS_BASE_URL, issuer_id=issuer_id)
     flow = Flow(acme, cfg, "acme-door.example.lan")
     flow.make_ready()
     flow.finalize_ok(csr_der("acme-door.example.lan"))

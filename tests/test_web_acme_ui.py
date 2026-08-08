@@ -31,6 +31,7 @@ from cabin.settings import (
     set_setting,
 )
 from cabin.store import create_session_factory
+from cabin.users import Role, create_user
 
 ACME_PAGE = "/acme/admin"
 #: What the one-time secret looks like on screen: base64url, no padding.
@@ -65,7 +66,9 @@ def _csrf(client: TestClient, cfg: Config) -> str:
 
 def _setup(client: TestClient, cfg: Config) -> str:
     """First-run superadmin plus a base URL, which ACME needs before it can
-    hand out any URL at all."""
+    hand out any URL at all, and a hierarchy (spec 0019 FR-13: the /acme
+    page lists one directory row per intermediate, so there has to be one to
+    list)."""
     assert (
         client.post("/setup", data={"username": "alice", "password": "correcthorse1"}).status_code
         == 303
@@ -73,9 +76,23 @@ def _setup(client: TestClient, cfg: Config) -> str:
     db = _db(cfg)
     try:
         set_setting(db, BASE_URL, "https://ca.example.org")
+        ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin"
+        )
     finally:
         db.close()
     return _csrf(client, cfg)
+
+
+def _issuer_id(cfg: Config) -> int:
+    """The intermediate ``_setup`` created -- spec 0019 gives every ACME
+    surface a per-issuer shape, so a test that means "the one hierarchy"
+    still has to name it."""
+    db = _db(cfg)
+    try:
+        return ca_service.active_issuers(db)[0].id
+    finally:
+        db.close()
 
 
 def _keys(cfg: Config) -> list[AcmeEabKey]:
@@ -97,10 +114,13 @@ def _actions(cfg: Config) -> list[str]:
 def test_acme_ui_key_lifecycle(client: TestClient, cfg: Config) -> None:
     """FR-5/AC-6: create a key, see its secret exactly once, then revoke it."""
     csrf = _setup(client, cfg)
+    issuer_id = _issuer_id(cfg)
 
     page = client.get(ACME_PAGE)
     assert page.status_code == 200, page.text
-    assert "https://ca.example.org/acme/directory" in page.text
+    # spec 0019 FR-13: the page lists one directory URL per intermediate,
+    # not a single instance-wide one.
+    assert f"https://ca.example.org/acme/ca/{issuer_id}/directory" in page.text
     # FR-5: the onboarding snippets an operator copies
     assert "certbot" in page.text
     assert "acme.sh" in page.text
@@ -119,12 +139,33 @@ def test_acme_ui_key_lifecycle(client: TestClient, cfg: Config) -> None:
     finally:
         db.close()
 
-    created = client.post(f"{ACME_PAGE}/eab-keys", data={"label": "nas.lan", "csrf_token": csrf})
+    # spec 0019 FR-8: minting a key is now a granted operation. alice is a
+    # superadmin, whose grant is implicit (0018 FR-3) and would let this
+    # POST through no matter what FR-8 checked -- so the rest of this test
+    # switches to a plain admin explicitly granted this issuer, which is
+    # what makes the request below prove the grant, not the role that
+    # happened to set up the instance.
+    db = _db(cfg)
+    try:
+        operator = create_user(db, "operator", "whatever12345", Role.admin)
+        grant_fixtures.grant_user(db, operator, issuer_id)
+    finally:
+        db.close()
+    client.cookies.clear()
+    logged_in = client.post("/login", data={"username": "operator", "password": "whatever12345"})
+    assert logged_in.status_code == 303, logged_in.text
+    csrf = _csrf(client, cfg)
+
+    created = client.post(
+        f"{ACME_PAGE}/eab-keys",
+        data={"label": "nas.lan", "issuer_id": str(issuer_id), "csrf_token": csrf},
+    )
     assert created.status_code == 200, created.text
     rows = _keys(cfg)
     assert len(rows) == 1
     key_id = rows[0].id
     assert rows[0].label == "nas.lan"
+    assert rows[0].ca_certificate_id == issuer_id
     assert key_id in created.text
 
     # the secret is on this page, exactly once, and never stored in the clear

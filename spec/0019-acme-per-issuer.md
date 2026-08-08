@@ -421,7 +421,8 @@ the release notes have to repeat it.
   request through `http.verified` and its eleven call sites for a header no
   client in the interop gate reads. The gate itself is the evidence that
   this costs nothing: certbot and acme.sh must complete a full issuance with
-  the header absent from nine of the ten responses they receive (AC-13).
+  the header present on the directory and new-account responses only, and
+  absent from the other eight of the ten responses they receive (AC-13).
 
 - FR-12: **What is protected afterwards, and what is not.** Written as a
   requirement rather than as prose at the end, because the release notes
@@ -815,9 +816,15 @@ instance cannot distinguish "used the right issuer" from "used the only one".
   5. certbot is pointed at **B's** directory with the account key already
      registered for A: refused, FR-6, and the account is still A's.
 
-  Both clients must complete steps 1 and 2 with FR-11's `index` link absent
-  from every response but the directory's — that absence is the evidence the
-  deviation costs nothing.
+  Both clients must complete steps 1 and 2 with FR-11's `index` link present
+  only on the directory and new-account responses — the two per-issuer
+  paths — and absent from the other eight of the ten responses each client
+  receives; that split, not a stricter absence, is what FR-11 accepts, and
+  it is the evidence the deviation costs nothing. The deviation itself
+  exists because RFC 8555 7.1 asks for the link on every response and FR-3
+  removes the one shared directory URL that used to fill it, so a client
+  the gate did not cover would otherwise be the first to notice the header
+  is narrower than the RFC describes.
 
 - AC-14: **Every surface shows the right URL for the right issuer.** For
   each of A and B: `/ca` renders that issuer's directory URL as visible text

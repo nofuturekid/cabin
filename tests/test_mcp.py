@@ -443,12 +443,15 @@ def test_mcp_get_ca_info(mcp: TestClient, cfg: Config) -> None:
     assert info["base_url"] == BASE
     issuers = info["issuers"]
     assert isinstance(issuers, list)
-    # ACME is off, so there is no directory URL to hand out.
-    assert info["acme_directory_url"] is None
+    # ACME is off, so there are no directory URLs to hand out (spec 0019
+    # FR-13: a scalar field cannot answer "which URL is which CA" once there
+    # is one per issuer, so the empty case is an empty list, not None).
+    assert info["acme_directory_urls"] == []
 
     db = _db(cfg)
     try:
         by_id = {row.id: row for row in active_issuers(db)}
+        intermediate_id = next(iter(by_id.values())).id
         root = db.get(CACertificate, next(iter(by_id.values())).parent_id)
         assert root is not None
         expected = {
@@ -475,7 +478,11 @@ def test_mcp_get_ca_info(mcp: TestClient, cfg: Config) -> None:
     assert described_by_kind["intermediate"]["parent_id"] == described_by_kind["root"]["id"]
 
     again = _call(mcp, "get_ca_info", token=_token(cfg, Role.viewer))
-    assert again["acme_directory_url"] == f"{BASE}/acme/directory"
+    # spec 0019 FR-13: one entry per issuer (per-issuer directories replace
+    # the old scalar field, FR-3).
+    assert again["acme_directory_urls"] == [
+        {"issuer_id": intermediate_id, "url": f"{BASE}/acme/ca/{intermediate_id}/directory"}
+    ]
 
 
 def test_mcp_ca_info_matches_rest(mcp: TestClient, cfg: Config) -> None:

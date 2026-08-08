@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 from starlette.responses import Response
 
 from cabin import audit
-from cabin.acme.http import directory_url
 from cabin.audit import Actor, AuditAction
 from cabin.ca import service as ca_service
 from cabin.mcp import endpoint_url as mcp_endpoint_url
@@ -110,11 +109,6 @@ def _page(
             # is ticked for an instance that has never touched it.
             "allow_private_validation_targets": allow_private,
             "dns_resolvers": dns_resolvers,
-            # Spec 0010 FR-5: the URL an operator hands to a client -- None
-            # until a base URL is set, because an ACME directory is only
-            # useful as an absolute URL, and one guessed from this request
-            # would work in this browser and nowhere else.
-            "acme_directory_url": directory_url(db),
             # Spec 0022 FR-17: rendered only with TLS on, mirroring how the
             # issue form's own issuer selector renders only when there is a
             # choice to make (spec 0017 FR-14).

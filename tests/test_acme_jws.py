@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 from cabin.acme import nonces
 from cabin.acme.models import AcmeNonce
 from cabin.app import create_app
+from cabin.ca import service as ca_service
 from cabin.config import Config
+from cabin.secrets import SecretStore
 from cabin.settings import ACME_ENABLED, BASE_URL, TRUE, set_setting
 from cabin.store import create_session_factory
 
@@ -43,8 +45,23 @@ def client(cfg: Config) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    """The JWS mechanics under test here do not care which issuer they run
+    against -- a single hierarchy is enough (a two-hierarchy fixture would
+    buy nothing but a slower test, spec 0019 work split §2.3)."""
+    db = db_session(cfg)
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
 
 
 def db_session(cfg: Config) -> Session:
@@ -68,7 +85,14 @@ def problem(resp: Response) -> dict[str, Any]:
     return body
 
 
-def assert_problem(resp: Response, kind: str, status: int) -> None:
+def assert_problem(resp: Response, kind: str, status: int, *, index_link: bool = True) -> None:
+    """``index_link`` defaults to True because almost every call in this
+    file signs against ``acme.new_account_path``, one of the two per-issuer
+    paths spec 0019 FR-11 gives the ``index`` link to. A test that instead
+    drives a global path -- ``/acme/new-order`` here -- passes
+    ``index_link=False`` and gets a positive check that the link is *not*
+    there, rather than the check being silently skipped.
+    """
     __tracebackhide__ = True
     assert resp.status_code == status, resp.text
     assert resp.headers["content-type"].startswith("application/problem+json")
@@ -76,7 +100,10 @@ def assert_problem(resp: Response, kind: str, status: int) -> None:
     assert body["type"] == f"{ERROR_PREFIX}{kind}", body
     # FR-4: even an error hands back a usable nonce, or the client is stuck.
     assert resp.headers["replay-nonce"]
-    assert 'rel="index"' in resp.headers["link"]
+    if index_link:
+        assert 'rel="index"' in resp.headers["link"]
+    else:
+        assert "link" not in resp.headers, resp.headers["link"]
 
 
 # --- FR-3, AC-1: nonces ------------------------------------------------------------
@@ -88,16 +115,16 @@ def test_nonce_single_use(acme: Acme) -> None:
     key = rsa_key()
     nonce = acme.nonce()
 
-    first = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True}, nonce=nonce)
+    first = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True}, nonce=nonce)
     assert first.status_code == 201, first.text
 
-    second = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True}, nonce=nonce)
+    second = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True}, nonce=nonce)
 
     assert_problem(second, "badNonce", 400)
     assert second.headers["replay-nonce"] != nonce
     # ...and the fresh one works
     retry = acme.post(
-        "/acme/new-account",
+        acme.new_account_path,
         key,
         {"termsOfServiceAgreed": True},
         nonce=second.headers["replay-nonce"],
@@ -134,10 +161,10 @@ def test_jws_rejects_stale_nonce(acme: Acme, cfg: Config) -> None:
     """AC-2: an unknown, missing or expired nonce is badNonce, never a 500."""
     key = rsa_key()
 
-    unknown = acme.post("/acme/new-account", key, {}, nonce="AAAAAAAAAAAAAAAAAAAAAA")
+    unknown = acme.post(acme.new_account_path, key, {}, nonce="AAAAAAAAAAAAAAAAAAAAAA")
     assert_problem(unknown, "badNonce", 400)
 
-    missing = acme.post("/acme/new-account", key, {}, drop=("nonce",))
+    missing = acme.post(acme.new_account_path, key, {}, drop=("nonce",))
     assert_problem(missing, "badNonce", 400)
 
     expired = acme.nonce()
@@ -149,7 +176,7 @@ def test_jws_rejects_stale_nonce(acme: Acme, cfg: Config) -> None:
         db.commit()
     finally:
         db.close()
-    assert_problem(acme.post("/acme/new-account", key, {}, nonce=expired), "badNonce", 400)
+    assert_problem(acme.post(acme.new_account_path, key, {}, nonce=expired), "badNonce", 400)
 
 
 def test_nonce_is_not_burned_by_a_bad_signature(acme: Acme) -> None:
@@ -162,15 +189,15 @@ def test_nonce_is_not_burned_by_a_bad_signature(acme: Acme) -> None:
         {
             "alg": "RS256",
             "nonce": nonce,
-            "url": acme.url("/acme/new-account"),
+            "url": acme.url(acme.new_account_path),
             "jwk": key.jwk,
         },
         {"termsOfServiceAgreed": True},
     )
     body["signature"] = b64(b"\x00" * 256)
-    assert_problem(acme.post_body("/acme/new-account", body), "malformed", 400)
+    assert_problem(acme.post_body(acme.new_account_path, body), "malformed", 400)
 
-    good = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True}, nonce=nonce)
+    good = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True}, nonce=nonce)
     assert good.status_code == 201, good.text
 
 
@@ -194,7 +221,7 @@ def test_jws_rejects_base64url_with_a_trailing_newline(acme: Acme) -> None:
                 {
                     "alg": "RS256",
                     "nonce": acme.nonce(),
-                    "url": acme.url("/acme/new-account"),
+                    "url": acme.url(acme.new_account_path),
                     "jwk": key.jwk,
                 }
             )
@@ -215,13 +242,13 @@ def test_jws_rejects_base64url_with_a_trailing_newline(acme: Acme) -> None:
         {"payload_suffix": "\r\n"},
         {"payload_suffix": "\n\n"},
     ):
-        resp = acme.post_body("/acme/new-account", signed(**kwargs))
+        resp = acme.post_body(acme.new_account_path, signed(**kwargs))
         assert_problem(resp, "malformed", 400)
 
     # ...and a signature with one too
     body = signed()
     body["signature"] += "\n"
-    assert_problem(acme.post_body("/acme/new-account", body), "malformed", 400)
+    assert_problem(acme.post_body(acme.new_account_path, body), "malformed", 400)
 
 
 def test_jws_rejects_bad_signature(acme: Acme) -> None:
@@ -234,12 +261,12 @@ def test_jws_rejects_bad_signature(acme: Acme) -> None:
         {
             "alg": "RS256",
             "nonce": acme.nonce(),
-            "url": acme.url("/acme/new-account"),
+            "url": acme.url(acme.new_account_path),
             "jwk": key.jwk,
         },
         {"termsOfServiceAgreed": True},
     )
-    assert_problem(acme.post_body("/acme/new-account", body), "malformed", 400)
+    assert_problem(acme.post_body(acme.new_account_path, body), "malformed", 400)
 
     # a payload swapped after signing
     tampered = flattened(
@@ -247,13 +274,13 @@ def test_jws_rejects_bad_signature(acme: Acme) -> None:
         {
             "alg": "RS256",
             "nonce": acme.nonce(),
-            "url": acme.url("/acme/new-account"),
+            "url": acme.url(acme.new_account_path),
             "jwk": key.jwk,
         },
         {"termsOfServiceAgreed": True},
     )
     tampered["payload"] = b64json({"contact": ["mailto:someone-else@example.org"]})
-    assert_problem(acme.post_body("/acme/new-account", tampered), "malformed", 400)
+    assert_problem(acme.post_body(acme.new_account_path, tampered), "malformed", 400)
 
 
 def test_jws_rejects_none_and_hs256(acme: Acme) -> None:
@@ -267,16 +294,16 @@ def test_jws_rejects_none_and_hs256(acme: Acme) -> None:
         {
             "alg": "none",
             "nonce": acme.nonce(),
-            "url": acme.url("/acme/new-account"),
+            "url": acme.url(acme.new_account_path),
             "jwk": key.jwk,
         },
         {"termsOfServiceAgreed": True},
     )
     unsigned["signature"] = ""
-    assert_problem(acme.post_body("/acme/new-account", unsigned), "badSignatureAlgorithm", 400)
+    assert_problem(acme.post_body(acme.new_account_path, unsigned), "badSignatureAlgorithm", 400)
 
     for alg in ("HS256", "HS384", "HS512", "RS1", "ES512", "PS256", "rs256", ""):
-        resp = acme.post("/acme/new-account", key, {}, alg=alg)
+        resp = acme.post(acme.new_account_path, key, {}, alg=alg)
         assert_problem(resp, "badSignatureAlgorithm", 400)
         # RFC 8555 6.2: say which algorithms would have worked
         assert "RS256" in problem(resp)["algorithms"]
@@ -288,29 +315,30 @@ def test_jws_rejects_none_and_hs256(acme: Acme) -> None:
             {
                 "alg": "HS256",
                 "nonce": acme.nonce(),
-                "url": acme.url("/acme/new-account"),
+                "url": acme.url(acme.new_account_path),
                 "jwk": {"kty": "oct", "k": b64(b"secret")},
             }
         ),
         "payload": b64json({}),
         "signature": b64(b"whatever"),
     }
-    assert_problem(acme.post_body("/acme/new-account", forged), "badSignatureAlgorithm", 400)
+    assert_problem(acme.post_body(acme.new_account_path, forged), "badSignatureAlgorithm", 400)
 
 
 def test_jws_rejects_jwk_and_kid_together(acme: Acme) -> None:
     """AC-2: RFC 8555 6.2 -- exactly one of jwk/kid, never both and never
     neither."""
     key = rsa_key()
-    created = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True})
+    created = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True})
     assert created.status_code == 201, created.text
     kid = created.headers["location"]
 
+    # FR-11: /acme/new-order is a global path -- no index link
     both = acme.post("/acme/new-order", key, {}, kid=kid, protected={"jwk": key.jwk})
-    assert_problem(both, "malformed", 400)
+    assert_problem(both, "malformed", 400, index_link=False)
 
     neither = acme.post("/acme/new-order", key, {}, drop=("jwk",))
-    assert_problem(neither, "malformed", 400)
+    assert_problem(neither, "malformed", 400, index_link=False)
 
 
 def test_jws_rejects_wrong_url(acme: Acme) -> None:
@@ -320,21 +348,21 @@ def test_jws_rejects_wrong_url(acme: Acme) -> None:
 
     for wrong in (
         "http://testserver/acme/new-order",
-        "https://testserver/acme/new-account",
-        "http://evil.example/acme/new-account",
-        "http://testserver/acme/new-account/",
+        f"https://testserver{acme.new_account_path}",
+        f"http://evil.example{acme.new_account_path}",
+        f"http://testserver{acme.new_account_path}/",
         "",
     ):
-        assert_problem(acme.post("/acme/new-account", key, {}, url=wrong), "unauthorized", 403)
+        assert_problem(acme.post(acme.new_account_path, key, {}, url=wrong), "unauthorized", 403)
 
-    assert_problem(acme.post("/acme/new-account", key, {}, drop=("url",)), "unauthorized", 403)
+    assert_problem(acme.post(acme.new_account_path, key, {}, drop=("url",)), "unauthorized", 403)
 
 
 def test_jws_accepts_every_allowed_algorithm(acme: Acme) -> None:
     """The allowlist is a list, not a single algorithm: a client with an EC
     or Ed25519 account key has to work too."""
     for key in (rsa_key(), ec_key("ES256"), ec_key("ES384"), ed25519_key()):
-        resp = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True})
+        resp = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True})
         assert resp.status_code == 201, f"{key.alg}: {resp.text}"
 
 
@@ -347,20 +375,20 @@ def test_jws_rejects_unusable_keys(acme: Acme) -> None:
         {
             "alg": "ES256",
             "nonce": acme.nonce(),
-            "url": acme.url("/acme/new-account"),
+            "url": acme.url(acme.new_account_path),
             "jwk": p384.jwk,
         },
         {},
     )
-    assert_problem(acme.post_body("/acme/new-account", mismatched), "badPublicKey", 400)
+    assert_problem(acme.post_body(acme.new_account_path, mismatched), "badPublicKey", 400)
 
     small = rsa_key(bits=1024)
-    assert_problem(acme.post("/acme/new-account", small, {}), "badPublicKey", 400)
+    assert_problem(acme.post(acme.new_account_path, small, {}), "badPublicKey", 400)
 
     key = rsa_key()
     with_private = dict(key.jwk)
     with_private["d"] = b64(b"\x01" * 32)
-    resp = acme.post("/acme/new-account", key, {}, protected={"jwk": with_private})
+    resp = acme.post(acme.new_account_path, key, {}, protected={"jwk": with_private})
     assert_problem(resp, "badPublicKey", 400)
 
 
@@ -407,7 +435,7 @@ def test_jws_rejects_malformed_bodies_without_a_500(acme: Acme) -> None:
         },
     ]
     for body in bodies:
-        resp = acme.post_body("/acme/new-account", body)
+        resp = acme.post_body(acme.new_account_path, body)
         assert resp.status_code < 500, f"{body!r} -> {resp.status_code} {resp.text}"
         assert resp.headers["replay-nonce"], body
         assert str(problem(resp)["type"]).startswith(ERROR_PREFIX)
@@ -418,13 +446,13 @@ def test_jws_rejects_malformed_bodies_without_a_500(acme: Acme) -> None:
             {
                 "alg": "RS256",
                 "nonce": acme.nonce(),
-                "url": acme.url("/acme/new-account"),
+                "url": acme.url(acme.new_account_path),
                 "jwk": key.jwk,
             }
         )
         signing_input = f"{protected}.{bad_payload}".encode("ascii")
         resp = acme.post_body(
-            "/acme/new-account",
+            acme.new_account_path,
             {
                 "protected": protected,
                 "payload": bad_payload,
@@ -436,7 +464,7 @@ def test_jws_rejects_malformed_bodies_without_a_500(acme: Acme) -> None:
 
 def test_jws_rejects_an_unknown_or_foreign_kid(acme: Acme) -> None:
     key = rsa_key()
-    created = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True})
+    created = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True})
     kid = created.headers["location"]
 
     for bad_kid in (
@@ -458,17 +486,18 @@ def test_new_account_must_use_jwk_and_others_must_use_kid(acme: Acme) -> None:
     """RFC 8555 6.2: new-account is the one request that carries its key; a
     request that already has an account must name it."""
     key = rsa_key()
-    created = acme.post("/acme/new-account", key, {"termsOfServiceAgreed": True})
+    created = acme.post(acme.new_account_path, key, {"termsOfServiceAgreed": True})
     kid = created.headers["location"]
 
-    assert_problem(acme.post("/acme/new-account", key, {}, kid=kid), "malformed", 400)
-    assert_problem(acme.post("/acme/new-order", key, {}), "malformed", 400)
+    assert_problem(acme.post(acme.new_account_path, key, {}, kid=kid), "malformed", 400)
+    # FR-11: /acme/new-order is a global path -- no index link
+    assert_problem(acme.post("/acme/new-order", key, {}), "malformed", 400, index_link=False)
 
 
 def test_jws_body_size_is_bounded(acme: Acme) -> None:
     """A public POST endpoint must not be a way to make the server parse an
     arbitrarily large JSON document."""
-    resp = acme.post_body("/acme/new-account", b"{" + b"a" * (300 * 1024) + b"}")
+    resp = acme.post_body(acme.new_account_path, b"{" + b"a" * (300 * 1024) + b"}")
     assert resp.status_code < 500, resp.status_code
     assert str(problem(resp)["type"]).startswith(ERROR_PREFIX)
 
@@ -481,7 +510,7 @@ def test_deeply_nested_json_is_refused_not_crashed(acme: Acme) -> None:
     nested = ("[" * depth + "]" * depth).encode("ascii")
     assert len(nested) < 128 * 1024  # inside the body cap, so it is really parsed
 
-    body = acme.post_body("/acme/new-account", nested)
+    body = acme.post_body(acme.new_account_path, nested)
     assert body.status_code == 400, body.status_code
     assert str(problem(body)["type"]).startswith(ERROR_PREFIX)
 
@@ -491,14 +520,14 @@ def test_deeply_nested_json_is_refused_not_crashed(acme: Acme) -> None:
         {
             "alg": "RS256",
             "nonce": acme.nonce(),
-            "url": acme.url("/acme/new-account"),
+            "url": acme.url(acme.new_account_path),
             "jwk": key.jwk,
         }
     )
     payload = b64(nested)
     signing_input = f"{protected}.{payload}".encode("ascii")
     inner = acme.post_body(
-        "/acme/new-account",
+        acme.new_account_path,
         {
             "protected": protected,
             "payload": payload,

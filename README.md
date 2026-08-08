@@ -19,10 +19,16 @@ server, an MCP server, direct issuance, CSR signing, revocation and a CRL.
   bundle.
 - **REST API** — `/api/v1`, bearer-token authentication, OpenAPI docs at
   [`/api/v1/docs`](http://localhost:8080/api/v1/docs).
-- **ACME v2 server** (RFC 8555, own implementation) — directory at
-  `/acme/directory`, all three challenge types (`http-01`, `dns-01`,
-  `tls-alpn-01`) and External Account Binding. Verified against certbot and
-  acme.sh, not just unit tests.
+- **ACME v2 server** (RFC 8555, own implementation) — one directory per CA,
+  at `/acme/ca/<issuer id>/directory`, all three challenge types (`http-01`,
+  `dns-01`, `tls-alpn-01`) and External Account Binding. An account key
+  registers at one issuer's directory and stays bound to that issuer for
+  life, so obtaining certificates from two hierarchies needs two account
+  keys. With EAB required, an account can only register with a key issued
+  for that CA, so an identity holding no grant on it obtains no certificate
+  over ACME; with EAB not required, anyone who can reach the port may
+  register and order from any issuer's directory. Verified against certbot
+  and acme.sh, not just unit tests.
 - **MCP server** — `/mcp` (streamable HTTP), six tools so an AI assistant can
   look at the CA and issue, sign or revoke certificates under an API token's
   role.

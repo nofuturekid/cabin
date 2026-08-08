@@ -937,7 +937,7 @@ def test_acme_issues_with_no_grants_while_ungranted_admin_is_refused(
     db = _db(cfg)
     secrets = _secrets(cfg)
     try:
-        ca_fixtures.make_hierarchy(db, secrets, "acme-hierarchy")
+        hierarchy = ca_fixtures.make_hierarchy(db, secrets, "acme-hierarchy")
         set_setting(db, BASE_URL, ACME_BASE)
         set_setting(db, ACME_ENABLED, TRUE)
         create_user(db, "acme-admin", _PASSWORD, Role.admin)
@@ -945,7 +945,7 @@ def test_acme_issues_with_no_grants_while_ungranted_admin_is_refused(
         db.close()
     assert _grant_row_counts(cfg) == (0, 0)
 
-    acme = Acme(client)
+    acme = Acme(client, issuer_id=hierarchy.intermediate.id)
     flow = AcmeFlow(acme, cfg, "acme-issued.lan")
     flow.make_ready()
     flow.finalize_ok(csr_der("acme-issued.lan"))

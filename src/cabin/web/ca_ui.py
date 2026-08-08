@@ -141,14 +141,20 @@ def _refuse_retire_of_tls_issuer(
         )
 
 
-def _row_view(db: Session, row: CACertificate, *, parent_has_key: bool) -> dict[str, object]:
+def _row_view(
+    db: Session, row: CACertificate, *, parent_has_key: bool, acme_enabled: bool
+) -> dict[str, object]:
     """One ``/ca`` row: identity, status, which actions are safe to offer
     (AC-13, an imported root has no stored key so creating an intermediate
     under it or renewing it would only ever 500), and -- for an intermediate
     -- where its CRL and its AIA `caIssuers` document are published (spec
     0007 FR-6, spec 0022 FR-16: the exact URLs embedded in certificates that
     issuer signs, so an operator can see why a certificate carries none, or
-    click through to check a wrong port mapping)."""
+    click through to check a wrong port mapping), and where its ACME
+    directory is (spec 0019 FR-13: a directory belongs to one issuer, so it
+    is shown in that issuer's own row rather than once for the whole page).
+    Built through the same helper the ACME server itself resolves a
+    directory with, never by reassembling the string here."""
     has_key = row.key_sealed is not None
     signing_key_available = has_key if row.kind == "root" else parent_has_key
     is_intermediate = row.kind == "intermediate"
@@ -163,10 +169,15 @@ def _row_view(db: Session, row: CACertificate, *, parent_has_key: bool) -> dict[
         "can_retire": row.status == "active",
         "crl_url": crl_service.distribution_url(db, row.id) if is_intermediate else None,
         "ca_url": crl_service.ca_issuers_url(db, row.id) if is_intermediate else None,
+        "acme_directory_url": (
+            acme_http.directory_url(db, row.id) if is_intermediate and acme_enabled else None
+        ),
     }
 
 
-def _groups(db: Session, rows: list[CACertificate]) -> list[dict[str, object]]:
+def _groups(
+    db: Session, rows: list[CACertificate], *, acme_enabled: bool
+) -> list[dict[str, object]]:
     """Every row grouped under its root, root first then its intermediates
     in creation order (AC-12) -- ``list_cas`` already orders by id, so both
     the roots and each root's own children come out in that order too."""
@@ -177,9 +188,14 @@ def _groups(db: Session, rows: list[CACertificate]) -> list[dict[str, object]]:
             children.setdefault(row.parent_id, []).append(row)
     return [
         {
-            "root": _row_view(db, root, parent_has_key=False),
+            "root": _row_view(db, root, parent_has_key=False, acme_enabled=acme_enabled),
             "intermediates": [
-                _row_view(db, child, parent_has_key=key_sealed_by_id.get(root.id, False))
+                _row_view(
+                    db,
+                    child,
+                    parent_has_key=key_sealed_by_id.get(root.id, False),
+                    acme_enabled=acme_enabled,
+                )
                 for child in children.get(root.id, [])
             ],
         }
@@ -205,16 +221,7 @@ def _list_page(
         return templates.TemplateResponse(
             request, "ca_setup.html", context, status_code=status_code
         )
-    context["groups"] = _groups(db, rows)
-    # An installation-level property, not any one hierarchy's: 0019 gives
-    # ACME a directory per issuer, but in 0017 it still uses the default
-    # rule, so there is exactly one URL to show regardless of how many
-    # hierarchies exist. Ordinary https, unlike the CDP/AIA URLs baked into
-    # certificates (FR-12) -- this one is a service endpoint a client talks
-    # to directly, so it is reached over TLS like everything else in cabin.
-    context["acme_directory_url"] = (
-        acme_http.directory_url(db) if get_flag(db, ACME_ENABLED) else None
-    )
+    context["groups"] = _groups(db, rows, acme_enabled=get_flag(db, ACME_ENABLED))
     return templates.TemplateResponse(request, "ca_list.html", context, status_code=status_code)
 
 

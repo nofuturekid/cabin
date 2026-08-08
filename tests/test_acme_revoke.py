@@ -43,17 +43,26 @@ def client(cfg: Config) -> Iterator[TestClient]:
         try:
             set_setting(db, BASE_URL, BASE)
             set_setting(db, ACME_ENABLED, TRUE)
-            ca_service.create_hierarchy(
-                db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
-            )
         finally:
             db.close()
         yield c
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    db = create_session_factory(cfg.db_url)()
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
 
 
 def issue(acme: Acme, cfg: Config, name: str = "nas.lan", key: AcmeKey | None = None) -> Flow:

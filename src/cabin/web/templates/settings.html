@@ -106,19 +106,6 @@
         The directory URL, external account keys and client setup snippets live
         on the <a href="/acme/admin">ACME</a> page.
       </p>
-      {% if acme_enabled %}
-      {% if acme_directory_url %}
-      <p class="note">
-        ACME directory: <code>{{ acme_directory_url }}</code> — hand this URL to
-        your client.
-      </p>
-      {% else %}
-      <p class="note">
-        ACME is enabled, but without a base URL there is no directory address to
-        hand out.
-      </p>
-      {% endif %}
-      {% endif %}
     </div>
   </div>
 

@@ -149,17 +149,37 @@ def flattened(key: AcmeKey, protected: dict[str, Any], payload: Any) -> dict[str
 
 
 class Acme:
-    """The client under the tests: fetches nonces, signs, posts."""
+    """The client under the tests: fetches nonces, signs, posts.
 
-    def __init__(self, client: TestClient, base: str = "http://testserver") -> None:
+    ``issuer_id`` is keyword-only and has no default (spec 0019 work split
+    R1): a test that forgets which issuer's directory it is driving must
+    not run. The mechanically obvious repair -- a default of "the sole
+    active issuer" -- would make every test in this suite pass against a
+    single-issuer database, where "used the account's issuer" and "used the
+    default rule" are indistinguishable. See ``ca_fixtures.py``'s module
+    docstring for the same hazard on a different axis.
+    """
+
+    def __init__(
+        self, client: TestClient, base: str = "http://testserver", *, issuer_id: int
+    ) -> None:
         self.client = client
         self.base = base
+        self.issuer_id = issuer_id
 
     def url(self, path: str) -> str:
         return f"{self.base}{path}"
 
+    @property
+    def directory_path(self) -> str:
+        return f"/acme/ca/{self.issuer_id}/directory"
+
+    @property
+    def new_account_path(self) -> str:
+        return f"/acme/ca/{self.issuer_id}/new-account"
+
     def directory(self) -> dict[str, Any]:
-        resp = self.client.get("/acme/directory")
+        resp = self.client.get(self.directory_path)
         assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
         return body

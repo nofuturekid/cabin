@@ -45,7 +45,7 @@ from cabin.acme.http import (
     verified,
 )
 from cabin.acme.jws import KeyMode, VerifiedRequest, b64decode, key_mode
-from cabin.acme.models import AcmeOrder, OrderStatus
+from cabin.acme.models import AcmeAccount, AcmeOrder, OrderStatus
 from cabin.audit import AuditAction, acme_actor
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
@@ -53,7 +53,12 @@ from cabin.ca import service as ca_service
 from cabin.ca.certs import Certificate, CertSource, Issued
 from cabin.ca.leaf import DEFAULT_DAYS, MAX_CN_LENGTH, IssueError, Profile
 from cabin.ca.revocation import RevocationReason
-from cabin.ca.service import CANotConfiguredError, IssuerRequiredError
+from cabin.ca.service import (
+    CANotConfiguredError,
+    IssuerRequiredError,
+    IssuerRetiredError,
+    UnknownIssuerError,
+)
 from cabin.secrets import SecretsError
 from cabin.web.deps import client_ip, get_db
 
@@ -153,7 +158,7 @@ def finalize_order(
         processing.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
         return processing
 
-    issued = _issue(request, db, order, der)
+    issued = _issue(request, db, account, order, der)
     row = issued.row
     # Two commits, and a crash between them leaves the order ``processing``
     # with a certificate nobody can reach: it exists in the inventory (where
@@ -212,7 +217,9 @@ def _subject_cn(identifiers: list[dict[str, str]]) -> str | None:
     return None
 
 
-def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Issued:
+def _issue(
+    request: Request, db: Session, account: AcmeAccount, order: AcmeOrder, der: bytes
+) -> Issued:
     """Sign the CSR through the spec-0005 path, or give the order back.
 
     The SANs are taken from the *order*, not from the CSR: they are the
@@ -222,11 +229,19 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Issue
     :func:`cabin.acme.csr.check_identifiers` established -- so this is
     belt and braces, and cheap.
 
-    No ``issuer_id`` is passed: spec 0017 FR-6 leaves ACME on the default
-    rule (a directory per issuer is spec 0019's gap to close), so this either
-    resolves the instance's one active issuer or -- with more than one --
-    fails as :class:`~cabin.ca.service.IssuerRequiredError`, handled below
-    like any other issuance failure.
+    ``issuer_id=account.issuer_id`` (spec 0019 FR-9): the certificate is
+    signed by the issuer the account registered against, never resolved from
+    whatever else exists on the instance. That is what takes ACME out of
+    spec 0017's default rule entirely -- there is nothing left for
+    :func:`cabin.ca.service.resolve_issuer` to guess, so
+    :class:`~cabin.ca.service.IssuerRequiredError` cannot be raised from this
+    call any more (it stays in the ``isinstance`` tuple below regardless,
+    since removing it would be a second change with no test behind it).
+    :class:`~cabin.ca.service.UnknownIssuerError` and
+    :class:`~cabin.ca.service.IssuerRetiredError` are reachable here for the
+    first time instead: the account's issuer can have been deleted or
+    retired since registration, and both are handled below like any other
+    issuance failure.
     """
     identifiers = service.order_identifiers(order)
     sans = [
@@ -242,6 +257,9 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Issue
             # the account is a key thumbprint, not a user or a token -- so
             # this rides the named exemption rather than a grant lookup.
             principal=issuer_grants.ACME_PRINCIPAL,
+            # Spec 0019 FR-9: the account's own issuer, explicitly -- never
+            # resolved from whatever else exists on the instance.
+            issuer_id=account.issuer_id,
             csr_pem=pem,
             profile=ACME_PROFILE,
             sans_override=sans,
@@ -264,7 +282,13 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Issue
         service.release_claim(db, order)
         if isinstance(
             exc,
-            IssueError | CANotConfiguredError | SecretsError | ValueError | IssuerRequiredError,
+            IssueError
+            | CANotConfiguredError
+            | SecretsError
+            | ValueError
+            | IssuerRequiredError
+            | UnknownIssuerError
+            | IssuerRetiredError,
         ):
             raise AcmeError(
                 ErrorType.server_internal,

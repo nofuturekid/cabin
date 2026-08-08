@@ -56,17 +56,26 @@ def client(cfg: Config) -> Iterator[TestClient]:
         try:
             set_setting(db, BASE_URL, BASE)
             set_setting(db, ACME_ENABLED, TRUE)
-            ca_service.create_hierarchy(
-                db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
-            )
         finally:
             db.close()
         yield c
 
 
 @pytest.fixture
-def acme(client: TestClient) -> Acme:
-    return Acme(client)
+def issuer_id(client: TestClient, cfg: Config) -> int:
+    db = db_session(cfg)
+    try:
+        hierarchy = ca_service.create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+        )
+        return hierarchy.intermediate.id
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def acme(client: TestClient, issuer_id: int) -> Acme:
+    return Acme(client, issuer_id=issuer_id)
 
 
 def db_session(cfg: Config) -> Session:
@@ -78,12 +87,19 @@ def path_of(url: str) -> str:
 
 
 class Flow:
-    """One account, one order, and the challenge under test."""
+    """One account, one order, and the challenge under test.
+
+    A second, independent copy of ``acme_orders.Flow`` (spec 0019 work split
+    R9): this file drives real HTTP validation against a local server, which
+    ``acme_orders.Flow`` has no need to know about, so the two are not
+    merged. It inherits its issuer from ``acme`` the same way, for the same
+    reason -- see ``acme_orders.Flow``'s docstring.
+    """
 
     def __init__(self, acme: Acme, *names: str) -> None:
         self.acme = acme
         self.key = rsa_key()
-        registration = acme.post("/acme/new-account", self.key, {"termsOfServiceAgreed": True})
+        registration = acme.post(acme.new_account_path, self.key, {"termsOfServiceAgreed": True})
         assert registration.status_code == 201, registration.text
         self.kid = registration.headers["location"]
         placed = acme.post(
@@ -163,9 +179,12 @@ def test_trigger_sets_processing_and_is_idempotent(
         assert body["status"] == "processing"
         assert body["url"] == challenge["url"]
         # ...with the Link RFC 8555 7.5.1 requires, so the client knows which
-        # authorization to poll -- alongside the directory link from 0010
+        # authorization to poll
         assert f'<{flow.authz_urls[0]}>;rel="up"' in response.headers["link"]
-        assert 'rel="index"' in response.headers["link"]
+        # spec 0019 FR-11: /acme/chal/... is a global path -- it gains no
+        # issuer segment, so unlike the two per-issuer paths it must not
+        # also carry an index link naming a directory.
+        assert 'rel="index"' not in response.headers["link"]
 
         # ...and by now the background task has run
         assert flow.challenge("http-01")["status"] == "valid"

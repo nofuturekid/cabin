@@ -122,13 +122,24 @@ _INSTRUCTIONS = (
 )
 
 
-class McpCAInfo(CAInfo):
-    """:class:`CAInfo` plus the one URL only this front door reports: where
-    ACME clients would go, when the ACME server is switched on (FR-3)."""
+class McpAcmeDirectory(BaseModel):
+    """One issuer's ACME directory (spec 0019 FR-13): there is no longer a
+    single URL to report, so this names which issuer a URL belongs to."""
 
-    #: None while ACME is off or no base URL is set -- there is then no
-    #: address that would work from anywhere but this request.
-    acme_directory_url: str | None = None
+    issuer_id: int
+    url: str
+
+
+class McpCAInfo(CAInfo):
+    """:class:`CAInfo` plus the URLs only this front door reports: where
+    ACME clients would go for each issuer, when the ACME server is switched
+    on (FR-3)."""
+
+    #: One entry per intermediate this instance holds, in the order
+    #: :attr:`issuers` lists them. Empty while ACME is off or no base URL is
+    #: set -- there is then no address that would work from anywhere but
+    #: this request.
+    acme_directory_urls: list[McpAcmeDirectory] = Field(default_factory=list)
 
 
 def endpoint_url(db: Session) -> str | None:
@@ -361,13 +372,25 @@ def create_mcp_app(
         """
         with _session() as db, _readable_errors():
             info = views.ca_info(db)
+            # Spec 0019 FR-13: one directory per intermediate, never a
+            # single instance-wide URL -- built through the same helper the
+            # ACME server itself resolves a directory with, so this can
+            # never name a URL the server would not actually answer at.
+            directories: list[McpAcmeDirectory] = []
+            if get_flag(db, ACME_ENABLED):
+                for issuer in info.issuers:
+                    if issuer.kind != "intermediate":
+                        continue
+                    url = directory_url(db, issuer.id)
+                    if url is not None:
+                        directories.append(McpAcmeDirectory(issuer_id=issuer.id, url=url))
             # Named field by field rather than **info.model_dump(), so that a
             # future shape change to CAInfo is a type error here rather than
             # a pydantic failure discovered inside a live tool call.
             return McpCAInfo(
                 issuers=info.issuers,
                 base_url=info.base_url,
-                acme_directory_url=(directory_url(db) if get_flag(db, ACME_ENABLED) else None),
+                acme_directory_urls=directories,
             )
 
     @mcp.tool

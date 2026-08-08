@@ -119,6 +119,24 @@ def make_hierarchy(
     return CAHierarchy(root=root_row, intermediate=intermediate_row)
 
 
+def two_hierarchies(db: Session, secrets: SecretStore) -> tuple[CAHierarchy, CAHierarchy]:
+    """Two active roots with one active intermediate each -- the default
+    fixture for spec 0019 (ACME per issuer). Named, like sole_active_issuer
+    and extra_active_issuer before it, so a test that means two hierarchies
+    says so at the call site: with a single active issuer, "used the
+    account's issuer" and "used the default rule" give the same answer
+    everywhere, which is exactly the trap this module's docstring warns
+    about, one axis over.
+
+    Both intermediates carry a sealed key (unlike extra_active_issuer's
+    stub), because AC-1 needs both to really sign.
+    """
+    return (
+        make_hierarchy(db, secrets, "alpha"),
+        make_hierarchy(db, secrets, "beta"),
+    )
+
+
 def _csrf_token(client: TestClient, cfg: Config) -> str:
     db = create_session_factory(cfg.db_url)()
     try:
