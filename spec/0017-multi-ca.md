@@ -36,11 +36,14 @@ after this spec. They are the actual work:
 
 **Migrations 0003, 0004 and 0005 are rewritten, not extended.** There is no
 production instance, no existing data, and no backwards compatibility with a
-0.1.x database. This is deliberate and it has a price worth naming: if
-someone did carry a 0.1.0 database forward, Alembic would read "revision
-0009, nothing to do" and leave the old schema in place while the code expects
-the new one. There is no repair path other than emptying `/data`. This
-belongs in the CHANGELOG and the release notes; the next version is 0.2.0.
+0.1.x database. This is deliberate and it has a price worth naming: Alembic
+tracks the revision id and nothing about the schema behind it, so a database
+carried forward from 0.1.0 passes migration — every revision it is missing is
+applied, every revision it already carries is skipped, including the three
+rewritten here — and then reports itself current while its tables are not what
+the code expects. Nothing fails at startup; the first query fails instead.
+There is no repair path other than emptying `/data`. This belongs in the
+CHANGELOG and the release notes; the next version is 0.2.0.
 
 Two consequences of the schema change reach further than the plan's list of
 removed endpoints, and are specified here because nothing else can absorb
@@ -626,11 +629,12 @@ intermediate}` REST shapes or the `/crl` path they are updated, not deleted.
 ## Out of Scope
 
 **Backwards compatibility with a 0.1.x database.** Migrations 0003, 0004 and
-0005 are rewritten in place rather than superseded, which means a database
-stamped at revision 0009 by an older cabin will report itself up to date and
-keep the old schema. There is no upgrade path and no migration to write one;
-the fix is an empty `/data`. Stated here so it cannot later be read as an
-oversight.
+0005 are rewritten in place rather than superseded, and Alembic tracks only
+the revision id: a database stamped by an older cabin skips every revision it
+already carries, including the rewritten ones, and reports itself up to date
+while keeping the old schema. There is no upgrade path and no migration to
+write one; the fix is an empty `/data`. Stated here so it cannot later be read
+as an oversight.
 
 Per-issuer permissions (spec 0018) — in 0017 any admin may use any active
 issuer. A per-issuer ACME directory (0019) — ACME keeps using the FR-6
