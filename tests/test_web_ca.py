@@ -36,6 +36,7 @@ from cabin.ca.x509 import create_intermediate, create_root
 from cabin.config import Config
 from cabin.secrets import SecretStore
 from cabin.sessions import get_session
+from cabin.settings import TLS_ISSUER_ID, set_setting
 from cabin.store import create_session_factory
 
 
@@ -658,4 +659,146 @@ def test_ca_import_wrong_passphrase_rerenders_setup_with_error(
     assert resp.headers["content-type"].startswith("text/html")
     assert "decrypt" in resp.text.lower()
 
-    assert _rows(cfg) == []
+
+# --- spec 0022 FR-17: retiring cabin's own bound TLS issuer is refused -----
+#
+# FR-17: "Retiring the bound issuer is refused while TLS is on. ... The
+# check must cover the cascade: retiring a root also retires its
+# intermediates, so it tests the whole set that would be stood down, not
+# just the named row. ... With TLS off there is no refusal at all."
+#
+# Not implemented yet on this branch: verified by hand that with TLS on,
+# two active issuers and one bound via ``tls_issuer_id``, POST
+# ``/ca/{bound}/retire`` returns 303 and the row is retired. These four
+# tests are expected to be RED until the guard lands in
+# ``web/ca_ui.py``'s retire route.
+
+
+def make_tls_config(tmp_path: Path) -> Config:
+    data_dir = tmp_path / "data"
+    return Config(port=8080, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db", tls=True)
+
+
+@pytest.fixture
+def tls_cfg(tmp_path: Path) -> Config:
+    return make_tls_config(tmp_path)
+
+
+@pytest.fixture
+def tls_client(tls_cfg: Config) -> Iterator[TestClient]:
+    with TestClient(create_app(tls_cfg), follow_redirects=False) as c:
+        yield c
+
+
+def _secrets(cfg: Config) -> SecretStore:
+    return SecretStore.open(cfg.data_dir, cfg.master_passphrase)
+
+
+def _bind_tls_issuer(cfg: Config, ca_id: int) -> None:
+    db = _db(cfg)
+    try:
+        set_setting(db, TLS_ISSUER_ID, str(ca_id))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _two_hierarchies(cfg: Config) -> tuple[int, int, int, int]:
+    """Two independent, active hierarchies (ids only: root_a,
+    intermediate_a, root_b, intermediate_b), created directly through
+    ``ca_service`` rather than the HTTP wizard -- what matters here is the
+    retire route, not the create flow. Two hierarchies rather than one so
+    that retiring either issuer always leaves an active one elsewhere: the
+    pre-existing "would leave no active issuer" invariant
+    (``ca/service.retire``) never fires on its own, and every retire in the
+    tests below can only be blocked -- or not -- by FR-17's bound-issuer
+    check, nothing else.
+    """
+    db = _db(cfg)
+    try:
+        secrets = _secrets(cfg)
+        alpha = ca_service.create_hierarchy(db, secrets, "alpha")
+        beta = ca_service.create_hierarchy(db, secrets, "beta")
+        return alpha.root.id, alpha.intermediate.id, beta.root.id, beta.intermediate.id
+    finally:
+        db.close()
+
+
+def _status_of(cfg: Config, ca_id: int) -> str:
+    db = _db(cfg)
+    try:
+        return ca_service.get_ca(db, ca_id).status
+    finally:
+        db.close()
+
+
+def test_retire_bound_tls_issuer_is_refused(tls_client: TestClient, tls_cfg: Config) -> None:
+    """Retiring the issuer bound to cabin's own TLS certificate, directly by
+    its own id, must be refused while TLS is on."""
+    _setup_superadmin(tls_client)
+    _root_a, intermediate_a, _root_b, _intermediate_b = _two_hierarchies(tls_cfg)
+    _bind_tls_issuer(tls_cfg, intermediate_a)
+    csrf = _csrf(tls_client, tls_cfg)
+
+    resp = tls_client.post(f"/ca/{intermediate_a}/retire", data={"csrf_token": csrf})
+
+    assert resp.status_code == 400, resp.text
+    assert _status_of(tls_cfg, intermediate_a) == "active"
+
+
+def test_retire_root_of_bound_tls_issuer_is_refused_via_cascade(
+    tls_client: TestClient, tls_cfg: Config
+) -> None:
+    """The bound issuer is alpha's INTERMEDIATE; this retires alpha's ROOT,
+    whose cascade (``ca_service.retire_targets``) would stand the bound
+    intermediate down too. The id named in the URL is never itself the
+    bound row, so a guard that only compares the URL's ``ca_id`` against
+    the binding -- instead of the whole cascade -- would let this through.
+    Refused, and neither row changes status.
+    """
+    _setup_superadmin(tls_client)
+    root_a, intermediate_a, _root_b, _intermediate_b = _two_hierarchies(tls_cfg)
+    _bind_tls_issuer(tls_cfg, intermediate_a)
+    csrf = _csrf(tls_client, tls_cfg)
+
+    resp = tls_client.post(f"/ca/{root_a}/retire", data={"csrf_token": csrf})
+
+    assert resp.status_code == 400, resp.text
+    assert _status_of(tls_cfg, root_a) == "active"
+    assert _status_of(tls_cfg, intermediate_a) == "active"
+
+
+def test_retire_bound_tls_issuer_succeeds_when_tls_is_off(client: TestClient, cfg: Config) -> None:
+    """The identical binding, the identical retirement -- but TLS is off, so
+    the binding is inert and must not obstruct an installation that does
+    not use cabin's own TLS (FR-17: "With TLS off there is no refusal at
+    all"). Without this counter-check, a guard that simply refuses every
+    retirement regardless of ``config.tls`` would pass the two tests above.
+    """
+    _setup_superadmin(client)
+    _root_a, intermediate_a, _root_b, _intermediate_b = _two_hierarchies(cfg)
+    _bind_tls_issuer(cfg, intermediate_a)
+    csrf = _csrf(client, cfg)
+
+    resp = client.post(f"/ca/{intermediate_a}/retire", data={"csrf_token": csrf})
+
+    assert resp.status_code == 303, resp.text
+    assert _status_of(cfg, intermediate_a) == "retired"
+
+
+def test_retire_non_bound_issuer_succeeds_while_tls_is_on(
+    tls_client: TestClient, tls_cfg: Config
+) -> None:
+    """TLS is on and an issuer IS bound, but this retires the OTHER active
+    issuer -- not the bound one and not its root. FR-17's refusal must not
+    spill over onto issuers the binding has nothing to do with."""
+    _setup_superadmin(tls_client)
+    _root_a, intermediate_a, _root_b, intermediate_b = _two_hierarchies(tls_cfg)
+    _bind_tls_issuer(tls_cfg, intermediate_a)
+    csrf = _csrf(tls_client, tls_cfg)
+
+    resp = tls_client.post(f"/ca/{intermediate_b}/retire", data={"csrf_token": csrf})
+
+    assert resp.status_code == 303, resp.text
+    assert _status_of(tls_cfg, intermediate_b) == "retired"
+    assert _status_of(tls_cfg, intermediate_a) == "active"

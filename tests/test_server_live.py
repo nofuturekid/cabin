@@ -24,6 +24,7 @@ own supervision or startup ordering, which is what each such test's
 docstring says explicitly.
 """
 
+import asyncio
 import os
 import re
 import signal
@@ -32,6 +33,7 @@ from pathlib import Path
 import pytest
 from live_server import LiveClient, live_cabin, plain_get
 
+import cabin.server as server_mod
 from cabin.app import create_app
 from cabin.config import Config
 from cabin.server import _build_servers
@@ -161,6 +163,72 @@ def test_sigterm_stops_both_listeners(tmp_path: Path) -> None:
             except OSError:
                 continue
             raise AssertionError(f"port {port} still answers after SIGTERM")
+
+
+class _StubServer:
+    """A bare stand-in for `uvicorn.Server`: no socket, no ASGI lifespan, no
+    signal handling of its own -- only the two attributes `cabin.server._serve`
+    itself reads and writes (`started`, `should_exit`) and a `serve()` coroutine
+    shaped like uvicorn's own main loop (poll `should_exit` until told to stop,
+    or -- for the one standing in for "a signal reached this server" -- return
+    immediately). Used to drive `_serve` with uvicorn's own SIGTERM handling and
+    `capture_signals()` relay completely out of the picture, so what remains
+    under test is only `_serve`'s own cross-wiring.
+    """
+
+    def __init__(self, *, finish_immediately: bool) -> None:
+        self.started = True
+        self.should_exit = False
+        self._finish_immediately = finish_immediately
+
+    async def serve(self) -> None:
+        if self._finish_immediately:
+            return
+        while not self.should_exit:
+            await asyncio.sleep(0.005)
+
+
+def test_serve_sets_should_exit_on_other_servers_when_one_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unit-level proof of `_serve`'s own cross-wiring (module docstring,
+    trap 1): when any one server's `serve()` returns, `_serve` itself must
+    set `should_exit = True` on every OTHER server, rather than relying on
+    uvicorn's SIGTERM handling to relay the signal on its own.
+
+    `test_sigterm_stops_both_listeners` above cannot tell this mechanism
+    apart from its absence: `uvicorn.Server.capture_signals()` restores the
+    previous SIGTERM handler and re-raises the captured signal once
+    `serve()` returns, so the signal reaches the *process* again and stops
+    the other listener too -- true whether or not `cabin.server` does
+    anything at all. That test is still worth having (it is the only proof
+    a real SIGTERM actually reaches a real process running both listeners),
+    but it stays green even if `_serve`'s own `for server in servers:
+    server.should_exit = True` / `should_exit.set()` sequence is deleted
+    outright, because uvicorn's relay alone is enough to stop both.
+
+    This test removes that relay from the picture entirely: `_build_servers`
+    is monkeypatched to return two `_StubServer`s instead of real
+    `uvicorn.Server` instances, so nothing here ever installs a signal
+    handler, and the only thing that can stop `stub_b` is `_serve` itself
+    setting `stub_b.should_exit = True`. `stub_a` stands in for "a server
+    whose `serve()` returned for any reason" (a caught signal, among
+    others) by simply returning right away. If `_serve`'s cross-wiring were
+    deleted, `stub_b` would poll `should_exit` forever, the final
+    `asyncio.wait(tasks)` inside `_serve` would never resolve, and
+    `asyncio.wait_for` below would raise `TimeoutError` -- a real failure,
+    not a false negative -- rather than this test staying green either way.
+    """
+    stub_a = _StubServer(finish_immediately=True)
+    stub_b = _StubServer(finish_immediately=False)
+    monkeypatch.setattr(server_mod, "_build_servers", lambda config, app, tls: [stub_a, stub_b])
+
+    data_dir = tmp_path / "data"
+    cfg = Config(port=_UNIT_PORT, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db")
+
+    asyncio.run(asyncio.wait_for(server_mod._serve(cfg), timeout=5))
+
+    assert stub_b.should_exit is True
 
 
 def test_multi_worker_with_tls_refuses_to_start(tmp_path: Path) -> None:

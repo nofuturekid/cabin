@@ -25,7 +25,7 @@ from cabin.ca.service import (
     UnknownIssuerError,
 )
 from cabin.ca.x509 import CAImportError
-from cabin.settings import ACME_ENABLED, get_flag
+from cabin.settings import ACME_ENABLED, TLS_ISSUER_ID, get_flag, get_setting
 from cabin.tls import TlsMode
 from cabin.users import User
 from cabin.web import templates
@@ -100,6 +100,44 @@ def _tls_self_signed(request: Request) -> bool:
     """
     tls = request.app.state.tls
     return tls is not None and tls.mode == TlsMode.self_signed
+
+
+def _refuse_retire_of_tls_issuer(
+    request: Request, db: Session, ca_id: int, row: CACertificate
+) -> None:
+    """Spec 0022 FR-17: retiring the issuer bound to cabin's own TLS
+    certificate is refused while TLS is on. Retiring it would leave
+    `tls.resolve_tls_issuer` with nothing to renew from, and cabin's own
+    certificate would then expire 30 to 90 days later -- the maximum
+    possible distance between cause and symptom, with nothing left
+    connecting the two.
+
+    Lives here rather than in `ca_service.retire` because only the route
+    has `request.app.state.config`; with TLS off the binding is inert and
+    an operator not using cabin's own TLS must not be obstructed by it.
+
+    Reads the raw `TLS_ISSUER_ID` setting rather than calling
+    `resolve_tls_issuer` -- that function's job is deciding what to issue
+    *with*, including persisting the sole-active-issuer default, which is
+    not a decision a retire check should be the one to trigger. Uses
+    `retire_targets` for the set a retire would actually touch, so
+    retiring a root whose bound intermediate hangs underneath it is
+    refused too, not just a direct hit on the bound row's own id.
+    """
+    if row.status != "active" or not request.app.state.config.tls:
+        return
+    stored = get_setting(db, TLS_ISSUER_ID)
+    if not stored:
+        return
+    try:
+        bound_id = int(stored)
+    except ValueError:
+        return
+    if bound_id in ca_service.retire_targets(db, ca_id):
+        raise RetireError(
+            f"retiring {row.name!r} would leave cabin's own TLS certificate with no "
+            "issuer to renew from; rebind under Settings first, then retire"
+        )
 
 
 def _row_view(db: Session, row: CACertificate, *, parent_has_key: bool) -> dict[str, object]:
@@ -384,6 +422,7 @@ def ca_retire(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     was_active = row.status == "active"
     try:
+        _refuse_retire_of_tls_issuer(request, db, ca_id, row)
         ca_service.retire(db, ca_id)
     except RetireError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
