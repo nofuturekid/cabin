@@ -35,6 +35,7 @@ exists solely to prove the blind spot exists rather than assume it.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -195,6 +196,16 @@ def _forged_ca_cert(
 
 def _ski_bytes(public_key: CertificatePublicKeyTypes) -> bytes:
     return x509.SubjectKeyIdentifier.from_public_key(public_key).digest
+
+
+def _openssl_verify_error_code(output: str) -> int | None:
+    """The numeric code from openssl verify's ``error <N> at <depth> depth
+    lookup: <message>`` line -- part of its stable, documented API
+    (``X509_STORE_CTX_get_error(3)``, the codes in ``openssl/x509_vfy.h``),
+    unlike the prose after the colon, which is not guaranteed word for word
+    across openssl versions or builds."""
+    match = re.search(r"error (\d+) at \d+ depth lookup:", output)
+    return int(match.group(1)) if match else None
 
 
 def _openssl_verify(
@@ -457,7 +468,9 @@ def test_openssl_fails_without_the_cross_certificate(
         tmp_path, "no-cross", a.root.cert_pem, b.intermediate.cert_pem, leaf.cert_pem
     )
     assert proc.returncode != 0
-    assert "unable to get local issuer certificate" in (proc.stdout + proc.stderr).lower()
+    # Specifically a broken chain (no path to the trust anchor), not some
+    # other refusal -- code 20 is X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY.
+    assert _openssl_verify_error_code(proc.stdout + proc.stderr) == 20, proc.stdout + proc.stderr
 
 
 @_openssl

@@ -385,11 +385,22 @@ def test_crl_per_issuer_partitions_revocations(
 
     i1_cert = x509.load_pem_x509_certificate(get_ca(db, i1.id).cert_pem.encode("ascii"))
     i2_cert = x509.load_pem_x509_certificate(get_ca(db, i2.id).cert_pem.encode("ascii"))
-    issuer1 = _openssl_crl_issuer(tmp_path, "i1", current_crl(db, secrets, i1.id).crl_der)
-    issuer2 = _openssl_crl_issuer(tmp_path, "i2", current_crl(db, secrets, i2.id).crl_der)
-    assert i1_cert.subject.rfc4514_string() in issuer1
-    assert i2_cert.subject.rfc4514_string() in issuer2
-    assert issuer1 != issuer2
+    # The precise question -- "is each CRL issued by the right intermediate"
+    # -- is answered exactly by comparing parsed x509.Name objects; no
+    # string formatting involved, so no dependence on which openssl version
+    # happens to be on the runner (its `-issuer` rendering of RFC 4514 names
+    # is not stable across versions, e.g. spacing around '=').
+    assert crl1.issuer == i1_cert.subject
+    assert crl2.issuer == i2_cert.subject
+    assert crl1.issuer != crl2.issuer
+    # Still shell out to the real CLI: not to re-derive the above from its
+    # text output, but as evidence that a real validator can parse what
+    # cabin produces at all (see _openssl_verify's CAUTION comment above for
+    # why "some tool accepted it" and "it is correct" are different claims,
+    # and why both a parse check and a precise structural check earn their
+    # place here).
+    _openssl_crl_issuer(tmp_path, "i1", current_crl(db, secrets, i1.id).crl_der)
+    _openssl_crl_issuer(tmp_path, "i2", current_crl(db, secrets, i2.id).crl_der)
 
 
 # --- AC-6: renewal without rekey ---------------------------------------------

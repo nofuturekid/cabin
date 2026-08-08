@@ -41,6 +41,7 @@ nothing.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
@@ -741,6 +742,16 @@ def _served_serial(manager: TlsManager) -> int:
 # === AC-15: cabin and a real validator agree, in both directions ================
 
 
+def _openssl_verify_error_code(output: str) -> int | None:
+    """The numeric code from openssl verify's ``error <N> at <depth> depth
+    lookup: <message>`` line -- part of its stable, documented API
+    (``X509_STORE_CTX_get_error(3)``, the codes in ``openssl/x509_vfy.h``),
+    unlike the prose after the colon, which is not guaranteed word for word
+    across openssl versions or builds."""
+    match = re.search(r"error (\d+) at \d+ depth lookup:", output)
+    return int(match.group(1)) if match else None
+
+
 def _openssl_verify(
     tmp_path: Path, label: str, root_pem: str, intermediate_pem: str, leaf_pem: str
 ) -> subprocess.CompletedProcess[str]:
@@ -833,7 +844,11 @@ def test_openssl_rejects_a_smuggled_name(client: TestClient, cfg: Config, tmp_pa
 
     proc = _openssl_verify(tmp_path, "smuggled", root_pem, intermediate_pem, leaf_pem)
     assert proc.returncode != 0
-    assert "permitted" in (proc.stdout + proc.stderr).lower()
+    # Specifically a name-constraint refusal, not some other failure -- code
+    # 47 is X509_V_ERR_PERMITTED_VIOLATION. A bare nonzero exit would also
+    # accept a chain broken for an unrelated reason, which would not prove
+    # FR-7's agreement between the writer and the matcher.
+    assert _openssl_verify_error_code(proc.stdout + proc.stderr) == 47, proc.stdout + proc.stderr
 
 
 @pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl CLI not installed")
