@@ -713,9 +713,19 @@ def test_tls_certificate_is_not_exempt_from_the_check(cfg: Config, tmp_path: Pat
         assert rows_after == rows_before
         assert events_after == (events_before or 0) + 1
 
-        # rebind to an issuer that permits the hostname -- the next tick
-        # succeeds, proving this was the constraint and not something else.
-        set_setting(db, TLS_ISSUER_ID, str(open_hierarchy.intermediate.id))
+        # rebind to a second intermediate that permits the hostname -- not
+        # back to `open_hierarchy`: its certificate is still what is being
+        # served, under an unchanged name, so ensure_current's own
+        # idempotency check would correctly decline that as a no-op and
+        # prove nothing about the constraint. A genuinely different issuer
+        # forces a reissue, and the next tick succeeds.
+        permitted_hierarchy = ca_service.create_hierarchy(
+            db,
+            secrets,
+            "permitted",
+            constraints=leaf_mod.NameConstraintSpec(permitted_dns=(hostname,)),
+        )
+        set_setting(db, TLS_ISSUER_ID, str(permitted_hierarchy.intermediate.id))
         assert manager.ensure_current(db, secrets) is True
     finally:
         db.close()

@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.types import (
 from sqlalchemy import select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from cabin.ca import leaf
 from cabin.ca import x509 as ca_x509
 from cabin.secrets import SecretStore
 from cabin.store import Base
@@ -225,6 +226,7 @@ def create_hierarchy(
     root_years: int = 20,
     intermediate_years: int = 10,
     path_length: int = 1,
+    constraints: leaf.NameConstraintSpec | None = None,
 ) -> CAHierarchy:
     """Generate a fresh root+intermediate hierarchy and store both rows,
     sealing both private keys before insert (never plaintext in the DB).
@@ -246,6 +248,15 @@ def create_hierarchy(
     function that ever builds a root during hierarchy creation, so FR-13's
     form field has no other way to reach ``create_root``, and
     ``web/ca_ui.py`` already calls this with the keyword.
+
+    ``constraints`` (spec 0020 FR-1) applies to the **intermediate only**:
+    the root, built here too, never takes one -- a root does not sign
+    leaves in cabin, so a constraint on it would only ever be evaluated by
+    somebody else's validator. ``None`` and an empty spec both mean "no
+    constraints" (``leaf.name_constraints_extension`` is where that
+    collapsing happens); either way the intermediate carries no
+    ``NameConstraints`` extension at all, exactly as it did before this
+    spec.
     """
     root_cert, root_key = ca_x509.create_root(
         f"{name} Root CA", key_type, years=root_years, path_length=path_length
@@ -256,6 +267,9 @@ def create_hierarchy(
         f"{name} Intermediate CA",
         key_type,
         years=intermediate_years,
+        name_constraints=leaf.name_constraints_extension(
+            constraints if constraints is not None else leaf.NameConstraintSpec()
+        ),
     )
 
     root_row = CACertificate(
@@ -346,6 +360,7 @@ def create_intermediate_under(
     name: str,
     key_type: str = "ecdsa-p256",
     years: int = 10,
+    constraints: leaf.NameConstraintSpec | None = None,
 ) -> CACertificate:
     """The rotation path (spec 0017 FR-3): a further intermediate under an
     existing root, active immediately, alongside whatever intermediates
@@ -360,6 +375,10 @@ def create_intermediate_under(
     (AC-13) rather than failing deeper inside with an AttributeError.
     ``ca/x509.py:create_intermediate`` already clamps ``years`` to the
     root's remaining validity.
+
+    ``constraints`` (spec 0020 FR-1): the only other way to add a further
+    intermediate, so it gets the same parameter ``create_hierarchy`` does,
+    forwarded the same way.
     """
     root = get_ca(db, root_id)
     if root.kind != "root":
@@ -375,6 +394,9 @@ def create_intermediate_under(
         f"{name} Intermediate CA",
         key_type,
         years=years,
+        name_constraints=leaf.name_constraints_extension(
+            constraints if constraints is not None else leaf.NameConstraintSpec()
+        ),
     )
     row = CACertificate(
         kind="intermediate",

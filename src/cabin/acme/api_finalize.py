@@ -51,7 +51,7 @@ from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
 from cabin.ca.certs import Certificate, CertSource, Issued
-from cabin.ca.leaf import DEFAULT_DAYS, MAX_CN_LENGTH, IssueError, Profile
+from cabin.ca.leaf import DEFAULT_DAYS, MAX_CN_LENGTH, IssueError, NameConstraintError, Profile
 from cabin.ca.revocation import RevocationReason
 from cabin.ca.service import (
     CANotConfiguredError,
@@ -280,6 +280,14 @@ def _issue(
         # nothing about the request was wrong.
         db.rollback()
         service.release_claim(db, order)
+        if isinstance(exc, NameConstraintError):
+            # Spec 0020 FR-8: matched before the general IssueError arm
+            # below, and answered as the client's problem, not the
+            # server's. The client asked for a name this CA may not sign;
+            # serverInternal is a 500-class type that invites a correctly
+            # behaving client to keep retrying a request that can never
+            # succeed.
+            raise AcmeError(ErrorType.rejected_identifier, str(exc)) from exc
         if isinstance(
             exc,
             IssueError

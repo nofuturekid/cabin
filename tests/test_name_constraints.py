@@ -389,7 +389,11 @@ def test_renewal_keeps_the_extension_bytes_identical() -> None:
     )
     before = _extension(cert, x509.NameConstraints)
 
-    renewed = renew_certificate(cert, root_cert, root_key, years=8)
+    # create_intermediate's default validity is 10 years (cabin.ca.x509's own
+    # default) -- renewing for 12 must land later than that, not earlier, or
+    # the assertion below could never hold no matter what renew_certificate
+    # does.
+    renewed = renew_certificate(cert, root_cert, root_key, years=12)
 
     after = _extension(renewed, x509.NameConstraints)
     assert after.critical is True

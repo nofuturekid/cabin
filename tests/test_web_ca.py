@@ -19,6 +19,7 @@ are fixed by the spec text itself, so they are fixed here instead):
                                          /ca/chain.pem).
 """
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -142,12 +143,53 @@ def _by_name(cfg: Config, name: str) -> ca_service.CACertificate:
     return matches[0]
 
 
-def _window(html: str, marker: str, size: int = 500) -> str:
-    """The text following ``marker``'s first occurrence -- a cheap proxy for
-    "this row's own markup", so a status/action check can be scoped to the
-    hierarchy it actually belongs to instead of the whole page."""
-    idx = html.index(marker)
-    return html[idx : idx + size]
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
+_CLASS_RE = re.compile(r'class="([^"]*)"')
+
+
+def _row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
+    """The full outer HTML of the innermost ``<tag class="class_name">``
+    element that contains ``marker``'s first occurrence -- scoped by parsing
+    the actual tag nesting, not by slicing a fixed number of characters
+    after the marker. A row's markup can grow or shrink for any reason (a
+    class added, a hint reworded) without ever moving what a test measures,
+    and there is no fixed budget for the next change to silently exceed.
+    """
+    marker_idx = html.index(marker)
+    stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
+    for m in _TAG_RE.finditer(html):
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue  # void or self-closing: no nesting depth to track
+        if not closing:
+            stack.append((name, attrs, m.start()))
+            continue
+        if not stack or stack[-1][0] != name:
+            continue  # not well-formed at this point; nothing to close
+        open_name, open_attrs, open_start = stack.pop()
+        if open_start <= marker_idx < m.end():
+            classes = _CLASS_RE.search(open_attrs)
+            if open_name == tag and classes is not None and class_name in classes.group(1).split():
+                return html[open_start : m.end()]
+    raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
 
 
 # --- FR-2/FR-14: a further hierarchy is ordinary operation, not an error ----
@@ -242,8 +284,8 @@ def test_ca_page_lists_hierarchies(client: TestClient, cfg: Config) -> None:
         db.close()
 
     page = client.get("/ca").text
-    beta_window = _window(page, "beta Intermediate CA")
-    alpha_window = _window(page, "alpha Intermediate CA", size=beta_int_i - alpha_int_i)
+    beta_window = _row(page, "beta Intermediate CA", class_name="ca-row")
+    alpha_window = _row(page, "alpha Intermediate CA", class_name="ca-row")
     assert "retired" in beta_window.lower()
     assert "retired" not in alpha_window.lower()
 
@@ -329,8 +371,8 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     assert imported_root.key_sealed is None  # the premise this test measures
 
     html = client.get("/ca").text
-    generated_window = _window(html, "generated Root CA")
-    imported_window = _window(html, "Imported Root CA")
+    generated_window = _row(html, "generated Root CA", class_name="section")
+    imported_window = _row(html, "Imported Root CA", class_name="section")
 
     create_intermediate_url = f"/ca/{generated_root.id}/intermediate"
     renew_url = f"/ca/{generated_root.id}/renew"

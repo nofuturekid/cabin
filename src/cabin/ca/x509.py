@@ -149,13 +149,20 @@ def create_intermediate(
     subject_cn: str,
     key_type: str,
     years: int = 10,
+    name_constraints: x509.NameConstraints | None = None,
 ) -> tuple[x509.Certificate, CertificateIssuerPrivateKeyTypes]:
     """Signing CA issued by ``root_cert``/``root_key``.
 
     Extensions: ``BasicConstraints(ca=True, path_length=0)`` and
     ``KeyUsage(key_cert_sign, crl_sign)``, both critical, a
     ``SubjectKeyIdentifier``, and an ``AuthorityKeyIdentifier`` derived from
-    the root's ``SubjectKeyIdentifier``.
+    the root's ``SubjectKeyIdentifier``. ``name_constraints`` (spec 0020
+    FR-1/FR-2), when given, is added as a **critical** ``NameConstraints``
+    extension -- RFC 5280 requires it -- and left out entirely when
+    ``None``, never written as an empty one. The caller
+    (``cabin.ca.leaf.name_constraints_extension``) is what turns "no
+    constraints" into ``None`` rather than an empty extension; this
+    function only adds what it is given.
     """
     key = generate_key(key_type)
     root_ski = root_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
@@ -181,6 +188,8 @@ def create_intermediate(
             critical=False,
         )
     )
+    if name_constraints is not None:
+        builder = builder.add_extension(name_constraints, critical=True)
     cert = builder.sign(root_key, algorithm=signing_algorithm(root_key))
     return cert, key
 
@@ -214,6 +223,13 @@ def renew_certificate(
     from the parent's SKI). Since a renewal never changes any key, this
     lands on the same bytes an unrenewed AKI would already have carried.
 
+    The ``NameConstraints`` extension, when ``cert`` carries one, is copied
+    across unchanged -- value and criticality both (spec 0020 FR-6) -- and
+    left out when ``cert`` carries none. A renewal that dropped it would
+    turn an intermediate restricted to one subtree into one that may sign
+    anything, on an operator action whose only visible effect is meant to
+    be a later expiry date.
+
     This is a pure primitive: it clamps nothing. Cutting ``years`` back to
     the parent's remaining validity is ``ca.service.renew_in_place``'s job,
     the same way choosing which issuer to call this with is.
@@ -226,6 +242,10 @@ def renew_certificate(
         needs_aki = True
     except x509.ExtensionNotFound:
         needs_aki = False
+    try:
+        name_constraints = cert.extensions.get_extension_for_class(x509.NameConstraints)
+    except x509.ExtensionNotFound:
+        name_constraints = None
 
     now = datetime.now(UTC)
     builder = (
@@ -244,6 +264,8 @@ def renew_certificate(
         builder = builder.add_extension(
             authority_key_identifier(parent_cert, parent_key), critical=False
         )
+    if name_constraints is not None:
+        builder = builder.add_extension(name_constraints.value, critical=name_constraints.critical)
     return builder.sign(parent_key, algorithm=signing_algorithm(parent_key))
 
 

@@ -11,13 +11,16 @@
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+{% macro constraints_block(row) %}{% if row.has_constraints %}<div class="constraints"><p class="help">Permitted:{% if row.permitted_dns or row.permitted_ip %} <span class="mono">{{ (row.permitted_dns + row.permitted_ip) | join(", ") }}</span>{% else %} <span class="mono">none set -- every name of a constrained form is permitted</span>{% endif %}</p>{% if row.excluded_dns or row.excluded_ip %}<p class="help">Excluded: <span class="mono">{{ (row.excluded_dns + row.excluded_ip) | join(", ") }}</span></p>{% endif %}</div>{% endif %}{% endmacro %}
 {% for group in groups %}
 {% set root = group.root %}
 <div class="section">
 <div><h2>{{ root.name }}</h2> <span class="tag">root</span> <span class="tag{% if root.status == "retired" %} tag-bad{% endif %}">{{ root.status }}</span> <span class="nowrap">until {{ root.not_valid_after }}</span></div>
 <div>
-{% if root.can_create_intermediate or root.can_renew or root.can_retire %}<form method="post" class="inline-form"><input type=hidden name=csrf_token value="{{ csrf_token }}">{% if root.can_create_intermediate or root.can_renew %}<input type=number name=years value=10 min=1 max=50 size=2>{% endif %}{% if root.can_renew %}<button formaction="/ca/{{ root.id }}/renew">Renew</button>{% endif %}{% if root.can_create_intermediate %}<input name=name size=8><button formaction="/ca/{{ root.id }}/intermediate">+Intermediate</button>{% endif %}{% if root.can_retire %}<button formaction="/ca/{{ root.id }}/retire" class=danger>Retire</button>{% endif %}</form>{% endif %}
+{% if root.can_renew or root.can_retire %}<form method="post"><input type=hidden name=csrf_token value="{{ csrf_token }}">{% if root.can_renew %}<input type=number name=years value=10 min=1 max=50><button formaction="/ca/{{ root.id }}/renew">Renew</button>{% endif %}{% if root.can_retire %}<button formaction="/ca/{{ root.id }}/retire" class=danger>Retire</button>{% endif %}</form>{% endif %}
+{% if root.can_create_intermediate %}<details><summary>Add intermediate</summary><form method=post action=/ca/{{ root.id }}/intermediate><input type=hidden name=csrf_token value="{{ csrf_token }}"><div class="field"><label for="int-name-{{ root.id }}">Name</label><input id="int-name-{{ root.id }}" name=name required></div><div class="field"><label for="int-key-type-{{ root.id }}">Key type</label><select id="int-key-type-{{ root.id }}" name=key_type><option value="ecdsa-p256" selected>ECDSA P-256</option><option value="ecdsa-p384">ECDSA P-384</option><option value="rsa-4096">RSA 4096</option><option value="ed25519">Ed25519</option></select></div><div class="field"><label for="int-years-{{ root.id }}">Validity (years)</label><input id="int-years-{{ root.id }}" type=number name=years min=1 max=50 value=10 required></div><div class="field"><label for="int-permitted-{{ root.id }}">Permitted names</label><textarea id="int-permitted-{{ root.id }}" name=permitted_names rows=4 placeholder="example.com&#10;10.0.0.0/8"></textarea><span class="hint">One DNS suffix or IP network per line. Empty means every name of that form is permitted. Fixed once the intermediate is created.</span></div><div class="field"><label for="int-excluded-{{ root.id }}">Excluded names</label><textarea id="int-excluded-{{ root.id }}" name=excluded_names rows=4 placeholder="secret.example.com"></textarea><span class="hint">One DNS suffix or IP network per line. Refused even if covered by a permitted entry above.</span></div><div class="actions"><button type=submit class=primary>Create intermediate</button></div></form></details>{% endif %}
 <p><a href="/ca/{{ root.id }}.pem">root.pem</a> <span class="help mono">{{ root.subject }} · {{ root.fingerprint }}</span></p>
+{{ constraints_block(root) }}
 
 {% for i in group.intermediates %}
 <div class="ca-row">
@@ -32,6 +35,7 @@
 {% if i.acme_directory_url %}
 <p class="help mono">ACME: <a href="{{ i.acme_directory_url }}">{{ i.acme_directory_url }}</a></p>
 {% endif %}
+{{ constraints_block(i) }}
 </div>
 {% endfor %}
 </div>
@@ -71,6 +75,16 @@
         <label for="path_length">Path length</label>
         <input id="path_length" type="number" name="path_length" min="1" max="4" value="1" required />
         <span class="hint">How many further intermediates may sign under the root. Cannot be changed later.</span>
+      </div>
+      <div class="field">
+        <label for="permitted_names">Permitted names</label>
+        <textarea id="permitted_names" name="permitted_names" rows="4" placeholder="example.com&#10;10.0.0.0/8"></textarea>
+        <span class="hint">One DNS suffix or IP network per line. Empty means every name of that form is permitted. Fixed once the intermediate is created.</span>
+      </div>
+      <div class="field">
+        <label for="excluded_names">Excluded names</label>
+        <textarea id="excluded_names" name="excluded_names" rows="4" placeholder="secret.example.com"></textarea>
+        <span class="hint">One DNS suffix or IP network per line. Refused even if covered by a permitted entry above.</span>
       </div>
       <div class="actions"><button type="submit" class="primary">Create CA</button></div>
     </form>

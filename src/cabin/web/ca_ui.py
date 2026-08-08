@@ -15,8 +15,10 @@ from cabin import audit
 from cabin.acme import http as acme_http
 from cabin.audit import Actor, AuditAction
 from cabin.ca import crl as crl_service
+from cabin.ca import leaf
 from cabin.ca import service as ca_service
 from cabin.ca import x509 as ca_x509
+from cabin.ca.leaf import NameConstraintError, NameConstraintSpec
 from cabin.ca.service import (
     CACertificate,
     CAHierarchy,
@@ -54,7 +56,35 @@ def _cert_info(row: CACertificate) -> dict[str, object]:
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     info = ca_x509.describe_certificate(cert)
     info["kind"] = row.kind
+    constraints = leaf.constraints_of(cert)
+    info["permitted_dns"] = list(constraints.permitted_dns)
+    info["permitted_ip"] = [str(network) for network in constraints.permitted_ip]
+    info["excluded_dns"] = list(constraints.excluded_dns)
+    info["excluded_ip"] = [str(network) for network in constraints.excluded_ip]
+    info["has_constraints"] = not constraints.is_empty()
     return info
+
+
+def _canonical_entries(spec: NameConstraintSpec) -> tuple[list[str], list[str]]:
+    """FR-10: the audit detail's ``permitted``/``excluded`` -- the canonical
+    entry strings (DNS suffixes then IP networks, each side) read back from
+    the certificate that was actually produced, not echoed from the form."""
+    permitted = [*spec.permitted_dns, *(str(network) for network in spec.permitted_ip)]
+    excluded = [*spec.excluded_dns, *(str(network) for network in spec.excluded_ip)]
+    return permitted, excluded
+
+
+def _constraints_form_error(
+    permitted_names: str, excluded_names: str
+) -> tuple[NameConstraintSpec | None, str | None]:
+    """FR-3: parsed here, at the route, before anything is written -- a
+    constraint that fails to parse must not leave an orphan root behind
+    (``create_hierarchy`` inserts and flushes the root before it builds the
+    intermediate)."""
+    try:
+        return leaf.parse_name_constraints(permitted_names, excluded_names), None
+    except NameConstraintError as exc:
+        return None, str(exc)
 
 
 def _year_bounds_error(value: int, field: str) -> str | None:
@@ -242,6 +272,8 @@ def ca_create(
     root_years: int = Form(20),
     intermediate_years: int = Form(10),
     path_length: int = Form(1),
+    permitted_names: str = Form(""),
+    excluded_names: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
@@ -252,11 +284,15 @@ def ca_create(
         or _years_error(root_years, intermediate_years)
         or _path_length_error(path_length)
     )
+    constraints, constraints_error = _constraints_form_error(permitted_names, excluded_names)
+    if form_error is None:
+        form_error = constraints_error
     if form_error is not None:
         context = base_context(request, user)
         context["error"] = form_error
         context["tls_self_signed"] = _tls_self_signed(request)
         return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
+    assert constraints is not None  # form_error is None only when parsing succeeded
     hierarchy = ca_service.create_hierarchy(
         db,
         request.app.state.secrets,
@@ -265,11 +301,17 @@ def ca_create(
         root_years=root_years,
         intermediate_years=intermediate_years,
         path_length=path_length,
+        constraints=constraints,
     )
     # Spec 0018 FR-8: whoever creates a hierarchy is granted it immediately --
     # written even for a superadmin, so a later demotion does not take the
     # hierarchy they built away from them.
     grant(db, user_principal(user), hierarchy.intermediate.id)
+    # FR-10: read back off the certificate that was actually produced, not
+    # echoed from the form -- so the log matches what was signed even if a
+    # future bug in the writer drifted from what was typed.
+    produced = x509.load_pem_x509_certificate(hierarchy.intermediate.cert_pem.encode("utf-8"))
+    permitted, excluded = _canonical_entries(leaf.constraints_of(produced))
     audit.record(
         db,
         actor,
@@ -285,6 +327,8 @@ def ca_create(
             "path_length": path_length,
             "subject": _subject(hierarchy),
             "granted_to": user.id,
+            "permitted": permitted,
+            "excluded": excluded,
         },
         ip=client_ip(request, db),
     )
@@ -357,14 +401,20 @@ def ca_create_intermediate(
     name: str = Form(...),
     key_type: str = Form("ecdsa-p256"),
     years: int = Form(10),
+    permitted_names: str = Form(""),
+    excluded_names: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     form_error = _key_type_error(key_type) or _year_bounds_error(years, "years")
+    constraints, constraints_error = _constraints_form_error(permitted_names, excluded_names)
+    if form_error is None:
+        form_error = constraints_error
     if form_error is not None:
         raise HTTPException(status_code=400, detail=form_error)
+    assert constraints is not None  # form_error is None only when parsing succeeded
     try:
         row = ca_service.create_intermediate_under(
             db,
@@ -373,6 +423,7 @@ def ca_create_intermediate(
             name,
             key_type=key_type,
             years=years,
+            constraints=constraints,
         )
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -381,6 +432,9 @@ def ca_create_intermediate(
     # Spec 0018 FR-8: same as ca_create above -- the creator is granted the
     # new intermediate immediately.
     grant(db, user_principal(user), row.id)
+    # FR-10: read back off the certificate that was actually produced.
+    produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    permitted, excluded = _canonical_entries(leaf.constraints_of(produced))
     audit.record(
         db,
         actor,
@@ -394,6 +448,8 @@ def ca_create_intermediate(
             "years": years,
             "root_id": root_id,
             "granted_to": user.id,
+            "permitted": permitted,
+            "excluded": excluded,
         },
         ip=client_ip(request, db),
     )
