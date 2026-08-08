@@ -11,11 +11,11 @@ reason to have two is that not everyone should be signing from both.
 
 Nothing in cabin can express that today. `require_admin`
 (`web/deps.py:169`) and `require_api_write` (`web/api_deps.py:68`) draw one
-line — may this identity change anything at all — and the seven issuance
+line — may this identity change anything at all — and the eight issuance
 entry points draw no second line after it. This spec adds the second line:
 **which issuers** this identity may sign and revoke with.
 
-Three facts about cabin's identity model shape the design.
+Four facts about cabin's identity model shape the design.
 
 - **API tokens have no owning user.** `ApiToken` (`api_tokens.py:43-55`)
   carries a label, a hash, a role and four timestamps — there is no
@@ -33,9 +33,35 @@ Three facts about cabin's identity model shape the design.
   (`audit.py:138`) exists precisely because there is no user row and no
   integer id to point at. There is nothing to look a grant up by. FR-7
   makes that exemption explicit rather than leaving it to be discovered.
+- **cabin issues to itself, on behalf of nobody.** Spec 0022 gave the
+  instance its own TLS certificate, and `TlsManager._issue` (`tls.py:529`)
+  gets it through the same `issue_and_store` every other door uses — from an
+  hourly renewal tick with no request behind it at all (`server.py:196`) as
+  well as from three request-driven paths. Whose grants apply is the wrong
+  question there; FR-7 gives it a named system principal for the same reason
+  it gives ACME one.
 
 **Visibility does not change, and that is a decision, not an omission** —
 see FR-13.
+
+### What this spec does not protect
+
+Stated here, at the top, because "cabin has per-issuer permissions" is the
+sentence someone will quote in six months and it will not be the whole
+truth until spec 0019 lands.
+
+**ACME is not covered by grants.** On an instance with ACME switched on, an
+admin holding no grant at all can still obtain a certificate by registering
+an ACME account and running an ordinary order — from whichever issuer 0017's
+default rule picks. This is not an oversight and not a bug to be reported:
+there is no cabin identity behind an ACME request to look a grant up by
+(FR-7), and binding an account to an issuer is exactly what 0019 does,
+through the per-issuer directory URL and the EAB key's own
+`ca_certificate_id`.
+
+Until then the honest summary is: **grants bind the UI, the REST API and
+MCP. ACME routes around them.** An operator who needs the grants to hold
+absolutely must leave ACME switched off until 0019.
 
 ## User Stories
 
@@ -83,22 +109,33 @@ see FR-13.
   PostgreSQL can express here. FR-10 enforces it in the one function that
   writes these rows.
 
+  **Neither foreign key declares `ondelete`.** Not `CASCADE`, not
+  `SET NULL` — plain references. cabin enforces foreign keys on SQLite as
+  of commit `ddd42cf` (`store/__init__.py:27-37`), so a `CASCADE` here would
+  work, and that is precisely the problem: the database would clean up after
+  a user deletion and FR-10's application-level cleanup would become
+  unobservable, taking AC-12 with it. The cleanup is the application's job
+  because the application is what has to be right about it; the FK is left
+  as the backstop that makes a forgotten cleanup loud.
+
 - FR-2: **A principal is what a permission is checked against.** New module
   `cabin/issuer_grants.py`, top-level next to `users.py` and
   `api_tokens.py`, holding both ORM models, the principal type and every
   rule below.
 
   ```
-  class PrincipalKind(StrEnum): user, token, acme
+  class PrincipalKind(StrEnum): user, token, acme, system
   @dataclass(frozen=True) class Principal: kind, id, role
   ```
 
-  Built by three things and nothing else: `user_principal(user)`,
-  `token_principal(token)`, and the module constant `ACME_PRINCIPAL`
-  (`kind=acme`, `id=None`, `role=None`). A principal is derived from an
-  identity that has **already** been authenticated and role-checked; it
-  never authenticates anything itself. `Principal.unrestricted` is true for
-  a superadmin user, a superadmin token and `ACME_PRINCIPAL`.
+  Built by four things and nothing else: `user_principal(user)`,
+  `token_principal(token)`, and the two module constants `ACME_PRINCIPAL`
+  and `SYSTEM_PRINCIPAL` (both `id=None`, `role=None`; FR-7). A principal is
+  derived from an identity that has **already** been authenticated and
+  role-checked; it never authenticates anything itself.
+  `Principal.unrestricted` is true for
+  a superadmin user, a superadmin token, `ACME_PRINCIPAL` and
+  `SYSTEM_PRINCIPAL`.
 
   `cabin/issuer_grants.py` imports `cabin.users`, `cabin.api_tokens` and
   `cabin.ca.service`, and is imported by `cabin.ca.certs` and
@@ -177,17 +214,27 @@ Principal` parameter with no default, and pass it to
   arrives in the request _body_, and when it is omitted it can only be
   derived from the database and the principal together — a dependency that
   runs before the body is bound cannot decide it. A guard per entry point
-  would also have to be written seven times and would be right seven times
+  would also have to be written eight times and would be right eight times
   only by discipline. One required parameter on the two functions every door
-  already goes through is right by construction: the eighth entry point
-  someone adds in 2027 does not compile until it says who is asking. This is
-  the same device 0017 used for `_store(..., *, issuer_id: int)`.
+  already goes through is right by construction: a new entry point does not
+  compile until it says who is asking. This is the same device 0017 used for
+  `_store(..., *, issuer_id: int)`.
 
-  The seven call sites pass a principal: `web/certs_ui.py:308` and `:368`
+  **The eighth door already exists**, and it arrived between this spec being
+  written and being built — which is the argument for the mechanism rather
+  than against it. Spec 0022 gave cabin its own TLS certificate, and
+  `TlsManager._issue` (`tls.py:529`) calls `issue_and_store` to get it,
+  reached from the renewal tick (`server.py:196`), from
+  `web/ca_ui.py:286` and `:333` after a CA is created or imported, and from
+  `web/settings_ui.py:321` after a rebind. It passes `SYSTEM_PRINCIPAL`
+  (FR-7).
+
+  The eight call sites pass a principal: `web/certs_ui.py:308` and `:368`
   (`user_principal`), `api/v1.py:262` and `:312` (`token_principal`),
   `mcp/server.py:463` and `:531` (`token_principal` on the token
-  `_writer` at `mcp/server.py:300` already returned), and
-  `acme/api_finalize.py:238` (`ACME_PRINCIPAL`, FR-7).
+  `_writer` at `mcp/server.py:300` already returned),
+  `acme/api_finalize.py:238` (`ACME_PRINCIPAL`) and `tls.py:529`
+  (`SYSTEM_PRINCIPAL`).
 
   `web/deps.py` gains `current_principal(user: User = Depends(require_admin))
 -> Principal` and `web/api_deps.py` gains `api_write_principal(token:
@@ -215,23 +262,45 @@ principal, row.issuer_id)` on the row it is already loading — 0017 FR-9
   All four call sites pass one: `web/certs_ui.py:495`, `api/v1.py:383`,
   `mcp/server.py:584`, `acme/api_finalize.py:484` (`ACME_PRINCIPAL`).
 
-- FR-7: **ACME is exempt in this spec, explicitly and by name.** There is no
-  cabin user and no API token behind an ACME finalize or an ACME
-  revoke-cert; the account is a key thumbprint. `ACME_PRINCIPAL` is
-  unrestricted, so `acme/api_finalize.py:238` and `:484` behave exactly as
-  they do under 0017 — `_issue`'s docstring (`api_finalize.py:225-229`)
-  already explains that ACME rides the default rule until spec 0019.
+- FR-7: **Two exemptions, both named constants, neither of them absence.**
+  Two doors have no identity to look a grant up by, and both get an
+  unrestricted principal with a name rather than a missing argument.
 
-  It is a named constant rather than `principal=None` on purpose. `None`
+  **`ACME_PRINCIPAL`** — there is no cabin user and no API token behind an
+  ACME finalize or an ACME revoke-cert; the account is a key thumbprint.
+  Passed at `acme/api_finalize.py:238` and `:484`, which therefore behave
+  exactly as they do under 0017 — `_issue`'s docstring
+  (`api_finalize.py:225-229`) already explains that ACME rides the default
+  rule until spec 0019.
+
+  **`SYSTEM_PRINCIPAL`** — cabin issuing its own TLS certificate
+  (`tls.py:529`) is not acting for anybody. There is no session, no bearer
+  token and no request at all on the renewal-tick path (`server.py:196`);
+  on the three request-driven paths (`web/ca_ui.py:286`, `:333`,
+  `web/settings_ui.py:321`) there _is_ an admin, but their grants are the
+  wrong question — cabin's ability to serve HTTPS must not depend on which
+  issuers the operator who happened to click "create CA" was granted, and an
+  instance whose own certificate silently stops renewing because of a
+  permission change is a worse failure than any this spec prevents.
+
+  It mirrors `audit.SYSTEM_ACTOR` (`audit.py:120-121`), which `tls.py:396`
+  already uses to attribute the very same operation, so the two answers to
+  "who did this" agree: `system`. `PrincipalKind` gains `system` for it.
+
+  Both are named constants rather than `principal=None` on purpose. `None`
   meaning "skip the check" would make every forgotten call site a silent
   bypass instead of a type error, which is precisely the failure FR-5 is
-  shaped to prevent. `ACME_PRINCIPAL` is greppable, appears at two call
-  sites, and a third occurrence is a review question.
+  shaped to prevent. Each constant is greppable and appears at exactly the
+  call sites listed above; a further occurrence of either is a review
+  question, and AC-18 asserts the counts.
 
-  What this costs is stated in Out of Scope: until 0019 binds an ACME
-  account to an issuer, an admin with no grant who can register an ACME
-  account can still obtain a certificate. That is a real hole, it is
-  accepted here, and it is 0019's to close.
+  **What the exemptions cost.** For `SYSTEM_PRINCIPAL`: nothing an operator
+  can reach — it is not bound to any credential and there is no request that
+  can ask cabin to issue as itself. For `ACME_PRINCIPAL`: a real hole, named
+  at the top of this document and again in Out of Scope. Until 0019 binds an
+  ACME account to an issuer, an admin with no grant who can register an ACME
+  account can still obtain a certificate. It is accepted here and it is
+  0019's to close.
 
 - FR-8: **Whoever creates a hierarchy is granted it.** `POST /ca/create`
   (`web/ca_ui.py:173`), `POST /ca/import` (`:224`) and
@@ -266,14 +335,34 @@ principal, row.issuer_id)` on the row it is already loading — 0017 FR-9
     a grant on one could only ever be dead data that reads like permission.
   - **Deleting a user deletes their grants.** `users.delete_user`
     (`users.py:154-160`) removes the identity's `user_issuers` rows in the
-    same transaction, the way `delete_sessions_for_user` is called for its
-    sessions (`web/ui.py:507`). This is not tidiness. cabin enables no
-    `PRAGMA foreign_keys` anywhere (`store/__init__.py:26-30` sets only
-    `check_same_thread`), so SQLite does not enforce the FK and the rows
-    would simply stay; and `users.id` is a plain `INTEGER PRIMARY KEY`,
-    whose value SQLite reuses for the next insert after the highest row is
-    deleted. A deleted admin's grants would then be inherited by the next
-    user created. AC-12 measures exactly that.
+    same transaction, before the `db.delete(user)`.
+
+    **This deliberately differs from how sessions do it**, and the
+    difference should not be quietly harmonised later.
+    `sessions.user_id` declares `ON DELETE CASCADE`
+    (`0002_users_sessions.py:41`), so `delete_sessions_for_user`
+    (`web/ui.py:507`) is belt-and-braces over a database that would have
+    cleaned up anyway. Grants have no `ondelete` (FR-1), so here the
+    application is not a second opinion — it is the only one. A session is
+    a cache of an authentication and losing one early costs a login; a
+    grant is the authorization itself, and a database silently dropping
+    authorization records is a thing that should require someone to have
+    written it down. If a future change adds `CASCADE` here for symmetry
+    with sessions, AC-12 stops measuring anything.
+
+    An earlier draft of this requirement justified it with orphan rows and
+    SQLite's reuse of a deleted `INTEGER PRIMARY KEY`, by which a new user
+    could inherit a deleted admin's grants. **That is no longer the failure
+    mode.** Commit `ddd42cf` added a `connect` listener that issues
+    `PRAGMA foreign_keys=ON` for every pooled SQLite connection
+    (`store/__init__.py:27-37`), so the FK is enforced and no orphan row can
+    exist. What happens instead if the cleanup is forgotten is that
+    `delete_user` raises `IntegrityError` and **no user can be deleted once
+    they hold a grant** — a loud bug rather than a silent escalation, which
+    is a better bug, and still a bug. FR-1 keeps `ondelete` off both foreign
+    keys so that this stays the application's job and stays observable;
+    AC-12 measures it.
+
   - Tokens are revoked, never deleted (`api_tokens.py:146-158`), so
     `token_issuers` has no equivalent hole. A revoked or expired token fails
     `verify_token` before any grant is consulted; its rows stay and are shown
@@ -281,6 +370,7 @@ principal, row.issuer_id)` on the row it is already loading — 0017 FR-9
   - Retiring an issuer does not touch its grants. It stops appearing in
     `granted_issuers` (FR-3) and stays usable for revocation (FR-6); if it
     is ever un-retired, the grants that were there are still there.
+
 - FR-11: **UI.**
   - `/users` (`web/ui.py:374`, `users.html`) shows each user's granted
     issuers and, for a non-superadmin row, a checkbox per active
@@ -359,6 +449,48 @@ principal, row.issuer_id)` on the row it is already loading — 0017 FR-9
     distinguishable from "no such issuer", since an MCP client has no status
     line to read.
   - ACME: not reachable (FR-7).
+  - The TLS self-issuance path: not reachable (FR-7), and FR-15 says what
+    must happen to keep that true rather than merely hoped for.
+
+- FR-15: **A self-issuance cabin cannot complete must be visible.**
+  `TlsManager._ensure_current_locked` catches five issuance exceptions,
+  logs a warning and returns `False` (`tls.py:485-500`). That swallow is
+  required — spec 0022 FR-17 needs the hourly renewal tick to survive a bad
+  tick rather than take the process down — and this spec does not undo it.
+  Three things are required of it instead.
+
+  **`IssuerForbiddenError` and `NoGrantedIssuerError` are not added to that
+  `except` clause.** With `SYSTEM_PRINCIPAL` unrestricted they are
+  unreachable there, and that is the property to protect. Adding them
+  "defensively" would mean that if someone later makes the TLS principal
+  restricted, cabin quietly stops renewing its own certificate instead of
+  failing where a test can see it. AC-19 asserts the absence.
+
+  **The swallow must stop collapsing two different situations.** "The issuer
+  is momentarily unusable, keep serving what we have" and "this
+  configuration will never produce a certificate" both currently produce one
+  `logger.warning` and an unchanged `self.mode`. An instance in the second
+  state sits on its stage-1 self-signed certificate forever, and the only
+  trace is a log line that scrolled away. `TlsManager` therefore gains
+  `last_error: str | None` — set to the exception's message on the swallow
+  path, cleared on any `ensure_current` that returns `True` — alongside the
+  existing `mode`. It is read, not raised: the renewal loop's behaviour does
+  not change at all.
+
+  **The operator finds out where they already look.** `_tls_banner`
+  (`web/ui.py:98-120`) gains a third state, taking precedence over 0022
+  FR-14's two: when the mode is `self_signed`, `last_error` is set **and at
+  least one active issuer exists**, the banner says cabin could not issue
+  its own certificate and names the reason. The condition matters — 0022
+  FR-14's self-signed banner says "create or import a CA", which is exactly
+  the wrong instruction for an instance that has one and failed anyway, and
+  would send an operator off to build a second hierarchy. In addition a new
+  `AuditAction.tls_certificate_failed` is recorded with `audit.SYSTEM_ACTOR`
+  and a detail naming the reason and the mode cabin is stuck in — **only on
+  the transition into failure**, i.e. when `last_error` goes from `None` (or
+  a different message) to this one. Recording it per tick would write
+  twenty-four events a day forever on an unattended instance and bury the
+  event that mattered under the ones that did not.
 
 ## Interface Contract
 
@@ -382,6 +514,7 @@ class PrincipalKind(StrEnum):
     user = "user"
     token = "token"
     acme = "acme"
+    system = "system"
 
 
 @dataclass(frozen=True)
@@ -399,6 +532,7 @@ def token_principal(token: ApiToken) -> Principal: ...
 
 
 ACME_PRINCIPAL: Principal
+SYSTEM_PRINCIPAL: Principal
 
 
 def granted_issuers(db: Session, principal: Principal) -> list[CACertificate]: ...
@@ -434,9 +568,10 @@ not a raw id, so that a caller cannot pass a user id where a token id was
 meant — the two tables are otherwise structurally identical and a
 transposed argument would grant the wrong identity in silence. Both raise
 `ValueError` for an id that is not an active-or-retired intermediate row
-(FR-10) and for `ACME_PRINCIPAL`, which has nothing to store a grant
-against. `grant` returns whether a row was actually written, so FR-8's
-creation path can be idempotent without counting.
+(FR-10) and for `ACME_PRINCIPAL` and `SYSTEM_PRINCIPAL`, neither of which
+has anything to store a grant against. `grant` returns whether a row was
+actually written, so FR-8's creation path can be idempotent without
+counting.
 
 ### `cabin.ca.certs` — changed signatures
 
@@ -457,6 +592,20 @@ positional-or-keyword so the four existing call sites keep their shape.
 `regenerate_crl`, `stored_crl` and `current_crl` are **unchanged**: serving
 and refreshing a CRL is a public, unauthenticated read (0017 FR-10) and has
 no principal to check.
+
+### `cabin.tls` — one new attribute, no new behaviour
+
+- `TlsManager.last_error: str | None` — FR-15. `None` at construction and
+  after any `ensure_current` that returned `True`; the caught exception's
+  message after a swallowed failure. Read by `_tls_banner` and by the
+  transition check that decides whether to record
+  `AuditAction.tls_certificate_failed`.
+
+`ensure_current`, `_ensure_current_locked` and `_issue` keep their
+signatures and their return types. `_issue` gains
+`principal=SYSTEM_PRINCIPAL` on its `issue_and_store` call
+(`tls.py:529`) and nothing else. The `except` clause at `tls.py:485-500`
+keeps exactly its current five exception types (FR-15).
 
 ### `cabin.web.deps` / `cabin.web.api_deps`
 
@@ -498,21 +647,27 @@ shapes; what changes is which of them succeed.
 ## Acceptance Criteria
 
 A permissions spec is carried by its negative cases, and a negative case at
-one door proves nothing about the other six. Every criterion below that
+one door proves nothing about the other seven. Every criterion below that
 says "refused" means: the front door's own refusal **and** no state change —
 no `certificates` row, no `revoked_at`, no changed `crl_number`. A test that
 asserts only a status code passes an implementation that does the thing and
 then reports an error.
 
-- AC-1: **All seven issuance entry points refuse an ungranted admin.** With
-  one active issuer and an admin (resp. an admin token) holding no grant,
-  each of `web/certs_ui.py:308`, `:368`, `api/v1.py:262`, `:312`,
-  `mcp/server.py:463`, `:531` — driven through its real front door, not by
-  calling the service function — refuses, and `select count(*) from
-certificates` is identical before and after all six. The seventh,
-  `acme/api_finalize.py:238`, is AC-7's. Granting the issuer and repeating
-  all six produces six rows whose `issuer_id` is the granted one. A test
-  parameterized over fewer than six does not satisfy this criterion.
+- AC-1: **The six identity-bearing issuance entry points refuse an ungranted
+  admin.** With one active issuer and an admin (resp. an admin token)
+  holding no grant, each of `web/certs_ui.py:308`, `:368`, `api/v1.py:262`,
+  `:312`, `mcp/server.py:463`, `:531` — driven through its real front door,
+  not by calling the service function — refuses, and
+  `select count(*) from certificates` is identical before and after all six.
+  Granting the issuer and repeating all six produces six rows whose
+  `issuer_id` is the granted one. A test parameterized over fewer than six
+  does not satisfy this criterion.
+
+  The other two of FR-5's eight are the exempt ones and have criteria of
+  their own: `acme/api_finalize.py:238` is AC-7's and `tls.py:529` is
+  AC-18's. Both must **succeed** where these six are refused, which is why
+  they cannot be folded into the same parameterization.
+
 - AC-2: **Enforcement is not the select box.** Two active issuers, admin
   granted only A. `POST /certs/issue` with `issuer_id=B` in the body — a
   value the rendered form never offers — returns 403 and writes no row;
@@ -569,7 +724,9 @@ certificates` is identical before and after all six. The seventh,
   declare `principal` as `KEYWORD_ONLY` with `Parameter.empty` as its
   default, and calling each without it raises `TypeError`. Rationale
   asserted, not merely written: a default of `None` meaning "unrestricted"
-  would let a future eighth entry point bypass AC-1 through AC-6 in silence.
+  would let a future entry point bypass AC-1 through AC-6 in silence — which
+  is not hypothetical, since `tls.py:529` appeared between this spec being
+  written and being built and was caught by exactly this mechanism.
 - AC-9: **Nothing caches a grant.** A logged-in admin issues successfully;
   the superadmin then posts a grant set without that issuer to
   `/users/{id}/issuers`; the **next** request on the same session cookie is
@@ -592,14 +749,23 @@ certificates` is identical before and after all six. The seventh,
   `POST /users/{id}/issuers` carrying a root's id is a 400 with no row
   written in either table; `set_issuers` with `ACME_PRINCIPAL` raises. The
   row counts before and after are equal.
-- AC-12: **A deleted user's grants do not outlive them.** A user granted an
-  issuer is deleted; no `user_issuers` row with that `user_id` remains. A
-  new user is then created carrying that same id (constructed explicitly
-  rather than relying on SQLite's rowid reuse, so the test is deterministic
-  on both backends), and is refused at all six non-ACME issuance points.
-  This criterion goes red the moment `users.delete_user` forgets the
-  cleanup, which is the failure mode FR-10 exists for — cabin enforces no
-  foreign keys on SQLite, so nothing else would notice.
+- AC-12: **A granted user can still be deleted, and the application is what
+  deletes the grants.** Three parts, and the third is what keeps the first
+  two honest.
+  1. `POST /users/{id}/delete` on a user holding a grant returns 303 and the
+     user is gone; no `user_issuers` row with that `user_id` remains.
+  2. Migration `0010` declares **no** `ondelete` on either foreign key —
+     asserted against the schema cabin actually migrates to, not against the
+     migration's source text. Without this, part 1 passes with the
+     application doing nothing at all, because the database would have done
+     the cleanup: the criterion would be measuring SQLite.
+  3. The mutation this criterion exists to catch: removing the cleanup from
+     `users.delete_user` makes part 1 raise `IntegrityError` and the delete
+     fail outright. cabin enforces SQLite foreign keys as of `ddd42cf`
+     (`store/__init__.py:27-37`), so the failure is loud rather than the
+     silent orphan an earlier draft of FR-10 assumed — but a superadmin who
+     cannot delete a user because that user was once granted an issuer is
+     still a bug, and this is the test that finds it.
 - AC-13: **Editing grants is superadmin-only.** `POST /users/{id}/issuers`
   and `POST /tokens/{id}/issuers` return 403 for an admin, 403 for a viewer,
   and 403 for a superadmin without a CSRF token; after each, the row counts
@@ -631,11 +797,47 @@ certificates` is identical before and after all six. The seventh,
   columns and both columns NOT NULL. Inserting the same pair twice fails at
   the database, not only in Python. Migration `0010` has
   `down_revision = "0009"`, and `downgrade()` drops both tables.
+- AC-18: **Cabin issues its own TLS certificate regardless of anyone's
+  grants.** With TLS on, one active issuer, and **zero rows in
+  `user_issuers` and `token_issuers`**, `TlsManager.ensure_current` reaches
+  `TlsMode.ca_issued` and returns `True`; the stored certificate's issuer is
+  that active issuer and `last_error` is `None`. The same holds when the
+  hierarchy was created by an admin who is then stripped of every grant: a
+  subsequent `ensure_current` renewal still succeeds. In the same test an
+  ungranted admin is refused at `POST /certs/issue`, so the criterion cannot
+  be satisfied by a build that checks grants nowhere.
+
+  Also asserted by source inspection, because the mechanism is the point:
+  `SYSTEM_PRINCIPAL` appears at exactly one `issue_and_store` call site
+  (`tls.py`) and `ACME_PRINCIPAL` at exactly the two in
+  `acme/api_finalize.py`. A third use of either is a deliberate decision and
+  should fail until someone updates this criterion.
+
+- AC-19: **A self-issuance that will never succeed is visible.**
+  1. `IssuerForbiddenError` and `NoGrantedIssuerError` are **absent** from
+     the `except` tuple at `tls.py:485-500`, asserted by inspecting the
+     caught types. They are unreachable under FR-7 and must stay that way;
+     catching them would be the fix that hides a future regression.
+  2. With TLS on and `ensure_current` forced to fail on a terminal condition
+     (a `tls_issuer_id` bound to a since-retired issuer, so
+     `IssuerRetiredError` — a state that never resolves itself), the manager
+     keeps its current mode and returns `False` **and** `last_error` is set;
+     the renewal loop survives the tick, which is 0022 FR-17 and must not
+     regress.
+  3. The dashboard of that instance shows the FR-15 banner naming the
+     failure, **not** 0022 FR-14's "create or import a CA" text — asserted
+     on which of the two states the banner is in, since an instance that has
+     a CA and failed anyway must not be told to make another one. One
+     `tls_certificate_failed` event is recorded. Running `ensure_current`
+     three more times with the same failure adds **no** further events, and
+     a subsequent successful `ensure_current` clears `last_error` and
+     removes the banner.
 
 ## Test list
 
 test_ungranted_admin_refused_at_every_issuance_entry_point (parameterized
-over all six non-ACME doors), test_granted_admin_issues_at_every_entry_point,
+over all six identity-bearing doors),
+test_granted_admin_issues_at_every_entry_point,
 test_ungranted_issuer_posted_directly_is_refused (UI, REST and MCP),
 test_issuer_select_lists_only_granted_issuers,
 test_superadmin_needs_no_grant, test_granted_viewer_still_refused,
@@ -654,18 +856,28 @@ token, MCP), test_mcp_access_token_claims_carry_no_scopes,
 test_ca_create_grants_the_creator, test_ca_import_grants_the_creator,
 test_ca_intermediate_grants_the_creator,
 test_superadmin_creator_keeps_its_hierarchy_after_demotion,
-test_grant_on_a_root_is_refused, test_grant_on_acme_principal_is_refused,
+test_grant_on_a_root_is_refused,
+test_grant_on_exempt_principals_is_refused (ACME and system),
 test_deleted_user_leaves_no_grants,
-test_recreated_user_id_inherits_no_grants,
+test_delete_user_with_a_grant_does_not_raise,
+test_migration_0010_declares_no_ondelete,
 test_grant_routes_are_superadmin_and_csrf_only,
 test_audit_records_grant_changes, test_unchanged_grant_set_records_nothing,
 test_grant_actions_selectable_in_audit_filter,
 test_visibility_unchanged_for_ungranted_admin (all eight surfaces),
 test_token_grants_are_independent_of_users,
 test_token_grants_identical_over_rest_and_mcp,
-test_token_created_with_issuers, test_schema_join_tables_composite_pk
+test_token_created_with_issuers, test_schema_join_tables_composite_pk,
+test_tls_self_issuance_needs_no_grants,
+test_tls_renewal_survives_the_creator_losing_every_grant,
+test_exempt_principal_call_sites_are_exactly_the_expected_ones,
+test_tls_except_clause_does_not_catch_grant_errors,
+test_terminal_tls_failure_sets_last_error_and_returns_false,
+test_dashboard_banner_names_the_tls_failure_instead_of_asking_for_a_ca,
+test_tls_failure_audited_once_not_per_tick,
+test_successful_reissue_clears_last_error_and_banner
 
-Two notes for whoever writes these.
+Three notes for whoever writes these.
 
 - **The existing 0005–0017 issuance tests are affected.** Any test that
   builds a hierarchy through `ca_service` directly and then issues as an
@@ -678,6 +890,12 @@ Two notes for whoever writes these.
   `granted_issuers` passes every criterion here except AC-5(b) — issuing is
   unaffected, and revocation only breaks once the issuer is retired. AC-5(b)
   is the only thing standing between that mutation and a green suite.
+- **The TLS tests must not use a superadmin as the acting identity.** The
+  point of AC-18 is that cabin's own certificate does not depend on any
+  identity's grants, and a fixture that happens to run as a superadmin
+  proves nothing — every principal in it is unrestricted. Drive the
+  request-triggered paths (`web/ca_ui.py:286`, `:333`) as an admin, and the
+  renewal tick (`server.py:196`) with no request at all.
 
 ## Out of Scope
 
@@ -687,15 +905,29 @@ dashboard and the audit log show everything to every logged-in identity.
 Anyone proposing to filter them has to answer what happens to the expiry
 warnings, and to an audit log that shows each reader only their own actions.
 
-**ACME per-issuer authorization (spec 0019).** FR-7 exempts ACME because
-there is no cabin identity behind it. The consequence is a real gap and is
-named rather than buried: an admin with no grant who can register an ACME
-account against an instance with ACME switched on can still obtain a
-certificate, from whichever issuer the 0017 default rule picks. Closing it
-means binding an account to an issuer through the directory URL and the EAB
-key, which is exactly what 0019 does — including the EAB key's own
-`ca_certificate_id`. Until then, ACME plus grants is a combination whose
-weaker half is ACME.
+**ACME per-issuer authorization (spec 0019) — the one gap that lets an
+ungranted admin get a certificate.** Said at the top of this document under
+"What this spec does not protect", said in FR-7, and said a third time here,
+because it is the sentence that will be missing when someone reports 0018
+as broken. FR-7 exempts ACME because there is no cabin identity behind an
+ACME request to look a grant up by. The consequence: an admin with no grant
+who can register an ACME account against an instance with ACME switched on
+obtains a certificate anyway, from whichever issuer 0017's default rule
+picks. Closing it means binding an account to an issuer through the
+directory URL and the EAB key, which is exactly what 0019 does — including
+the EAB key's own `ca_certificate_id`. Until then, ACME plus grants is a
+combination whose weaker half is ACME, and the release notes for any version
+shipping 0018 without 0019 have to say so rather than claiming permissions
+outright.
+
+**Restricting cabin's own TLS certificate to a granted issuer.** FR-7 gives
+that path `SYSTEM_PRINCIPAL`, deliberately. Which issuer signs cabin's own
+certificate is 0022's `tls_issuer_id` setting, and that is the right knob:
+it is an instance-level decision made once, not a per-operator permission.
+Routing it through grants would mean cabin's HTTPS stops renewing because of
+an unrelated permission edit, which is a worse failure than the one it would
+prevent — and, since `SYSTEM_PRINCIPAL` is bound to no credential and no
+request can ask cabin to issue as itself, there is nothing there to exploit.
 
 Also out: grants on roots (FR-10 — nothing signs with one). Grant groups,
 roles or inheritance; the model is a flat pair of join tables and an
@@ -703,9 +935,12 @@ instance with enough identities to want groups has outgrown more than this.
 An owner column on `api_tokens` — spec 0008 left tokens ownerless on
 purpose, and FR-1's second table is the consequence, not a workaround to be
 tidied away later. Per-profile, per-name or per-SAN permissions: what an
-issuer may be used _for_ is name constraints, spec 0020. Turning on
-`PRAGMA foreign_keys` for SQLite — a global change affecting every table in
-cabin, and FR-10's explicit cleanup is the narrow fix this spec needs.
+issuer may be used _for_ is name constraints, spec 0020. Changing how
+foreign keys are enforced — `ddd42cf` already turned them on for SQLite
+(`store/__init__.py:27-37`) and this spec neither extends nor relies on
+that beyond FR-1's deliberate absence of `ondelete`. Any rework of the
+0022 renewal loop's error handling beyond FR-15's `last_error`: the
+swallow at `tls.py:485-500` stays, because 0022 FR-17 needs it.
 Revoking or re-issuing certificates when a grant is withdrawn: a
 certificate already issued stays valid, because the grant governed the act
 of issuing and not the certificate's life. Any change to who may _create_ a
