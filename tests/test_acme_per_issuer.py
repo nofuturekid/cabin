@@ -46,6 +46,7 @@ scattered across comments nobody reads together:
 from __future__ import annotations
 
 import base64
+import inspect
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -830,3 +831,30 @@ def test_refused_cross_issuer_registration_writes_no_audit_event(two_issuers: Tw
     finally:
         db.close()
     assert after == before
+
+
+# === signature: Acme's issuer_id cannot be forgotten ============================
+
+
+def test_acme_issuer_id_is_required_keyword_only(client: TestClient) -> None:
+    """Guards the precondition every test above relies on. ``Acme`` never
+    guesses an issuer: a default for ``issuer_id`` would make "used the
+    account's issuer" and "fell back to spec 0017's single-issuer default
+    rule" indistinguishable on a fixture with only one hierarchy -- exactly
+    the ambiguity AC-1, AC-3, AC-4, AC-5 and AC-7 above are built around two
+    hierarchies to rule out. Every call site in this suite already passes
+    ``issuer_id`` explicitly, so a mutation that gives the parameter a
+    default changes nothing any of those tests observe; only the signature
+    itself would notice. Without this test, that mutation ships silently and
+    five acceptance criteria keep passing for the wrong reason.
+    """
+    sig = inspect.signature(Acme.__init__)
+    param = sig.parameters["issuer_id"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"Acme.__init__'s issuer_id must be keyword-only, got {param.kind}"
+    )
+    assert param.default is inspect.Parameter.empty, (
+        "Acme.__init__'s issuer_id must have no default"
+    )
+    with pytest.raises(TypeError):
+        Acme(client)
