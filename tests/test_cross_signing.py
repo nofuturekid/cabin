@@ -731,6 +731,48 @@ def test_import_refuses_a_matching_subject_with_a_different_key(
     assert _row_count(db) == before
 
 
+def test_load_cross_refuses_a_different_public_key_even_with_a_matching_ski(
+    db: Session, secrets: SecretStore
+) -> None:
+    """Direct unit test of ``ca_x509.load_cross``'s own public-key
+    comparison, deliberately bypassing ``ca_service.import_cross``.
+
+    ``import_cross`` resolves which existing root a cross certificate is
+    *for* through its own ``_same_ca`` helper, which already compares
+    subject **and** public key before ``load_cross`` is ever called -- so
+    every test that goes through ``import_cross`` (including the one above)
+    is refused there first, on a subject+key mismatch, regardless of
+    whether ``load_cross``'s own comparison exists at all. Nothing in this
+    suite called ``load_cross`` directly before this test, which means its
+    own check was unreachable by any input able to tell its presence from
+    its absence: a mutation harness confirmed this by removing it and
+    watching every existing test stay green.
+
+    Calling ``load_cross`` directly, with the forged certificate's
+    ``SubjectKeyIdentifier`` set to the REAL root's own (``ski=_ski(...)``,
+    not the stranger key's derived one), is what isolates the public-key
+    comparison from both of those other checks: the SKI comparison a few
+    lines below it in ``load_cross`` cannot be what refuses this one.
+    """
+    signer, subject = _two_roots(db, secrets)
+    signer_cert = x509.load_pem_x509_certificate(signer.cert_pem.encode("ascii"))
+    signer_key = ca_service.signing_credentials(db, secrets, signer.id)[1]
+    subject_cert = x509.load_pem_x509_certificate(subject.cert_pem.encode("ascii"))
+    stranger_key = ec.generate_private_key(ec.SECP256R1())
+
+    forged = _forged_ca_cert(
+        subject=subject_cert.subject,
+        public_key=stranger_key.public_key(),
+        issuer_cert=signer_cert,
+        issuer_key=signer_key,
+        ski=_ski(subject_cert),
+        path_length=1,
+    )
+
+    with pytest.raises(CAImportError, match="public key"):
+        ca_x509.load_cross(_pem(forged).encode("ascii"), subject_cert, signer_cert)
+
+
 def test_import_refuses_a_matching_key_with_a_different_subject(
     db: Session, secrets: SecretStore
 ) -> None:
