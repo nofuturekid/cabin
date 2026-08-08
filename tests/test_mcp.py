@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -144,6 +145,21 @@ def _token(cfg: Config, role: Role, expires_at: datetime | None = None) -> str:
     db = _db(cfg)
     try:
         secret, _ = create_token(db, f"{role.value}-token", role, expires_at=expires_at)
+        return secret
+    finally:
+        db.close()
+
+
+def _granted_token(cfg: Config, role: Role, expires_at: datetime | None = None) -> str:
+    """Like :func:`_token`, but also granted the instance's sole active
+    issuer. Spec 0018 requires an explicit grant before a token may issue
+    or revoke; a bare admin token is correctly refused, so every test here
+    whose token actually issues or revokes uses this instead of ``_token``.
+    """
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, f"{role.value}-token", role, expires_at=expires_at)
+        grant_fixtures.grant_token(db, token, active_issuers(db)[0].id)
         return secret
     finally:
         db.close()
@@ -392,7 +408,7 @@ def test_mcp_role_enforced(mcp: TestClient, cfg: Config) -> None:
     """AC-3: a viewer reads; issuing, signing and revoking are admin+ and are
     refused with a message that says so, not with a crash."""
     viewer = _token(cfg, Role.viewer)
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
 
     assert _call(mcp, "get_ca_info", token=viewer)["base_url"] == BASE
     assert _call(mcp, "list_certificates", token=viewer)["total"] == 0
@@ -480,7 +496,7 @@ def test_mcp_ca_info_matches_rest(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_list_and_get_certificate(mcp: TestClient, cfg: Config) -> None:
     """FR-3: the spec-0006 inventory with its filters, and one certificate
     with its chain."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     nas = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
     _call(mcp, "issue_certificate", {"subject_cn": "app.lan"}, token=admin)
 
@@ -520,7 +536,7 @@ def test_mcp_list_and_get_certificate(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_get_certificate_never_returns_key(mcp: TestClient, cfg: Config) -> None:
     """FR-3/AC-4: no role, not even superadmin, gets key material back out of
     a lookup -- the field does not exist on the tool's result at all."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
     assert issued["key_pem"]
 
@@ -541,7 +557,7 @@ def test_mcp_get_certificate_never_returns_key(mcp: TestClient, cfg: Config) -> 
 def test_mcp_issue_certificate(mcp: TestClient, cfg: Config) -> None:
     """AC-4: a real certificate that chains to the intermediate, with the one
     private key any MCP tool ever returns -- and it matches."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(
         mcp,
         "issue_certificate",
@@ -592,7 +608,7 @@ def test_mcp_responses_are_never_cached(mcp: TestClient, cfg: Config) -> None:
     tool no handle on its own response; ``no-cache``/``no-transform``, which
     the streaming transport needs, survive alongside it.
     """
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     resp = _post(
         mcp,
         "tools/call",
@@ -615,7 +631,7 @@ def test_mcp_issue_sets_source_mcp(mcp: TestClient, cfg: Config) -> None:
     """FR-5/AC-4: both mutating issuance paths record where the request came
     from, and the operator sees it on the row -- an assistant's work has to be
     recognizable in the inventory, not only in the database."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
     _call(
         mcp,
@@ -648,7 +664,7 @@ def test_mcp_issue_sets_source_mcp(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_sign_csr(mcp: TestClient, cfg: Config) -> None:
     """FR-3: the CSR contributes its public key, CN and SANs; cabin never
     sees a key, so none comes back."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     csr = _csr_pem("app.lan", [x509.DNSName("app.lan"), x509.DNSName("www.app.lan")])
     signed = _call(mcp, "sign_csr", {"csr_pem": csr, "profile": "client", "days": 30}, token=admin)
 
@@ -667,7 +683,7 @@ def test_mcp_sign_csr(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_sign_csr_smuggling_blocked(mcp: TestClient, cfg: Config) -> None:
     """AC-5: the hostile CSR from spec 0005 yields an ordinary leaf, and a
     broken one a readable message."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     csr = _csr_pem(
         "evil.lan",
         [x509.DNSName("evil.lan")],
@@ -712,7 +728,7 @@ def test_mcp_sign_csr_smuggling_blocked(mcp: TestClient, cfg: Config) -> None:
 
 def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
     """AC-6: revoked, and the serial is on the published CRL."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
 
     revoked = _call(
@@ -757,7 +773,7 @@ def test_mcp_revoke_certificate(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_revoke_idempotent(mcp: TestClient, cfg: Config) -> None:
     """AC-6/AC-7: revoking twice succeeds, keeps the first date and reason,
     and does not write a second audit event."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     issued = _call(mcp, "issue_certificate", {"subject_cn": "nas.lan"}, token=admin)
 
     first = _call(
@@ -785,7 +801,7 @@ def test_mcp_revoke_idempotent(mcp: TestClient, cfg: Config) -> None:
 def test_mcp_validation_errors(mcp: TestClient, cfg: Config) -> None:
     """AC-8: the REST API's limits, enforced here too, and reported as
     sentences rather than as stack traces."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     csr = _csr_pem("app.lan", [x509.DNSName("app.lan")])
 
     for arguments, expected in (
@@ -924,7 +940,7 @@ def test_mcp_masks_unexpected_errors(
 def test_mcp_audit_events(mcp: TestClient, cfg: Config) -> None:
     """AC-7: one event per mutating call, attributed to the token and marked
     as having come through MCP; the read tools write nothing."""
-    admin = _token(cfg, Role.admin)
+    admin = _granted_token(cfg, Role.admin)
     before = len(_events(cfg))
 
     for _ in range(2):

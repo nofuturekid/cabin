@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -154,6 +155,20 @@ def _api_token(cfg: Config, role: Role = Role.admin) -> str:
     db = _db(cfg)
     try:
         secret, _ = create_token(db, f"{role.value}-token", role)
+        return secret
+    finally:
+        db.close()
+
+
+def _granted_api_token(cfg: Config, role: Role = Role.admin) -> str:
+    """Like :func:`_api_token`, but also granted the instance's sole active
+    issuer -- spec 0018 requires an explicit grant before a token may issue
+    or revoke, and this file's audit assertions are about the event, not
+    about that permission check."""
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, f"{role.value}-token", role)
+        grant_fixtures.grant_token(db, token, ca_service.active_issuers(db)[0].id)
         return secret
     finally:
         db.close()
@@ -517,7 +532,7 @@ def test_cert_revoked_recorded_ui_and_api(client: TestClient, cfg: Config) -> No
     )
     assert resp.status_code == 303
 
-    secret = _api_token(cfg)
+    secret = _granted_api_token(cfg)
     client.cookies.clear()
     for _ in range(2):
         resp = client.post(
@@ -545,7 +560,7 @@ def test_cert_revoked_recorded_ui_and_api(client: TestClient, cfg: Config) -> No
 def test_api_issue_and_sign_recorded_as_token_actor(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
     _create_ca(client, cfg)
-    secret = _api_token(cfg)
+    secret = _granted_api_token(cfg)
     client.cookies.clear()
 
     resp = client.post(

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ca_fixtures
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -68,10 +69,12 @@ def _csr_pem(cn: str, sans: list[x509.GeneralName]) -> str:
 
 def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
 
     issued = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="nas.lan",
         sans=["DNS:nas.lan", "IP:10.0.0.5"],
@@ -111,9 +114,12 @@ def test_store_seals_key_server_flow(db: Session, secrets: SecretStore) -> None:
 
 def test_store_no_key_csr_flow(db: Session, secrets: SecretStore) -> None:
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
     csr_pem = _csr_pem("app.lan", [x509.DNSName("app.lan"), x509.DNSName("www.app.lan")])
 
-    issued = sign_csr_and_store(db, secrets, csr_pem=csr_pem, profile=Profile.client, days=30)
+    issued = sign_csr_and_store(
+        db, secrets, principal=principal, csr_pem=csr_pem, profile=Profile.client, days=30
+    )
     row = issued.row
 
     # AC-5: cabin never saw this private key, so there is nothing to store.
@@ -131,10 +137,12 @@ def test_store_no_key_csr_flow(db: Session, secrets: SecretStore) -> None:
 
 
 def test_store_requires_a_ca(db: Session, secrets: SecretStore) -> None:
+    principal = grant_fixtures.granted_admin(db)
     with pytest.raises(CANotConfiguredError):
         issue_and_store(
             db,
             secrets,
+            principal=principal,
             profile=Profile.server,
             subject_cn="nas.lan",
             sans=["DNS:nas.lan"],
@@ -144,11 +152,13 @@ def test_store_requires_a_ca(db: Session, secrets: SecretStore) -> None:
 def test_store_rejects_invalid_input_without_writing_a_row(
     db: Session, secrets: SecretStore
 ) -> None:
-    ca_fixtures.make_hierarchy(db, secrets, "Store")
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
     with pytest.raises(IssueError):
         issue_and_store(
             db,
             secrets,
+            principal=principal,
             profile=Profile.server,
             subject_cn="Some Printer",
             sans=[],
@@ -165,11 +175,13 @@ def test_get_certificate_unknown_id(db: Session, secrets: SecretStore) -> None:
 def test_store_sans_match_the_issued_certificate(db: Session, secrets: SecretStore) -> None:
     """The same name given twice must not put a duplicate SAN in the
     certificate while sans_json (which de-duplicates) claims otherwise."""
-    ca_fixtures.make_hierarchy(db, secrets, "Store")
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
 
     row = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="nas.lan",
         sans=["nas.lan", "dns:nas.lan"],
@@ -188,9 +200,15 @@ def test_store_sans_match_the_issued_certificate(db: Session, secrets: SecretSto
 
 def test_issue_and_store_defaults_issuer_with_one_active(db: Session, secrets: SecretStore) -> None:
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
 
     row = issue_and_store(
-        db, secrets, profile=Profile.server, subject_cn="nas.lan", sans=["DNS:nas.lan"]
+        db,
+        secrets,
+        principal=principal,
+        profile=Profile.server,
+        subject_cn="nas.lan",
+        sans=["DNS:nas.lan"],
     ).row
 
     assert row.issuer_id == hierarchy.intermediate.id
@@ -199,10 +217,12 @@ def test_issue_and_store_defaults_issuer_with_one_active(db: Session, secrets: S
 def test_issue_and_store_explicit_issuer_id_is_stored(db: Session, secrets: SecretStore) -> None:
     ca_fixtures.make_hierarchy(db, secrets, "Store")
     second = ca_fixtures.make_hierarchy(db, secrets, "Second")
+    principal = grant_fixtures.granted_admin(db, second.intermediate.id)
 
     row = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="nas.lan",
         sans=["DNS:nas.lan"],
@@ -214,21 +234,30 @@ def test_issue_and_store_explicit_issuer_id_is_stored(db: Session, secrets: Secr
 
 def test_issue_and_store_requires_issuer_with_two_active(db: Session, secrets: SecretStore) -> None:
     """AC-2: no row is written when the issuer is ambiguous."""
-    ca_fixtures.make_hierarchy(db, secrets, "Store")
-    ca_fixtures.make_hierarchy(db, secrets, "Second")
+    first = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    second = ca_fixtures.make_hierarchy(db, secrets, "Second")
+    principal = grant_fixtures.granted_admin(db, first.intermediate.id, second.intermediate.id)
 
     with pytest.raises(IssuerRequiredError):
         issue_and_store(
-            db, secrets, profile=Profile.server, subject_cn="nas.lan", sans=["DNS:nas.lan"]
+            db,
+            secrets,
+            principal=principal,
+            profile=Profile.server,
+            subject_cn="nas.lan",
+            sans=["DNS:nas.lan"],
         )
     assert get_certificate(db, 1) is None
 
 
 def test_sign_csr_and_store_threads_issuer_id(db: Session, secrets: SecretStore) -> None:
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
     csr_pem = _csr_pem("app.lan", [x509.DNSName("app.lan")])
 
-    row = sign_csr_and_store(db, secrets, csr_pem=csr_pem, profile=Profile.client).row
+    row = sign_csr_and_store(
+        db, secrets, principal=principal, csr_pem=csr_pem, profile=Profile.client
+    ).row
 
     assert row.issuer_id == hierarchy.intermediate.id
 
@@ -237,10 +266,17 @@ def test_sign_csr_and_store_threads_issuer_id(db: Session, secrets: SecretStore)
 
 
 def test_uncapped_issuance_reports_nothing(db: Session, secrets: SecretStore) -> None:
-    ca_fixtures.make_hierarchy(db, secrets, "Store", intermediate_years=10)
+    hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store", intermediate_years=10)
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
 
     issued = issue_and_store(
-        db, secrets, profile=Profile.server, subject_cn="nas.lan", sans=["DNS:nas.lan"], days=90
+        db,
+        secrets,
+        principal=principal,
+        profile=Profile.server,
+        subject_cn="nas.lan",
+        sans=["DNS:nas.lan"],
+        days=90,
     )
 
     assert issued.capped_from is None
@@ -253,6 +289,7 @@ def test_capped_validity_is_reported_and_leaf_matches_issuer_expiry(
     issuer's remaining life, and the response says what was actually asked
     for -- not silently."""
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Store", intermediate_years=1)
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
     intermediate_cert = x509.load_pem_x509_certificate(
         hierarchy.intermediate.cert_pem.encode("ascii")
     )
@@ -260,6 +297,7 @@ def test_capped_validity_is_reported_and_leaf_matches_issuer_expiry(
     issued = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="nas.lan",
         sans=["DNS:nas.lan"],

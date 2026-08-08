@@ -761,6 +761,10 @@ def test_grant_on_retired_issuer_does_not_allow_issuing(client: TestClient, cfg:
     try:
         hierarchy = ca_fixtures.make_hierarchy(db, secrets, "will-retire")
         issuer_id = hierarchy.intermediate.id
+        # 0017 FR-4 refuses to retire the last active issuer instance-wide,
+        # so a second, unrelated hierarchy has to exist before "will-retire"
+        # can be retired at all.
+        ca_fixtures.make_hierarchy(db, secrets, "will-retire-spare")
         admin = create_user(db, "retiree-admin", _PASSWORD, Role.admin)
         grant_fixtures.grant_user(db, admin, issuer_id)
         principal = grants_mod.user_principal(admin)
@@ -820,6 +824,10 @@ def test_revoke_through_retired_granted_issuer_succeeds(
     try:
         hierarchy = ca_fixtures.make_hierarchy(db, secrets, "revoke-retired")
         issuer_id = hierarchy.intermediate.id
+        # 0017 FR-4 refuses to retire the last active issuer instance-wide,
+        # so a second, unrelated hierarchy has to exist before
+        # "revoke-retired" can be retired below.
+        ca_fixtures.make_hierarchy(db, secrets, "revoke-retired-spare")
         admin = create_user(db, "revoker", _PASSWORD, Role.admin)
         grant_fixtures.grant_user(db, admin, issuer_id)
         _enable_doors(db)

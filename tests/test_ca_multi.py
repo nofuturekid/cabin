@@ -15,11 +15,13 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from sqlalchemy.orm import Session
 
+import cabin.issuer_grants as issuer_grants
 from cabin.ca.certs import Certificate, issue_and_store
 from cabin.ca.crl import current_crl, revoke_certificate
 from cabin.ca.leaf import Profile
@@ -126,10 +128,12 @@ def test_two_hierarchies_verify_against_own_chain_only(
 ) -> None:
     h1 = create_hierarchy(db, secrets, "Alpha")
     h2 = create_hierarchy(db, secrets, "Beta")
+    principal = grant_fixtures.granted_admin(db, h1.intermediate.id, h2.intermediate.id)
 
     issued_a = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="a.lan",
         sans=["DNS:a.lan"],
@@ -138,6 +142,7 @@ def test_two_hierarchies_verify_against_own_chain_only(
     issued_b = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="b.lan",
         sans=["DNS:b.lan"],
@@ -159,20 +164,34 @@ def test_two_hierarchies_verify_against_own_chain_only(
 
 
 def test_issuer_required_with_multiple_active(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "Alpha")
-    create_hierarchy(db, secrets, "Beta")
+    h1 = create_hierarchy(db, secrets, "Alpha")
+    h2 = create_hierarchy(db, secrets, "Beta")
+    principal = grant_fixtures.granted_admin(db, h1.intermediate.id, h2.intermediate.id)
 
     with pytest.raises(IssuerRequiredError):
-        issue_and_store(db, secrets, profile=Profile.server, subject_cn="x.lan", sans=["DNS:x.lan"])
+        issue_and_store(
+            db,
+            secrets,
+            principal=principal,
+            profile=Profile.server,
+            subject_cn="x.lan",
+            sans=["DNS:x.lan"],
+        )
 
     assert db.query(Certificate).count() == 0
 
 
 def test_issuer_defaulted_with_single_active(db: Session, secrets: SecretStore) -> None:
     hierarchy = create_hierarchy(db, secrets, "Alpha")
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
 
     issued = issue_and_store(
-        db, secrets, profile=Profile.server, subject_cn="x.lan", sans=["DNS:x.lan"]
+        db,
+        secrets,
+        principal=principal,
+        profile=Profile.server,
+        subject_cn="x.lan",
+        sans=["DNS:x.lan"],
     )
 
     assert issued.row.issuer_id == hierarchy.intermediate.id
@@ -183,10 +202,16 @@ def test_issuer_defaults_to_remaining_active_after_retiring_one_of_two(
 ) -> None:
     h1 = create_hierarchy(db, secrets, "Alpha")
     h2 = create_hierarchy(db, secrets, "Beta")
+    principal = grant_fixtures.granted_admin(db, h1.intermediate.id, h2.intermediate.id)
     retire(db, h1.intermediate.id)
 
     issued = issue_and_store(
-        db, secrets, profile=Profile.server, subject_cn="x.lan", sans=["DNS:x.lan"]
+        db,
+        secrets,
+        principal=principal,
+        profile=Profile.server,
+        subject_cn="x.lan",
+        sans=["DNS:x.lan"],
     )
 
     assert issued.row.issuer_id == h2.intermediate.id
@@ -198,6 +223,7 @@ def test_issuer_defaults_to_remaining_active_after_retiring_one_of_two(
 def test_issue_with_retired_issuer_refused(db: Session, secrets: SecretStore) -> None:
     h1 = create_hierarchy(db, secrets, "Alpha")
     create_hierarchy(db, secrets, "Beta")  # keeps an active issuer elsewhere
+    principal = grant_fixtures.granted_admin(db, h1.intermediate.id)
     retire(db, h1.intermediate.id)
 
     before = db.query(Certificate).count()
@@ -205,6 +231,7 @@ def test_issue_with_retired_issuer_refused(db: Session, secrets: SecretStore) ->
         issue_and_store(
             db,
             secrets,
+            principal=principal,
             profile=Profile.server,
             subject_cn="x.lan",
             sans=["DNS:x.lan"],
@@ -218,9 +245,11 @@ def test_retired_issuer_still_serves_chain_and_crl(
 ) -> None:
     h1 = create_hierarchy(db, secrets, "Alpha")
     create_hierarchy(db, secrets, "Beta")
+    principal = grant_fixtures.granted_admin(db, h1.intermediate.id)
     issued = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="x.lan",
         sans=["DNS:x.lan"],
@@ -233,8 +262,10 @@ def test_retired_issuer_still_serves_chain_and_crl(
     chain = _chain_pem(db, h1.intermediate.id)
     assert _openssl_verify(tmp_path, "retired-still-verifies", issued.row.cert_pem, chain)
 
-    # revoking under a retired issuer still works and republishes its CRL.
-    revoke_certificate(db, secrets, issued.row.id, RevocationReason.superseded)
+    # revoking under a retired issuer still works and republishes its CRL --
+    # the grant persists across retirement (may_use_issuer is status-blind,
+    # spec 0018 FR-6), and this same principal was granted the issuer above.
+    revoke_certificate(db, secrets, issued.row.id, RevocationReason.superseded, principal=principal)
     state = current_crl(db, secrets, h1.intermediate.id)
     crl = x509.load_der_x509_crl(state.crl_der)
     assert crl.get_revoked_certificate_by_serial_number(int(issued.row.serial_hex, 16)) is not None
@@ -266,10 +297,12 @@ def test_create_intermediate_under_imported_root_errors(db: Session, secrets: Se
 def test_rotation_leaves_old_certs_valid(db: Session, secrets: SecretStore, tmp_path: Path) -> None:
     hierarchy = create_hierarchy(db, secrets, "Rotate")
     i1 = hierarchy.intermediate
+    principal = grant_fixtures.granted_admin(db, i1.id)
 
     leaf_a = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="a.lan",
         sans=["DNS:a.lan"],
@@ -279,10 +312,12 @@ def test_rotation_leaves_old_certs_valid(db: Session, secrets: SecretStore, tmp_
     # replacement is created before the old one is retired -- the rotation
     # order the spec's own user story describes.
     i2 = create_intermediate_under(db, secrets, hierarchy.root.id, "Rotate II", years=8)
+    issuer_grants.grant(db, principal, i2.id)
     retire(db, i1.id)
     leaf_b = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="b.lan",
         sans=["DNS:b.lan"],
@@ -306,9 +341,11 @@ def test_crl_per_issuer_partitions_revocations(
     issuer as read by the real ``openssl crl`` CLI."""
     hierarchy = create_hierarchy(db, secrets, "Rotate")
     i1 = hierarchy.intermediate
+    principal = grant_fixtures.granted_admin(db, i1.id)
     leaf_a = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="a.lan",
         sans=["DNS:a.lan"],
@@ -318,18 +355,22 @@ def test_crl_per_issuer_partitions_revocations(
     # replacement is created before the old one is retired -- the rotation
     # order the spec's own user story describes.
     i2 = create_intermediate_under(db, secrets, hierarchy.root.id, "Rotate II", years=8)
+    issuer_grants.grant(db, principal, i2.id)
     retire(db, i1.id)
     leaf_b = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="b.lan",
         sans=["DNS:b.lan"],
         issuer_id=i2.id,
     )
 
-    revoke_certificate(db, secrets, leaf_a.row.id, RevocationReason.superseded)
-    revoke_certificate(db, secrets, leaf_b.row.id, RevocationReason.key_compromise)
+    revoke_certificate(db, secrets, leaf_a.row.id, RevocationReason.superseded, principal=principal)
+    revoke_certificate(
+        db, secrets, leaf_b.row.id, RevocationReason.key_compromise, principal=principal
+    )
 
     crl1 = x509.load_der_x509_crl(current_crl(db, secrets, i1.id).crl_der)
     crl2 = x509.load_der_x509_crl(current_crl(db, secrets, i2.id).crl_der)
@@ -358,10 +399,12 @@ def test_certs_issued_before_renewal_verify_against_renewed_ca(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
     hierarchy = create_hierarchy(db, secrets, "Renew", root_years=1)
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
     original_root_pem = hierarchy.root.cert_pem
     leaf = issue_and_store(
         db,
         secrets,
+        principal=principal,
         profile=Profile.server,
         subject_cn="pre-renewal.lan",
         sans=["DNS:pre-renewal.lan"],

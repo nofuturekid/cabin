@@ -19,6 +19,7 @@ from cabin.ca.certs import Certificate
 from cabin.ca.leaf import public_http_origin
 from cabin.ca.revocation import CRL_VALIDITY, RevocationReason, RevokedEntry, build_crl
 from cabin.ca.service import signing_credentials
+from cabin.issuer_grants import IssuerForbiddenError, Principal, may_use_issuer
 from cabin.secrets import SecretStore
 from cabin.settings import BASE_URL, get_setting
 from cabin.store import Base
@@ -194,22 +195,34 @@ def revoke_certificate(
     secrets: SecretStore,
     cert_id: int,
     reason: RevocationReason = RevocationReason.unspecified,
+    *,
+    principal: Principal,
     now: datetime | None = None,
 ) -> Certificate:
     """Mark a stored certificate revoked and republish its issuer's CRL
     (FR-4).
 
-    The signature is unchanged from before spec 0017: the issuer comes off
-    the row this is already loading (``row.issuer_id``), so none of this
-    function's four call sites need to change. Revoking a certificate whose
-    issuer is retired still works and still republishes that issuer's CRL
-    (spec 0017 FR-9) -- a retired issuer that could not publish revocations
-    would be worse than one still issuing.
+    The issuer still comes off the row this is already loading
+    (``row.issuer_id``), unchanged from before spec 0017. Revoking a
+    certificate whose issuer is retired still works and still republishes
+    that issuer's CRL (spec 0017 FR-9) -- a retired issuer that could not
+    publish revocations would be worse than one still issuing.
+
+    ``principal`` is required and keyword-only, with no default (spec 0018
+    FR-6): :func:`cabin.issuer_grants.may_use_issuer` is checked against
+    ``row.issuer_id`` -- **not** :func:`cabin.issuer_grants.granted_issuers`,
+    which would wrongly refuse revoking through a since-retired issuer
+    (spec 0017 FR-9's guarantee that a retired issuer's CRL stays
+    publishable). The check runs before anything is written, so a refused
+    revocation leaves ``revoked_at``, ``crl_number`` and the stored CRL
+    bytes untouched; raises IssuerForbiddenError.
 
     Idempotent: revoking an already-revoked certificate returns the existing
     row untouched and is NOT an error -- the revocation date a relying party
     was told about must not move, and a caller retrying after a timeout
-    should get success, not a 409.
+    should get success, not a 409. The grant is still checked first, so an
+    already-revoked certificate is not itself a way past the permission
+    check.
 
     Raises RevocationError for an unknown certificate, CANotConfiguredError
     if its issuer has no usable signing key.
@@ -217,6 +230,8 @@ def revoke_certificate(
     row = db.get(Certificate, cert_id)
     if row is None:
         raise RevocationError(f"no certificate with id {cert_id}")
+    if not may_use_issuer(db, principal, row.issuer_id):
+        raise IssuerForbiddenError(f"principal not granted issuer {row.issuer_id}")
     if row.revoked_at is not None:
         return row
     moment = now or datetime.now(UTC)

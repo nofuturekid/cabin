@@ -91,6 +91,7 @@ from cabin.ca.service import (
     IssuerRetiredError,
     UnknownIssuerError,
 )
+from cabin.issuer_grants import IssuerForbiddenError, NoGrantedIssuerError, token_principal
 from cabin.mcp.auth import CabinTokenVerifier, current_token
 from cabin.secrets import SecretsError, SecretStore
 from cabin.settings import ACME_ENABLED, BASE_URL, MCP_ENABLED, get_flag, get_setting
@@ -252,6 +253,8 @@ def _readable_errors() -> Iterator[None]:
         UnknownIssuerError,
         IssuerRetiredError,
         IssuerRequiredError,
+        IssuerForbiddenError,
+        NoGrantedIssuerError,
     ) as exc:
         raise ToolError(str(exc)) from exc
     except SecretsError as exc:
@@ -463,6 +466,7 @@ def create_mcp_app(
                 result = certs_service.issue_and_store(
                     db,
                     secrets(),
+                    principal=token_principal(token),
                     profile=request.profile,
                     subject_cn=request.subject_cn,
                     sans=request.sans,
@@ -531,6 +535,7 @@ def create_mcp_app(
                 result = certs_service.sign_csr_and_store(
                     db,
                     secrets(),
+                    principal=token_principal(token),
                     csr_pem=request.csr_pem,
                     profile=request.profile,
                     days=request.days,
@@ -581,7 +586,13 @@ def create_mcp_app(
             existing = certs_service.get_certificate(db, certificate_id)
             was_revoked = existing is not None and existing.revoked_at is not None
             with _readable_errors():
-                row = crl_service.revoke_certificate(db, secrets(), certificate_id, request.reason)
+                row = crl_service.revoke_certificate(
+                    db,
+                    secrets(),
+                    certificate_id,
+                    request.reason,
+                    principal=token_principal(token),
+                )
             if not was_revoked:
                 _record(
                     db,

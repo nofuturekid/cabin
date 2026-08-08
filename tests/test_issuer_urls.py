@@ -21,6 +21,7 @@ import json
 from collections.abc import Iterator
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from acme_client import Acme
 from acme_orders import Flow, csr_der
@@ -176,7 +177,8 @@ def test_issuance_entry_points_use_the_forced_http_origin(client: TestClient, cf
     # --- api/v1.py -----------------------------------------------------------
     db = _db(cfg)
     try:
-        api_token, _row = create_token(db, "api-door-token", Role.admin)
+        api_token, api_row = create_token(db, "api-door-token", Role.admin)
+        grant_fixtures.grant_token(db, api_row, ca_service.active_issuers(db)[0].id)
     finally:
         db.close()
     api_resp = client.post(
@@ -215,7 +217,8 @@ def test_issuance_entry_points_use_the_forced_http_origin(client: TestClient, cf
     # --- mcp/server.py ---------------------------------------------------------
     db = _db(cfg)
     try:
-        mcp_token, _row = create_token(db, "mcp-door-token", Role.admin)
+        mcp_token, mcp_row = create_token(db, "mcp-door-token", Role.admin)
+        grant_fixtures.grant_token(db, mcp_row, ca_service.active_issuers(db)[0].id)
     finally:
         db.close()
     structured = _mcp_structured_result(

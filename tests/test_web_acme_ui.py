@@ -7,6 +7,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -207,18 +208,25 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
     try:
         secrets = SecretStore.open(cfg.data_dir, cfg.master_passphrase)
         hierarchy = ca_service.create_hierarchy(db, secrets, "cabin test")
+        principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
         # spec 0017 FR-7: issue_and_store/sign_csr_and_store now return an
         # Issued(row, capped_from) wrapper rather than a bare row.
         issued = certs_service.issue_and_store(
             db,
             secrets,
+            principal=principal,
             profile=Profile.server,
             subject_cn="nas.lan",
             sans=["nas.lan"],
             source=CertSource.acme,
         )
         other = certs_service.issue_and_store(
-            db, secrets, profile=Profile.server, subject_cn="ui.lan", sans=["ui.lan"]
+            db,
+            secrets,
+            principal=principal,
+            profile=Profile.server,
+            subject_cn="ui.lan",
+            sans=["ui.lan"],
         )
         cert_id, other_id = issued.row.id, other.row.id
         issuer_id = hierarchy.intermediate.id

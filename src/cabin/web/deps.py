@@ -15,6 +15,7 @@ from starlette.responses import Response
 from cabin import sessions, users
 from cabin.audit import Actor, user_actor
 from cabin.ca.certs import Certificate, get_certificate
+from cabin.issuer_grants import Principal, user_principal
 from cabin.secrets import SecretStore
 from cabin.sessions import SESSION_LIFETIME, UserSession
 from cabin.settings import TRUST_PROXY, get_flag
@@ -177,6 +178,16 @@ def require_role(*roles: Role) -> Callable[[User], User]:
 
 #: The guard for every mutating (and mutation-only) page.
 require_admin = require_role(*ADMIN_ROLES)
+
+
+def current_principal(user: User = Depends(require_admin)) -> Principal:
+    """Spec 0018 FR-5: the principal to check issuer grants against, for
+    routes that already require :data:`require_admin`. This is ergonomics,
+    not enforcement -- the enforcement is the required ``principal``
+    parameter on ``issue_and_store``/``sign_csr_and_store``/
+    ``revoke_certificate`` themselves.
+    """
+    return user_principal(user)
 
 
 def verify_csrf(

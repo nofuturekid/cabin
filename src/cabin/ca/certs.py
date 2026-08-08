@@ -22,7 +22,8 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from cabin.ca import leaf
 from cabin.ca.leaf import DEFAULT_DAYS, Profile
-from cabin.ca.service import resolve_issuer, signing_credentials
+from cabin.ca.service import signing_credentials
+from cabin.issuer_grants import Principal, resolve_granted_issuer
 from cabin.secrets import SecretsError, SecretStore
 from cabin.store import Base
 
@@ -190,6 +191,7 @@ def issue_and_store(
     db: Session,
     secrets: SecretStore,
     *,
+    principal: Principal,
     profile: Profile,
     subject_cn: str,
     sans: Sequence[str],
@@ -201,26 +203,37 @@ def issue_and_store(
     """Issue a leaf with a server-generated key and store it, sealing the
     key before it touches the DB (FR-5).
 
+    ``principal`` is required and keyword-only, with no default (spec 0018
+    FR-5): it is the entire enforcement mechanism for who may issue, and a
+    default of ``None`` meaning "unrestricted" would let a future entry
+    point bypass every grant check in silence. Every caller passes one of
+    ``cabin.issuer_grants``' constructors, or one of its two named exempt
+    constants (``ACME_PRINCIPAL``, ``SYSTEM_PRINCIPAL``) -- never an absent
+    value.
+
     ``issuer_id`` picks the signing issuer via
-    :func:`cabin.ca.service.resolve_issuer` (spec 0017 FR-6): given, it must
-    name an active intermediate; omitted, it resolves to the sole active
-    issuer, or raises when that is ambiguous. The CDP and AIA URLs are built
-    here, for the issuer this function just resolved, rather than accepted
-    as a parameter -- with the issuer resolved inside, no caller could
-    otherwise know which issuer's URLs belong on the certificate.
+    :func:`cabin.issuer_grants.resolve_granted_issuer` (spec 0017 FR-6,
+    narrowed by spec 0018 FR-4 to the issuers ``principal`` is granted):
+    given, it must name an active intermediate this principal may use;
+    omitted, it resolves to the sole granted active issuer, or raises when
+    that is ambiguous. The CDP and AIA URLs are built here, for the issuer
+    this function just resolved, rather than accepted as a parameter --
+    with the issuer resolved inside, no caller could otherwise know which
+    issuer's URLs belong on the certificate.
 
     ``source`` (spec 0012 FR-7) is which front door asked; it defaults to
     the UI so that no caller can accidentally record nothing.
 
     Raises CANotConfiguredError/IssuerRequiredError/IssuerRetiredError/
-    UnknownIssuerError per FR-6, IssueError for invalid input.
+    UnknownIssuerError per FR-6, IssuerForbiddenError/NoGrantedIssuerError
+    per spec 0018 FR-14, IssueError for invalid input.
     """
     # Imported inside the function rather than at module level: cabin.ca.crl
     # imports Certificate from this module, so a top-level import here would
     # make the two modules import each other circularly.
     from cabin.ca import crl
 
-    issuer = resolve_issuer(db, issuer_id)
+    issuer = resolve_granted_issuer(db, principal, issuer_id)
     issuer_cert, issuer_key = signing_credentials(db, secrets, issuer.id)
     cert, key, capped_from = leaf.issue_certificate(
         issuer_cert,
@@ -249,6 +262,7 @@ def sign_csr_and_store(
     db: Session,
     secrets: SecretStore,
     *,
+    principal: Principal,
     csr_pem: str,
     profile: Profile,
     days: int = DEFAULT_DAYS,
@@ -263,14 +277,15 @@ def sign_csr_and_store(
 
     ``subject_cn_fallback`` names the subject for a CSR that carries none,
     and ``allow_empty_subject`` issues without one when there is no name
-    short enough to be a CN; see :func:`cabin.ca.leaf.sign_csr`. ``issuer_id``
-    and the return value follow :func:`issue_and_store` -- see its
-    docstring for the issuer-selection and URL-building rules (spec 0017
-    FR-6/FR-7).
+    short enough to be a CN; see :func:`cabin.ca.leaf.sign_csr`.
+    ``principal``, ``issuer_id`` and the return value follow
+    :func:`issue_and_store` -- see its docstring for the required-keyword
+    grant enforcement (spec 0018 FR-5) and the issuer-selection and
+    URL-building rules (spec 0017 FR-6/FR-7).
     """
     from cabin.ca import crl
 
-    issuer = resolve_issuer(db, issuer_id)
+    issuer = resolve_granted_issuer(db, principal, issuer_id)
     issuer_cert, issuer_key = signing_credentials(db, secrets, issuer.id)
     cert, capped_from = leaf.sign_csr(
         issuer_cert,

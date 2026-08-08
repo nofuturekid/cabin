@@ -88,6 +88,13 @@ class AuditAction(StrEnum):
     cert_revoked = "cert_revoked"
     token_created = "token_created"
     token_revoked = "token_revoked"
+    # Spec 0018 FR-12: a user's or a token's issuer grants changed.
+    # Deliberately separate from user_role_changed/token_created: granting an
+    # issuer is a narrower, per-hierarchy permission change, not a role or
+    # lifecycle change, and an operator filtering the log wants to ask about
+    # it on its own.
+    user_issuers_changed = "user_issuers_changed"
+    token_issuers_changed = "token_issuers_changed"
     acme_account_created = "acme_account_created"
     acme_account_deactivated = "acme_account_deactivated"
     acme_order_created = "acme_order_created"
@@ -104,6 +111,11 @@ class AuditAction(StrEnum):
     # CA-issued -- recorded with SYSTEM_ACTOR so the certificate the
     # instance presents always has a written history.
     tls_certificate_issued = "tls_certificate_issued"
+    # Spec 0018 FR-15: the same self-issuance reaches a terminal failure --
+    # recorded only on the transition into failure (not once per renewal
+    # tick), so an unattended instance does not bury the event that mattered
+    # under twenty-four identical ones a day.
+    tls_certificate_failed = "tls_certificate_failed"
 
 
 #: Accepted ``?action=`` / ``?actor_kind=`` values; "all" means "no filter".

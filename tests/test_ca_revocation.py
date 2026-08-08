@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ca_fixtures
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -31,6 +32,7 @@ from cabin.ca.revocation import (
 )
 from cabin.ca.service import CANotConfiguredError, signing_credentials
 from cabin.ca.x509 import create_root
+from cabin.issuer_grants import Principal
 from cabin.secrets import SecretStore
 from cabin.store import create_session_factory, run_migrations
 
@@ -54,9 +56,15 @@ def secrets(tmp_path: Path) -> SecretStore:
     return SecretStore.open(tmp_path, None)
 
 
-def _issue(db: Session, secrets: SecretStore, cn: str = "nas.lan") -> int:
+def _issue(db: Session, secrets: SecretStore, principal: Principal, cn: str = "nas.lan") -> int:
     issued = issue_and_store(
-        db, secrets, profile=Profile.server, subject_cn=cn, sans=[f"DNS:{cn}"], days=90
+        db,
+        secrets,
+        principal=principal,
+        profile=Profile.server,
+        subject_cn=cn,
+        sans=[f"DNS:{cn}"],
+        days=90,
     )
     return issued.row.id
 
@@ -169,9 +177,12 @@ def test_revoke_sets_fields_and_updates_crl(db: Session, secrets: SecretStore) -
     """AC-1/AC-2: the row is marked, and the stored CRL -- signed by the
     intermediate, in its name -- carries that serial with its reason."""
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Revoke")
-    cert_id = _issue(db, secrets)
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
+    cert_id = _issue(db, secrets, principal)
 
-    row = revoke_certificate(db, secrets, cert_id, RevocationReason.key_compromise, now=_NOW)
+    row = revoke_certificate(
+        db, secrets, cert_id, RevocationReason.key_compromise, principal=principal, now=_NOW
+    )
 
     assert row.revoked_at is not None
     assert datetime.fromisoformat(row.revoked_at) == _NOW
@@ -194,15 +205,20 @@ def test_revoke_is_idempotent(db: Session, secrets: SecretStore) -> None:
     """AC-1: revoking twice is success, not an error, and must not rewrite
     the revocation date (a relying party's answer would change)."""
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Revoke")
-    cert_id = _issue(db, secrets)
+    principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
+    cert_id = _issue(db, secrets, principal)
 
-    first = revoke_certificate(db, secrets, cert_id, RevocationReason.superseded, now=_NOW)
+    first = revoke_certificate(
+        db, secrets, cert_id, RevocationReason.superseded, principal=principal, now=_NOW
+    )
     first_state = db.get(CRLState, hierarchy.intermediate.id)
     assert first_state is not None
     first_number = first_state.crl_number
 
     later = _NOW + timedelta(days=1)
-    second = revoke_certificate(db, secrets, cert_id, RevocationReason.key_compromise, now=later)
+    second = revoke_certificate(
+        db, secrets, cert_id, RevocationReason.key_compromise, principal=principal, now=later
+    )
 
     assert second.id == first.id
     assert second.revoked_at == first.revoked_at
@@ -217,9 +233,12 @@ def test_revoke_is_idempotent(db: Session, secrets: SecretStore) -> None:
 
 def test_revoke_unknown_certificate_errors(db: Session, secrets: SecretStore) -> None:
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Revoke")
+    principal = grant_fixtures.granted_admin(db)
 
     with pytest.raises(RevocationError):
-        revoke_certificate(db, secrets, 4242, RevocationReason.unspecified, now=_NOW)
+        revoke_certificate(
+            db, secrets, 4242, RevocationReason.unspecified, principal=principal, now=_NOW
+        )
 
     # a failed revocation must not leave a CRL behind either
     assert db.get(CRLState, hierarchy.intermediate.id) is None
@@ -239,10 +258,13 @@ def test_revoke_with_a_keyless_issuer_leaves_the_row_alone(
     builds, and exactly the situation FR-3 names for an imported root.
     """
     issuer_id = ca_fixtures.sole_active_issuer(db)
+    principal = grant_fixtures.granted_admin(db, issuer_id)
     row = ca_fixtures.insert_cert(db, issuer_id=issuer_id, cn="keyless.lan")
 
     with pytest.raises(CANotConfiguredError):
-        revoke_certificate(db, secrets, row.id, RevocationReason.superseded, now=_NOW)
+        revoke_certificate(
+            db, secrets, row.id, RevocationReason.superseded, principal=principal, now=_NOW
+        )
 
     db.refresh(row)
     assert row.revoked_at is None
@@ -255,10 +277,13 @@ def test_crl_number_monotonic(db: Session, secrets: SecretStore) -> None:
     counter only ever climbs -- including across revocations."""
     hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Numbers")
     issuer_id = hierarchy.intermediate.id
+    principal = grant_fixtures.granted_admin(db, issuer_id)
 
     numbers = [regenerate_crl(db, secrets, issuer_id, now=_NOW).crl_number for _ in range(3)]
-    cert_id = _issue(db, secrets)
-    revoke_certificate(db, secrets, cert_id, RevocationReason.unspecified, now=_NOW)
+    cert_id = _issue(db, secrets, principal)
+    revoke_certificate(
+        db, secrets, cert_id, RevocationReason.unspecified, principal=principal, now=_NOW
+    )
     state = db.get(CRLState, issuer_id)
     assert state is not None
     numbers.append(state.crl_number)

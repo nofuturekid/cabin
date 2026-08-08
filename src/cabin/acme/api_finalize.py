@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import audit
+from cabin import audit, issuer_grants
 from cabin.acme import csr as csr_policy
 from cabin.acme import service
 from cabin.acme.errors import AcmeError, ErrorType
@@ -238,6 +238,10 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Issue
         return certs_service.sign_csr_and_store(
             db,
             request.app.state.secrets,
+            # Spec 0018 FR-7: no cabin identity is behind an ACME request --
+            # the account is a key thumbprint, not a user or a token -- so
+            # this rides the named exemption rather than a grant lookup.
+            principal=issuer_grants.ACME_PRINCIPAL,
             csr_pem=pem,
             profile=ACME_PROFILE,
             sans_override=sans,
@@ -481,7 +485,15 @@ def revoke_cert(
             "this certificate has already been revoked",
         )
     try:
-        crl_service.revoke_certificate(db, request.app.state.secrets, row.id, reason)
+        crl_service.revoke_certificate(
+            db,
+            request.app.state.secrets,
+            row.id,
+            reason,
+            # Same exemption as _issue above: no cabin identity to check a
+            # grant against.
+            principal=issuer_grants.ACME_PRINCIPAL,
+        )
     except (CANotConfiguredError, crl_service.RevocationError, SecretsError) as exc:
         raise AcmeError(
             ErrorType.server_internal,

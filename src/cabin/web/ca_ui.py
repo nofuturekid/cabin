@@ -25,6 +25,7 @@ from cabin.ca.service import (
     UnknownIssuerError,
 )
 from cabin.ca.x509 import CAImportError
+from cabin.issuer_grants import grant, user_principal
 from cabin.settings import ACME_ENABLED, TLS_ISSUER_ID, get_flag, get_setting
 from cabin.tls import TlsMode
 from cabin.users import User
@@ -258,6 +259,10 @@ def ca_create(
         intermediate_years=intermediate_years,
         path_length=path_length,
     )
+    # Spec 0018 FR-8: whoever creates a hierarchy is granted it immediately --
+    # written even for a superadmin, so a later demotion does not take the
+    # hierarchy they built away from them.
+    grant(db, user_principal(user), hierarchy.intermediate.id)
     audit.record(
         db,
         actor,
@@ -272,6 +277,7 @@ def ca_create(
             "intermediate_years": intermediate_years,
             "path_length": path_length,
             "subject": _subject(hierarchy),
+            "granted_to": user.id,
         },
         ip=client_ip(request, db),
     )
@@ -316,6 +322,9 @@ def ca_import(
     # The subject only -- neither the submitted key nor its passphrase has any
     # business in a log (spec 0004 FR-3).
     subject = _subject(hierarchy)
+    # Spec 0018 FR-8: same as ca_create above -- the importer is granted the
+    # new intermediate immediately.
+    grant(db, user_principal(user), hierarchy.intermediate.id)
     audit.record(
         db,
         actor,
@@ -323,7 +332,7 @@ def ca_import(
         summary=f"imported CA {subject}",
         target_type="ca_certificate",
         target_id=hierarchy.intermediate.id,
-        detail={"subject": subject},
+        detail={"subject": subject, "granted_to": user.id},
         ip=client_ip(request, db),
     )
     # Spec 0022 FR-6: same as ca_create above -- an imported CA is just as
@@ -362,6 +371,9 @@ def ca_create_intermediate(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (CANotConfiguredError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Spec 0018 FR-8: same as ca_create above -- the creator is granted the
+    # new intermediate immediately.
+    grant(db, user_principal(user), row.id)
     audit.record(
         db,
         actor,
@@ -369,7 +381,13 @@ def ca_create_intermediate(
         summary=f"created intermediate {row.name!r} under root {root_id}",
         target_type="ca_certificate",
         target_id=row.id,
-        detail={"name": name, "key_type": key_type, "years": years, "root_id": root_id},
+        detail={
+            "name": name,
+            "key_type": key_type,
+            "years": years,
+            "root_id": root_id,
+            "granted_to": user.id,
+        },
         ip=client_ip(request, db),
     )
     return RedirectResponse("/ca", status_code=303)

@@ -21,11 +21,13 @@ in silence. Passing the typed row instead makes that a mypy error, not a
 silently wrong grant.
 """
 
+import uuid
+
 from sqlalchemy.orm import Session
 
 from cabin.api_tokens import ApiToken
-from cabin.issuer_grants import TokenIssuer, UserIssuer
-from cabin.users import User
+from cabin.issuer_grants import Principal, TokenIssuer, UserIssuer, user_principal
+from cabin.users import Role, User, create_user
 
 
 def grant_user(db: Session, user: User, ca_certificate_id: int) -> UserIssuer:
@@ -71,3 +73,22 @@ def revoke_token(db: Session, token: ApiToken, ca_certificate_id: int) -> None:
     if row is not None:
         db.delete(row)
         db.commit()
+
+
+def granted_admin(db: Session, *issuer_ids: int) -> Principal:
+    """A fresh admin, granted exactly ``issuer_ids``, as a :class:`Principal`.
+
+    For call sites in tests that predate spec 0018 -- multi-CA and
+    revocation mechanics, not the grant policy itself -- and now need
+    *some* principal to satisfy ``issue_and_store``/``sign_csr_and_store``/
+    ``revoke_certificate``'s required ``principal`` parameter. Deliberately
+    a plain admin granted explicitly rather than a superadmin: a
+    superadmin's grant set is implicit (``Principal.unrestricted``), so a
+    test built on one would keep passing even if the grant check being
+    exercised here were deleted outright. The username is a fresh uuid so
+    repeated calls within one test don't collide on the unique column.
+    """
+    user = create_user(db, f"granted-{uuid.uuid4().hex[:10]}", "whatever12345", Role.admin)
+    for issuer_id in issuer_ids:
+        grant_user(db, user, issuer_id)
+    return user_principal(user)

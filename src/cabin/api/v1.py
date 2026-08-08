@@ -70,6 +70,7 @@ from cabin.ca.service import (
     IssuerRetiredError,
     UnknownIssuerError,
 )
+from cabin.issuer_grants import IssuerForbiddenError, NoGrantedIssuerError, token_principal
 from cabin.secrets import SecretsError
 from cabin.users import Role
 from cabin.web.api_deps import require_api_read, require_api_write
@@ -121,6 +122,11 @@ def _domain_errors() -> Iterator[None]:
         # a 404 (an unknown issuer id is a caller mistake, not a missing
         # certificate).
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (IssuerForbiddenError, NoGrantedIssuerError) as exc:
+        # Spec 0018 FR-14: this identity has no grant on the issuer it named
+        # (or on any issuer at all) -- an authorization failure, explicitly
+        # not the 400 the issuer errors above get.
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except RevocationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CANotConfiguredError as exc:
@@ -262,6 +268,7 @@ def issue_certificate(
         issued = certs_service.issue_and_store(
             db,
             request.app.state.secrets,
+            principal=token_principal(token),
             profile=body.profile,
             subject_cn=body.subject_cn,
             # Raw entries on purpose: the domain layer runs the same SAN
@@ -312,6 +319,7 @@ def sign_csr(
         issued = certs_service.sign_csr_and_store(
             db,
             request.app.state.secrets,
+            principal=token_principal(token),
             csr_pem=body.csr_pem,
             profile=body.profile,
             days=body.days,
@@ -380,7 +388,9 @@ def revoke_certificate(
     existing = certs_service.get_certificate(db, cert_id)
     was_revoked = existing is not None and existing.revoked_at is not None
     with _domain_errors():
-        row = crl_service.revoke_certificate(db, request.app.state.secrets, cert_id, body.reason)
+        row = crl_service.revoke_certificate(
+            db, request.app.state.secrets, cert_id, body.reason, principal=token_principal(token)
+        )
     if not was_revoked:
         _record_certificate_event(
             db,

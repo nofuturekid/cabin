@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import get_args
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from cabin.api.models import IssueRequest, KeyType, StatusFilter
-from cabin.api_tokens import create_token
+from cabin.api_tokens import ApiToken, create_token
 from cabin.app import create_app
 from cabin.ca.certs import STATUS_FILTERS, get_certificate
 from cabin.ca.crl import current_crl
@@ -107,6 +108,24 @@ def _token(cfg: Config, role: Role, expires_at: datetime | None = None) -> str:
         db.close()
 
 
+def _granted_token(
+    cfg: Config, role: Role, *, issuer_id: int | None = None, expires_at: datetime | None = None
+) -> str:
+    """Like :func:`_token`, but also granted an issuer -- the instance's
+    sole active one by default, or ``issuer_id`` for a test running more
+    than one. Spec 0018 requires an explicit grant before a token may issue
+    or revoke through any of them; a bare admin token is correctly refused.
+    """
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, f"{role.value}-token", role, expires_at=expires_at)
+        target = issuer_id if issuer_id is not None else active_issuers(db)[0].id
+        grant_fixtures.grant_token(db, token, target)
+        return secret
+    finally:
+        db.close()
+
+
 def _auth(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
 
@@ -170,7 +189,7 @@ def test_api_requires_bearer(api: TestClient, cfg: Config) -> None:
 def test_api_role_enforced(api: TestClient, cfg: Config) -> None:
     """AC-2: a viewer may read and may not write."""
     viewer = _auth(_token(cfg, Role.viewer))
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
 
     assert api.get("/api/v1/certificates", headers=viewer).status_code == 200
 
@@ -276,7 +295,7 @@ def test_api_get_ca_reports_retired_status(api: TestClient, cfg: Config) -> None
 
 
 def test_api_list_and_get_certificate(api: TestClient, cfg: Config) -> None:
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     created = api.post("/api/v1/certificates", json=_issue_body(), headers=admin).json()
     api.post(
         "/api/v1/certificates",
@@ -315,7 +334,7 @@ def test_api_list_and_get_certificate(api: TestClient, cfg: Config) -> None:
 
 def test_api_issue_certificate(api: TestClient, cfg: Config) -> None:
     """AC-4: a real certificate, a matching key, and a chain that verifies."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     resp = api.post("/api/v1/certificates", json=_issue_body(), headers=admin)
     assert resp.status_code == 201
     body = resp.json()
@@ -365,14 +384,17 @@ def test_api_chain_pem_comes_from_the_leafs_own_issuer(api: TestClient, cfg: Con
     hierarchy, not "the" hierarchy -- with two active issuers, each leaf's
     ``chain_pem`` verifies against its own issuer and fails against the
     other's, in both directions (work split R3)."""
-    admin = _auth(_token(cfg, Role.admin))
     db = _db(cfg)
     try:
         first_issuer_id = active_issuers(db)[0].id
         second = create_hierarchy(db, SecretStore.open(cfg.data_dir, None), "second")
         second_issuer_id = second.intermediate.id
+        secret, token = create_token(db, "admin-token", Role.admin)
+        grant_fixtures.grant_token(db, token, first_issuer_id)
+        grant_fixtures.grant_token(db, token, second_issuer_id)
     finally:
         db.close()
+    admin = _auth(secret)
 
     body_a = api.post(
         "/api/v1/certificates",
@@ -420,7 +442,7 @@ def test_api_capped_validity_reported_in_response(client: TestClient, cfg: Confi
     assert resp.status_code == 303
     _set_base_url(client, cfg)
     client.cookies.clear()
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
 
     resp = client.post("/api/v1/certificates", json=_issue_body(days=3650), headers=admin)
     assert resp.status_code == 201
@@ -441,7 +463,7 @@ def test_api_uncapped_issuance_reports_nothing(api: TestClient, cfg: Config) -> 
     """AC-7: the field is absent from the response, not ``null``-and-present,
     when nothing was clamped (the default fixture's issuer has ten years
     left, far more than the default 90-day request)."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
 
     resp = api.post("/api/v1/certificates", json=_issue_body(), headers=admin)
 
@@ -452,7 +474,7 @@ def test_api_uncapped_issuance_reports_nothing(api: TestClient, cfg: Config) -> 
 def test_api_issue_key_visibility_by_role(api: TestClient, cfg: Config) -> None:
     """FR-5: key_pem is absent -- not null -- whenever the caller may not or
     cannot have it."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     issued = api.post("/api/v1/certificates", json=_issue_body(), headers=admin).json()
     assert "BEGIN PRIVATE KEY" in issued["key_pem"]
 
@@ -480,7 +502,7 @@ def test_api_key_responses_are_not_cached(api: TestClient, cfg: Config) -> None:
     """The two responses that can carry an unsealed private key must be as
     uncacheable as the UI page that shows one -- no proxy, no browser and no
     htmx cache may keep a copy."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     issued = api.post("/api/v1/certificates", json=_issue_body(), headers=admin)
     detail = api.get(f"/api/v1/certificates/{issued.json()['id']}", headers=admin)
 
@@ -494,7 +516,7 @@ def test_api_unsealable_keys_are_reported_not_crashed(api: TestClient, cfg: Conf
     """A key the master key can no longer open is a 409 where it blocks the
     request (the CA's own key) and a message where it does not (one leaf's
     key on an otherwise perfectly readable certificate) -- never a 500."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     issued = api.post("/api/v1/certificates", json=_issue_body(), headers=admin).json()
 
     db = _db(cfg)
@@ -536,7 +558,7 @@ def test_api_unsealable_keys_are_reported_not_crashed(api: TestClient, cfg: Conf
 
 
 def test_api_sign_csr(api: TestClient, cfg: Config) -> None:
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     resp = api.post(
         "/api/v1/certificates/sign",
         json={
@@ -559,7 +581,7 @@ def test_api_sign_csr(api: TestClient, cfg: Config) -> None:
 def test_api_sign_csr_smuggling_blocked(api: TestClient, cfg: Config) -> None:
     """AC-5: the hostile CSR from spec 0005 yields an ordinary leaf, and a
     broken CSR a 400 with a message."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     csr_pem = _csr_pem(
         "evil.lan",
         [x509.DNSName("evil.lan")],
@@ -612,7 +634,7 @@ def test_api_revoke_updates_crl(api: TestClient, cfg: Config) -> None:
     actually calls -- :func:`cabin.ca.crl.current_crl` -- rather than a
     second front door's HTTP route.
     """
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     issued = api.post("/api/v1/certificates", json=_issue_body(), headers=admin).json()
 
     resp = api.post(
@@ -650,7 +672,7 @@ def test_api_revoke_updates_crl(api: TestClient, cfg: Config) -> None:
 
 def test_api_revoke_idempotent(api: TestClient, cfg: Config) -> None:
     """AC-6: revoking twice succeeds twice and does not move the date."""
-    admin = _auth(_token(cfg, Role.admin))
+    admin = _auth(_granted_token(cfg, Role.admin))
     issued = api.post("/api/v1/certificates", json=_issue_body(), headers=admin).json()
     path = f"/api/v1/certificates/{issued['id']}/revoke"
 
@@ -665,7 +687,13 @@ def test_api_revoke_idempotent(api: TestClient, cfg: Config) -> None:
 def test_api_errors_are_json_not_tracebacks(client: TestClient, cfg: Config) -> None:
     """FR-4: every domain failure is a 4xx JSON body with a message."""
     _setup_superadmin(client)
-    admin = _auth(_token(cfg, Role.admin))
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, "admin-token", Role.admin)
+        token_id = token.id
+    finally:
+        db.close()
+    admin = _auth(secret)
     client.cookies.clear()
 
     # No CA at all yet -> a state conflict, not a crash.
@@ -710,6 +738,17 @@ def test_api_errors_are_json_not_tracebacks(client: TestClient, cfg: Config) -> 
     )
     _create_ca(client, cfg)
     client.cookies.clear()
+    # Spec 0018: the domain-only-rejection checks below need this admin
+    # token actually able to issue, or every one of them would get 403
+    # instead of the 400 this test is about.
+    db = _db(cfg)
+    try:
+        issuer_id = active_issuers(db)[0].id
+        token_row = db.get(ApiToken, token_id)
+        assert token_row is not None
+        grant_fixtures.grant_token(db, token_row, issuer_id)
+    finally:
+        db.close()
 
     for payload in (
         _issue_body(sans=["not a hostname!"]),

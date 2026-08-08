@@ -16,6 +16,7 @@
       <tr>
         <th>Username</th>
         <th>Role</th>
+        <th>Issuers</th>
         <th>Created</th>
         {% if can_manage %}<th>Actions</th>{% endif %}
       </tr>
@@ -25,6 +26,33 @@
       <tr>
         <td>{{ row.username }}</td>
         <td><span class="tag">{{ row.role }}</span></td>
+        <td>
+          {% if row.is_superadmin %}
+          <span class="tag">all issuers</span>
+          {% elif can_manage %}
+          <form method="post" action="/users/{{ row.id }}/issuers">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            {% for issuer in active_intermediates %}
+            <label class="field-check">
+              <input type="checkbox" name="issuer_id" value="{{ issuer.id }}" {{ "checked" if issuer.id in row.granted_ids else "" }} />
+              {{ issuer.name }}
+            </label>
+            {% endfor %}
+            {% for retired in row.retired_grants %}
+            <input type="hidden" name="issuer_id" value="{{ retired.id }}" />
+            {% endfor %}
+            {% if row.retired_grants %}
+            <p class="note">Also granted (retired, no longer selectable): {{ row.retired_grants | map(attribute="name") | join(", ") }}</p>
+            {% endif %}
+            {% if row.role == "viewer" %}
+            <p class="note">Grants nothing until the role changes to admin or superadmin.</p>
+            {% endif %}
+            <div class="actions"><button type="submit">Save issuers</button></div>
+          </form>
+          {% else %}
+          {{ row.granted_names | join(", ") if row.granted_names else "none" }}
+          {% endif %}
+        </td>
         <td class="nowrap">{{ row.created_at }}</td>
         {% if can_manage %}
         <td class="row-actions">

@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import audit, sessions, settings, users
+from cabin import audit, issuer_grants, sessions, settings, users
 from cabin.audit import Actor, ActorKind, AuditAction
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
@@ -392,6 +392,33 @@ def dashboard(
 # --- user management (superadmin only for mutations) --------------------------
 
 
+def _user_issuers_view(
+    db: Session, row: User, active_ids: set[int], all_intermediates: dict[int, CACertificate]
+) -> dict[str, object]:
+    """Spec 0018 FR-11: one user's row on the grants column -- the ids for
+    the checkbox checked-state, the names for the read-only view, and any
+    grant on a since-retired intermediate kept separate so the edit form
+    (only active intermediates get a checkbox) can preserve it as a hidden
+    field instead of silently dropping it on the next save.
+    """
+    is_superadmin = Role(row.role) == Role.superadmin
+    granted_ids = (
+        [] if is_superadmin else issuer_grants.issuers_of(db, issuer_grants.user_principal(row))
+    )
+    return {
+        "is_superadmin": is_superadmin,
+        "granted_ids": granted_ids,
+        "granted_names": [
+            all_intermediates[gid].name for gid in granted_ids if gid in all_intermediates
+        ],
+        "retired_grants": [
+            {"id": gid, "name": all_intermediates[gid].name}
+            for gid in granted_ids
+            if gid not in active_ids and gid in all_intermediates
+        ],
+    }
+
+
 def _users_page(
     request: Request,
     db: Session,
@@ -399,13 +426,27 @@ def _users_page(
     error: str | None,
     status_code: int = 200,
 ) -> Response:
+    active_intermediates = ca_service.active_issuers(db)
+    active_ids = {row.id for row in active_intermediates}
+    all_intermediates = {row.id: row for row in ca_service.list_cas(db, kind="intermediate")}
+    rows = [
+        {
+            "id": row.id,
+            "username": row.username,
+            "role": row.role,
+            "created_at": row.created_at,
+            **_user_issuers_view(db, row, active_ids, all_intermediates),
+        }
+        for row in users.list_users(db)
+    ]
     context = base_context(request, user)
     context.update(
         {
-            "users": users.list_users(db),
+            "users": rows,
             "roles": list(Role),
             "error": error,
             "can_manage": Role(user.role) == Role.superadmin,
+            "active_intermediates": active_intermediates,
         }
     )
     return templates.TemplateResponse(request, "users.html", context, status_code=status_code)
@@ -526,6 +567,42 @@ def reset_password_route(
         detail={"username": target.username},
         ip=client_ip(request, db),
     )
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/issuers")
+def update_user_issuers_route(
+    user_id: int,
+    request: Request,
+    issuer_id: list[int] = Form([]),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_superadmin),
+    actor: Actor = Depends(current_actor),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """Spec 0018 FR-11: replace ``target``'s whole grant set. An empty post
+    (no ``issuer_id`` field at all) is how a grant is taken away entirely."""
+    try:
+        target = users.get_user(db, user_id)
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=404) from exc
+    try:
+        change = issuer_grants.set_issuers(db, issuer_grants.user_principal(target), issuer_id)
+    except ValueError as exc:
+        return _users_page(request, db, user, str(exc), status_code=400)
+    # Re-posting a set that is already in place changes nothing, so it is not
+    # an event -- the same no-op rule update_role_route already follows.
+    if change.changed:
+        audit.record(
+            db,
+            actor,
+            AuditAction.user_issuers_changed,
+            summary=f"changed issuer grants for {target.username!r}",
+            target_type="user",
+            target_id=target.id,
+            detail={"added": change.added, "removed": change.removed, "issuers": change.issuers},
+            ip=client_ip(request, db),
+        )
     return RedirectResponse("/users", status_code=303)
 
 

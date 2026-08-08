@@ -35,6 +35,9 @@ SPEC_ACTIONS = {
     "cert_revoked",
     "token_created",
     "token_revoked",
+    # spec 0018 FR-12: a user's or a token's issuer grants changed.
+    "user_issuers_changed",
+    "token_issuers_changed",
     # spec 0010 FR-6: the third door, ACME
     "acme_account_created",
     "acme_account_deactivated",
@@ -53,6 +56,8 @@ SPEC_ACTIONS = {
     "ca_retired",
     # spec 0022 FR-14: cabin's own TLS certificate, self-signed or CA-issued
     "tls_certificate_issued",
+    # spec 0018 FR-15: the same self-issuance reaching a terminal failure
+    "tls_certificate_failed",
 }
 
 

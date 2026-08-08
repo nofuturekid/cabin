@@ -49,6 +49,7 @@ from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -400,10 +401,12 @@ def test_displayed_urls_match_issued_certificate(client: TestClient, cfg: Config
     try:
         secrets = _secrets(cfg)
         hierarchy = ca_service.create_hierarchy(db, secrets, "cabin")
+        principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
         settings_mod.set_setting(db, settings_mod.BASE_URL, "https://ca.example.lan")
         issued = certs_service.issue_and_store(
             db,
             secrets,
+            principal=principal,
             profile=Profile.server,
             subject_cn="leaf.example.lan",
             sans=["DNS:leaf.example.lan"],

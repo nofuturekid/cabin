@@ -47,7 +47,7 @@ from cryptography.hazmat.primitives.asymmetric.types import (
 from cryptography.x509.oid import NameOID
 from sqlalchemy.orm import Session
 
-from cabin import audit
+from cabin import audit, issuer_grants
 from cabin.audit import AuditAction
 from cabin.ca import leaf
 from cabin.ca.certs import Certificate, CertSource, issue_and_store
@@ -271,6 +271,13 @@ class TlsManager:
         #: What is currently loaded; `None` before the first
         #: `ensure_current`. Read by FR-14's templates via `app.state.tls`.
         self.mode: TlsMode | None = None
+        #: Spec 0018 FR-15: the message of the last swallowed issuance
+        #: failure, `None` at construction and after any `ensure_current`
+        #: that returned `True`. Read, not raised -- the renewal loop's
+        #: behaviour does not change; this only makes a terminal failure
+        #: visible to `_tls_banner` and the audit log instead of scrolling
+        #: away in a log line.
+        self.last_error: str | None = None
         self._uvicorn_config: uvicorn.Config | None = None
         #: FR-6: request paths run in Starlette's threadpool while
         #: handshakes run on the event loop, and two concurrent triggers
@@ -493,14 +500,36 @@ class TlsManager:
             UnknownIssuerError,
             IssueError,
         ) as exc:
+            # Deliberately not extended with IssuerForbiddenError or
+            # NoGrantedIssuerError (spec 0018 FR-15/AC-19): the system
+            # principal below is unrestricted, so neither can be raised by
+            # the call this wraps. Catching them "defensively" would hide a
+            # future regression instead of failing where a test can see it.
+            message = str(exc)
             logger.warning(
                 "could not issue cabin's own TLS certificate (%s); keeping current material", exc
             )
             self.mode = current.mode if current is not None else None
+            if self.last_error != message:
+                # Only on the transition into failure (spec 0018 FR-15): a
+                # tick that repeats the same failure must not write a second
+                # event, or an unattended instance logs one every hour.
+                audit.record(
+                    db,
+                    audit.SYSTEM_ACTOR,
+                    AuditAction.tls_certificate_failed,
+                    summary=f"cabin could not issue its own TLS certificate ({message})",
+                    detail={
+                        "reason": message,
+                        "mode": str(self.mode) if self.mode is not None else None,
+                    },
+                )
+            self.last_error = message
             return False
 
         self._write_and_load(cert_bytes, secrets, key_pem)
         self.mode = target_mode
+        self.last_error = None
         self._record_issued(db, target_mode, subject_cn, sans, cert, cert_row, capped_from)
         return True
 
@@ -529,6 +558,11 @@ class TlsManager:
         issued = issue_and_store(
             db,
             secrets,
+            # Spec 0018 FR-7: cabin issuing its own certificate acts for
+            # nobody -- there is no session, no bearer token and (from the
+            # renewal tick) no request at all, so this rides the named
+            # system exemption rather than any operator's grants.
+            principal=issuer_grants.SYSTEM_PRINCIPAL,
             profile=Profile.server,
             subject_cn=subject_cn,
             sans=sans,

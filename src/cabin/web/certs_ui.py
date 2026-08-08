@@ -8,6 +8,11 @@ admins. The download routes live in :mod:`cabin.web.certs_download_ui`.
 Spec 0017 FR-6/FR-14 adds an issuer selector to both issuance forms,
 rendered only when more than one issuer is active (a single-CA install sees
 no new field), and FR-7 makes a clamped validity visible on the result page.
+
+Spec 0018 narrows that selector's source from every active issuer to this
+principal's *granted* active issuers (FR-11), and threads a required
+``principal`` through every issue/sign/revoke call (FR-5/FR-6) so a request
+this identity is not granted for is refused before anything is written.
 """
 
 from collections.abc import Sequence
@@ -50,6 +55,13 @@ from cabin.ca.service import (
     UnknownIssuerError,
 )
 from cabin.ca.x509 import KEY_TYPES
+from cabin.issuer_grants import (
+    IssuerForbiddenError,
+    NoGrantedIssuerError,
+    Principal,
+    granted_issuers,
+    user_principal,
+)
 from cabin.users import Role, User
 from cabin.web import templates
 from cabin.web.deps import (
@@ -67,6 +79,12 @@ from cabin.web.deps import (
 router = APIRouter(prefix="/certs")
 
 _NO_CA = "no CA yet: create or import one under CA before issuing certificates"
+#: Spec 0018 FR-4/FR-11: the other reason the selector can be empty -- a CA
+#: exists and is active, but this identity holds no grant on any of them.
+#: Kept distinct from ``_NO_CA``, which sends an operator off to build a
+#: second hierarchy -- exactly the wrong advice for someone who is merely
+#: not granted one that already exists.
+_NO_GRANT = "no issuer is granted to you: ask a superadmin to grant one under Users"
 #: Spec 0007 FR-7: the confirm checkbox is the last stop before an
 #: irreversible action, so a post without it is refused rather than assumed.
 _CONFIRM_REVOKE = "tick the confirmation box: revoking a certificate cannot be undone"
@@ -83,10 +101,26 @@ SAN_PREVIEW = 3
 #: thrown away. CANotConfiguredError is handled separately: its message does
 #: not name "CA" the way the wizard's own wording does.
 _ISSUER_ERRORS = (IssuerRequiredError, IssuerRetiredError, UnknownIssuerError)
+#: Spec 0018 FR-14: an authorization failure, not the bad input the errors
+#: above are -- 403, like `require_role`'s own refusal, and never thrown
+#: away: the domain layer's own message says what happened.
+_GRANT_ERRORS = (IssuerForbiddenError, NoGrantedIssuerError)
 
 
-def _issuer_options(db: Session) -> list[CACertificate]:
-    return ca_service.active_issuers(db)
+def _issuer_options(db: Session, principal: Principal) -> list[CACertificate]:
+    """Spec 0018 FR-11: what the select offers is narrowed from every active
+    issuer to this principal's *granted* active issuers -- a selector
+    offering a choice that would then be refused is worse than one that
+    offers nothing (AC-2 proves the POST is refused server-side regardless).
+    """
+    return granted_issuers(db, principal)
+
+
+def _no_issuer_message(db: Session) -> str:
+    """Which of the two reasons an empty issuer list has (spec 0018 FR-4):
+    no CA exists at all, or one does and this identity simply is not granted
+    any of it."""
+    return _NO_CA if not ca_service.active_issuers(db) else _NO_GRANT
 
 
 def _form_page(
@@ -240,8 +274,8 @@ def certs_new(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
-    issuers = _issuer_options(db)
-    error = None if issuers else _NO_CA
+    issuers = _issuer_options(db, user_principal(user))
+    error = None if issuers else _no_issuer_message(db)
     return _new_page(request, user, error, issuers=issuers)
 
 
@@ -251,8 +285,8 @@ def certs_sign_form(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> Response:
-    issuers = _issuer_options(db)
-    error = None if issuers else _NO_CA
+    issuers = _issuer_options(db, user_principal(user))
+    error = None if issuers else _no_issuer_message(db)
     return _sign_page(request, user, error, issuers=issuers)
 
 
@@ -295,7 +329,8 @@ def certs_issue(
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
-    issuers = _issuer_options(db)
+    principal = user_principal(user)
+    issuers = _issuer_options(db, principal)
     values = {
         "subject_cn": subject_cn,
         "sans": sans,
@@ -308,6 +343,7 @@ def certs_issue(
         issued = certs_service.issue_and_store(
             db,
             request.app.state.secrets,
+            principal=principal,
             profile=parse_profile(profile),
             subject_cn=subject_cn,
             sans=parse_san_lines(sans),
@@ -319,6 +355,8 @@ def certs_issue(
         return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     except CANotConfiguredError:
         return _new_page(request, user, _NO_CA, issuers=issuers, values=values, status_code=400)
+    except _GRANT_ERRORS as exc:
+        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
     except _ISSUER_ERRORS as exc:
         return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     row, capped_from = issued.row, issued.capped_from
@@ -356,7 +394,8 @@ def certs_sign(
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
-    issuers = _issuer_options(db)
+    principal = user_principal(user)
+    issuers = _issuer_options(db, principal)
     values = {
         "csr_pem": csr_pem,
         "profile": profile,
@@ -368,6 +407,7 @@ def certs_sign(
         issued = certs_service.sign_csr_and_store(
             db,
             request.app.state.secrets,
+            principal=principal,
             csr_pem=csr_pem,
             profile=parse_profile(profile),
             days=days,
@@ -378,6 +418,8 @@ def certs_sign(
         return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     except CANotConfiguredError:
         return _sign_page(request, user, _NO_CA, issuers=issuers, values=values, status_code=400)
+    except _GRANT_ERRORS as exc:
+        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
     except _ISSUER_ERRORS as exc:
         return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     # The CSR itself is not recorded: it is bulky, and what it asked for is
@@ -492,9 +534,13 @@ def cert_revoke(
     except ValueError:
         return _detail_page(request, user, row, _UNKNOWN_REASON.format(reason), status_code=400)
     try:
-        crl_service.revoke_certificate(db, request.app.state.secrets, cert_id, parsed)
+        crl_service.revoke_certificate(
+            db, request.app.state.secrets, cert_id, parsed, principal=user_principal(user)
+        )
     except CANotConfiguredError:
         return _detail_page(request, user, row, _NO_CA, status_code=400)
+    except IssuerForbiddenError as exc:
+        return _detail_page(request, user, row, str(exc), status_code=403)
     if not was_revoked:
         audit.record(
             db,
