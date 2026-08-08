@@ -64,6 +64,7 @@ def base_context(request: Request, user: User) -> dict[str, object]:
         "csrf_token": session_row.csrf_token,
         "nav": {
             "issue": role in ADMIN_ROLES,
+            "ca_admin": role in ADMIN_ROLES,
             "settings": role in ADMIN_ROLES,
             "acme": role in ADMIN_ROLES,
             "tokens": role == Role.superadmin,

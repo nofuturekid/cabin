@@ -203,17 +203,29 @@ def test_ca_wizard_ui_flow(client: TestClient, cfg: Config) -> None:
     assert resp.status_code == 200
     assert "CA: not set up" in resp.text
 
+    # spec 0023: /ca no longer carries the create/import forms itself. What
+    # its empty state has to promise instead (FR-10) is that an operator
+    # with no CA is pointed somewhere they can make one -- the two pages
+    # that now own those forms.
     resp = client.get("/ca")
     assert resp.status_code == 200
-    assert "Create a new CA" in resp.text
-    assert "Import an existing CA" in resp.text
+    empty_state = _row(resp.text, "No hierarchy exists yet.", class_name="note", tag="p")
+    assert '<a href="/ca/new">' in empty_state
+    assert '<a href="/ca/import">' in empty_state
 
     _create_ca(client, cfg, "cabin")
 
     resp = client.get("/ca")
     assert resp.status_code == 200
     assert "cabin Root CA" in resp.text
-    assert "cabin Intermediate CA" in resp.text
+    # the empty state's promise is gone once a hierarchy actually exists
+    assert 'id="ca-empty"' not in resp.text
+
+    # the intermediate itself lives on the hierarchy's own detail page now,
+    # not on the /ca overview (which shows only root rows and counts).
+    detail = client.get(f"/ca/{_by_name(cfg, 'cabin Root CA').id}")
+    assert detail.status_code == 200
+    assert "cabin Intermediate CA" in detail.text
 
     # the dashboard hint is gone once a CA exists
     resp = client.get("/")
@@ -238,35 +250,36 @@ def test_ca_wizard_ui_flow(client: TestClient, cfg: Config) -> None:
 
 
 def test_ca_page_lists_hierarchies(client: TestClient, cfg: Config) -> None:
+    """AC-12, carried over for spec 0023 (FR-2/FR-3): /ca lists every root,
+    and each root's own detail page carries the rest of its own hierarchy --
+    and, now that each hierarchy has its own page, none of any other
+    hierarchy at all. That is the strict form the old "grouped under its
+    own root, not interleaved with the next one" check takes once grouping
+    means "on this page" rather than "in this order on a shared one".
+    """
     _setup_superadmin(client)
     _create_ca(client, cfg, "alpha")
     _create_ca(client, cfg, "beta")
 
-    page = client.get("/ca")
-    assert page.status_code == 200
-    html = page.text
+    overview = client.get("/ca")
+    assert overview.status_code == 200
+    for name in ("alpha Root CA", "beta Root CA"):
+        assert name in overview.text, name
 
-    # every row present
-    for name in (
-        "alpha Root CA",
-        "alpha Intermediate CA",
-        "beta Root CA",
-        "beta Intermediate CA",
-    ):
-        assert name in html, name
+    alpha_root = _by_name(cfg, "alpha Root CA")
+    beta_root = _by_name(cfg, "beta Root CA")
 
-    # grouped under its own root: alpha's intermediate must appear between
-    # alpha's root and beta's root, not after beta's own rows.
-    alpha_root_i = html.index("alpha Root CA")
-    alpha_int_i = html.index("alpha Intermediate CA")
-    beta_root_i = html.index("beta Root CA")
-    beta_int_i = html.index("beta Intermediate CA")
-    assert alpha_root_i < alpha_int_i < beta_root_i < beta_int_i, (
-        alpha_root_i,
-        alpha_int_i,
-        beta_root_i,
-        beta_int_i,
-    )
+    alpha_html = client.get(f"/ca/{alpha_root.id}").text
+    assert "alpha Root CA" in alpha_html
+    assert "alpha Intermediate CA" in alpha_html
+    assert "beta Root CA" not in alpha_html
+    assert "beta Intermediate CA" not in alpha_html
+
+    beta_html = client.get(f"/ca/{beta_root.id}").text
+    assert "beta Root CA" in beta_html
+    assert "beta Intermediate CA" in beta_html
+    assert "alpha Root CA" not in beta_html
+    assert "alpha Intermediate CA" not in beta_html
 
     # retire beta's intermediate directly (bypassing the HTTP action, since
     # this test is about what the page *shows*, not the action itself) and
@@ -283,9 +296,12 @@ def test_ca_page_lists_hierarchies(client: TestClient, cfg: Config) -> None:
     finally:
         db.close()
 
-    page = client.get("/ca").text
-    beta_window = _row(page, "beta Intermediate CA", class_name="ca-row")
-    alpha_window = _row(page, "alpha Intermediate CA", class_name="ca-row")
+    beta_window = _row(
+        client.get(f"/ca/{beta_root.id}").text, "beta Intermediate CA", class_name="ca-row"
+    )
+    alpha_window = _row(
+        client.get(f"/ca/{alpha_root.id}").text, "alpha Intermediate CA", class_name="ca-row"
+    )
     assert "retired" in beta_window.lower()
     assert "retired" not in alpha_window.lower()
 
@@ -370,9 +386,13 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     imported_root = _by_name(cfg, "Imported Root CA")
     assert imported_root.key_sealed is None  # the premise this test measures
 
-    html = client.get("/ca").text
-    generated_window = _row(html, "generated Root CA", class_name="section")
-    imported_window = _row(html, "Imported Root CA", class_name="section")
+    generated_html = client.get(f"/ca/{generated_root.id}").text
+    imported_html = client.get(f"/ca/{imported_root.id}").text
+    # the root's name also appears in <title> and <h1>, outside the section
+    # -- its own <h2> (spec 0023's per-hierarchy page) is what is actually
+    # scoped to the section this test measures.
+    generated_window = _row(generated_html, "<h2>generated Root CA</h2>", class_name="section")
+    imported_window = _row(imported_html, "<h2>Imported Root CA</h2>", class_name="section")
 
     create_intermediate_url = f"/ca/{generated_root.id}/intermediate"
     renew_url = f"/ca/{generated_root.id}/renew"
@@ -530,10 +550,17 @@ def test_ca_import_happy_path_web_flow(client: TestClient, cfg: Config) -> None:
     resp = client.get("/ca")
     assert resp.status_code == 200
     assert "Import Root CA" in resp.text
-    assert "Import Intermediate CA" in resp.text
 
     root = _by_name(cfg, "Import Root CA")
     intermediate = _by_name(cfg, "Import Intermediate CA")
+
+    # the intermediate itself lives on the hierarchy's own detail page now,
+    # not on the /ca overview (which shows only root rows and counts).
+    detail = client.get(f"/ca/{root.id}")
+    assert detail.status_code == 200
+    assert "Import Root CA" in detail.text
+    assert "Import Intermediate CA" in detail.text
+
     assert root.key_sealed is None  # FR-3: root key absent on import
     assert intermediate.key_sealed is not None
 

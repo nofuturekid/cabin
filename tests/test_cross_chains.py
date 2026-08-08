@@ -32,6 +32,7 @@ gives.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -183,6 +184,56 @@ def _row(cfg: Config, ca_id: int) -> CACertificate:
         return row
     finally:
         db.close()
+
+
+# --- element scoping, mirroring test_web_ca.py's own helper -----------------
+#
+# spec 0023 moved per-hierarchy detail (including a cross row's own block)
+# onto /ca/{ca_id} -- scoped by parsing actual tag nesting, never by slicing
+# a fixed number of characters after a marker.
+
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
+_CLASS_RE = re.compile(r'class="([^"]*)"')
+
+
+def _dom_row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
+    """The full outer HTML of the innermost ``<tag class="class_name">``
+    element that contains ``marker``'s first occurrence."""
+    marker_idx = html.index(marker)
+    stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
+    for m in _TAG_RE.finditer(html):
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue  # void or self-closing: no nesting depth to track
+        if not closing:
+            stack.append((name, attrs, m.start()))
+            continue
+        if not stack or stack[-1][0] != name:
+            continue  # not well-formed at this point; nothing to close
+        open_name, open_attrs, open_start = stack.pop()
+        if open_start <= marker_idx < m.end():
+            classes = _CLASS_RE.search(open_attrs)
+            if open_name == tag and classes is not None and class_name in classes.group(1).split():
+                return html[open_start : m.end()]
+    raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
 
 
 def _set_cross_validity(
@@ -778,22 +829,29 @@ def test_renewal_past_the_signing_root_falls_back_to_the_short_chain(
 def test_ca_page_shows_the_cross_row_under_the_subject_root(
     client: TestClient, cfg: Config
 ) -> None:
+    """Spec 0023 moved per-hierarchy detail -- including a cross row -- onto
+    ``/ca/{ca_id}``, named by its root. B is the cross certificate's subject
+    root, so B's own detail page is where the row must appear."""
     scenario = _setup(client, cfg)
-    page = client.get("/ca")
-    assert page.status_code == 200
     row_b = _row(cfg, scenario.root_b)
     row_a = _row(cfg, scenario.root_a)
+    page = client.get(f"/ca/{row_b.id}")
+    assert page.status_code == 200
     assert row_b.name in page.text
     cross_row = _row(cfg, scenario.cross)
     assert cross_row.name in page.text
+    # A's own name still appears too -- it is who the cross row says signed it.
     assert row_a.name in page.text
     # under B: B's own name appears before the cross row's markup
     assert page.text.index(row_b.name) < page.text.rindex(cross_row.name)
 
 
 def test_ca_page_names_the_default_and_alternate_chains(client: TestClient, cfg: Config) -> None:
-    _setup(client, cfg)
-    page = client.get("/ca").text
+    """Same move as above: the "which chain is served" narration lives on
+    B's own detail page now, not on the /ca overview."""
+    scenario = _setup(client, cfg)
+    row_b = _row(cfg, scenario.root_b)
+    page = client.get(f"/ca/{row_b.id}").text
     assert "the long chain" in page
     assert "the short chain" in page
 
@@ -883,17 +941,20 @@ def test_ca_page_marks_an_expired_cross_certificate_as_not_served(
         cfg, scenario.cross, not_before=now - timedelta(days=400), not_after=now - timedelta(days=1)
     )
 
-    page = client.get("/ca").text
+    row_b = _row(cfg, scenario.root_b)
+    page = client.get(f"/ca/{row_b.id}").text
     cross_row = _row(cfg, scenario.cross)
     # The cross row's name equals its subject root's own name (0017's
     # naming rule) and even recurs within the cross row's own markup (once
-    # bold next to the "cross" tag, again in the fingerprint line), so
-    # plain index()/rindex() land on the wrong occurrence. The "cross" tag
+    # bold next to the "cross" tag, again in the fingerprint line), so a
+    # plain index() would land on the wrong occurrence. The "cross" tag
     # immediately after the bold name is what only the cross row's own
-    # block has.
-    marker_index = page.index(f'<b>{cross_row.name}</b> <span class="tag">cross</span>')
-    window = page[marker_index : marker_index + 800]
-    assert "not served" in window
+    # ``ca-row`` block has -- scoped by parsing the actual tag nesting
+    # rather than a fixed character count past that marker.
+    block = _dom_row(
+        page, f'<b>{cross_row.name}</b> <span class="tag">cross</span>', class_name="ca-row"
+    )
+    assert "not served" in block
 
 
 # --- AC-16: dashboard warning ---------------------------------------------------

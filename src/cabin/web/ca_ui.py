@@ -1,8 +1,10 @@
-"""UI routes for the CA hierarchies (spec 0017 FR-14): the wizard
-(create/import) when no hierarchy exists at all, the list of every
-hierarchy plus per-row actions once at least one does, and the PEM
-downloads. GETs need only a logged-in session (viewer included); the
-mutating POSTs need role admin or superadmin plus CSRF.
+"""UI routes for the CA hierarchies (spec 0023): a list with no forms
+(`GET /ca`), one hierarchy in full with its own actions (`GET /ca/{ca_id}`),
+a create page (`GET /ca/new`) and an import page (`GET /ca/import`). GETs
+need only a logged-in session (viewer included, `/ca/new` and `/ca/import`
+admin-only); the mutating POSTs need role admin or superadmin plus CSRF, and
+keep the paths they had before this spec (FR-7) -- only where a response
+goes changed.
 """
 
 from cryptography import x509
@@ -125,10 +127,12 @@ def _subject(hierarchy: CAHierarchy) -> str:
 
 
 def _tls_self_signed(request: Request) -> bool:
-    """Spec 0022 FR-14: whether ca_setup.html's first-run warning note
-    belongs on this page -- only while cabin is currently serving a
-    self-signed certificate. `app.state.tls` is `None` with TLS off, and
-    `.mode` is `None` before the first `ensure_current`; both mean "no".
+    """Spec 0022 FR-14: whether the first-run warning note belongs on this
+    page -- only while cabin is currently serving a self-signed certificate.
+    `app.state.tls` is `None` with TLS off, and `.mode` is `None` before the
+    first `ensure_current`; both mean "no". Spec 0023 FR-10: the note moved
+    from `ca_setup.html` into `/ca`'s own empty state, under this same
+    condition.
     """
     tls = request.app.state.tls
     return tls is not None and tls.mode == TlsMode.self_signed
@@ -175,7 +179,7 @@ def _refuse_retire_of_tls_issuer(
 def _row_view(
     db: Session, row: CACertificate, *, parent_has_key: bool, acme_enabled: bool
 ) -> dict[str, object]:
-    """One ``/ca`` row: identity, status, which actions are safe to offer
+    """One hierarchy row: identity, status, which actions are safe to offer
     (AC-13, an imported root has no stored key so creating an intermediate
     under it or renewing it would only ever 500), and -- for an intermediate
     -- where its CRL and its AIA `caIssuers` document are published (spec
@@ -231,122 +235,177 @@ def _cross_sign_candidates(
     return candidates
 
 
-def _groups(
-    db: Session, rows: list[CACertificate], *, acme_enabled: bool
-) -> list[dict[str, object]]:
-    """Every row grouped under its root: root first, then its intermediates
-    in creation order (AC-12), then the cross certificates that duplicate it
-    (spec 0021 FR-13) -- each rendered under the root it *duplicates*
-    (``cross_of_id``), since that is where an operator looks for "what
-    paths does this hierarchy have". ``list_cas`` already orders by id, so
-    every one of these comes out in that order too.
+def _overview(db: Session, rows: list[CACertificate]) -> list[dict[str, object]]:
+    """FR-2: `/ca`'s own view -- one entry per ``kind == "root"`` row, in
+    ``list_cas`` order, carrying only what the list shows: name, status,
+    expiry and how many intermediates and cross certificates hang off it.
+    The counts come from ``rows``, already loaded; the expiry is read out of
+    the parsed certificate (``ca_certificates`` has no ``not_after``
+    column), one per hierarchy rather than one per row -- and, deliberately,
+    through ``describe_certificate`` rather than ``_cert_info``: this list
+    has no `<details>`, no CRL or ACME URL and no constraints block, so it
+    has no reason to call ``leaf.constraints_of`` at all. ``db`` is unused --
+    kept for symmetry with ``_group``, whose sibling this is.
+    """
+    del db
+    intermediate_counts: dict[int, int] = {}
+    cross_counts: dict[int, int] = {}
+    for row in rows:
+        if row.kind == "intermediate" and row.parent_id is not None:
+            intermediate_counts[row.parent_id] = intermediate_counts.get(row.parent_id, 0) + 1
+        elif row.kind == "cross" and row.cross_of_id is not None:
+            cross_counts[row.cross_of_id] = cross_counts.get(row.cross_of_id, 0) + 1
+    overview: list[dict[str, object]] = []
+    for row in rows:
+        if row.kind != "root":
+            continue
+        cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+        overview.append(
+            {
+                "id": row.id,
+                "name": row.name,
+                "status": row.status,
+                "not_valid_after": ca_x509.describe_certificate(cert)["not_valid_after"],
+                "intermediate_count": intermediate_counts.get(row.id, 0),
+                "cross_count": cross_counts.get(row.id, 0),
+            }
+        )
+    return overview
 
-    Before this spec a cross row was invisible here: children were
-    collected only for ``kind == "intermediate"`` and a group was built
-    only for ``kind == "root"``, so a certificate cabin serves to every
-    client would show on no page at all.
+
+def _group(
+    db: Session,
+    rows: list[CACertificate],
+    root: CACertificate,
+    *,
+    acme_enabled: bool,
+) -> dict[str, object]:
+    """FR-3: one hierarchy, in full -- today's ``_groups`` (spec 0017-0022)
+    for a single root, same keys (``root``, ``intermediates``,
+    ``cross_certificates``, ``chain``, ``cross_sign_candidates``), same body
+    otherwise. ``rows`` is **every** row on the instance, not just this
+    hierarchy's: ``_cross_sign_candidates`` needs to see roots outside the
+    group being built, and a detail page that queried only its own subtree
+    would render an empty select and silently remove the cross-signing
+    action from an instance that can perform it (FR-3's own warning).
+    ``root`` names which group to build.
     """
     key_sealed_by_id = {row.id: row.key_sealed is not None for row in rows}
     rows_by_id = {row.id: row for row in rows}
-    children: dict[int, list[CACertificate]] = {}
-    crosses: dict[int, list[CACertificate]] = {}
-    for row in rows:
-        if row.kind == "intermediate" and row.parent_id is not None:
-            children.setdefault(row.parent_id, []).append(row)
-        elif row.kind == "cross" and row.cross_of_id is not None:
-            crosses.setdefault(row.cross_of_id, []).append(row)
+    children = [row for row in rows if row.kind == "intermediate" and row.parent_id == root.id]
+    cross_source = [row for row in rows if row.kind == "cross" and row.cross_of_id == root.id]
 
-    groups: list[dict[str, object]] = []
-    for root in rows:
-        if root.kind != "root":
-            continue
-        # FR-6/FR-7: the one place this reads which path is actually served
-        # -- computed fresh on every render, never cached on a row.
-        chain_set = ca_service.chains_for(db, root.id)
-        default_cross_id = chain_set.default.via_cross_id
-        alternate_cross_ids = {
-            alt.via_cross_id for alt in chain_set.alternates if alt.via_cross_id is not None
-        }
-        cross_rows: list[dict[str, object]] = []
-        for cross in crosses.get(root.id, []):
-            if cross.id == default_cross_id:
-                served = "default"
-            elif cross.id in alternate_cross_ids:
-                served = "alternate"
-            else:
-                served = "not_served"
-            # A cross row's parent_id always names its signing root (FR-1's
-            # first invariant) -- the `is not None` guards are for mypy's
-            # benefit, not because either lookup is ever expected to miss.
-            signer = rows_by_id.get(cross.parent_id) if cross.parent_id is not None else None
-            parent_has_key = (
-                key_sealed_by_id.get(cross.parent_id, False)
-                if cross.parent_id is not None
-                else False
-            )
-            cross_rows.append(
-                {
-                    **_row_view(
-                        db,
-                        cross,
-                        parent_has_key=parent_has_key,
-                        acme_enabled=acme_enabled,
-                    ),
-                    "signed_by": signer.name if signer is not None else "unknown",
-                    "served": served,
-                }
-            )
-        groups.append(
+    # FR-6/FR-7: the one place this reads which path is actually served --
+    # computed fresh on every render, never cached on a row.
+    chain_set = ca_service.chains_for(db, root.id)
+    default_cross_id = chain_set.default.via_cross_id
+    alternate_cross_ids = {
+        alt.via_cross_id for alt in chain_set.alternates if alt.via_cross_id is not None
+    }
+    cross_rows: list[dict[str, object]] = []
+    for cross in cross_source:
+        if cross.id == default_cross_id:
+            served = "default"
+        elif cross.id in alternate_cross_ids:
+            served = "alternate"
+        else:
+            served = "not_served"
+        # A cross row's parent_id always names its signing root (FR-1's
+        # first invariant) -- the `is not None` guards are for mypy's
+        # benefit, not because either lookup is ever expected to miss.
+        signer = rows_by_id.get(cross.parent_id) if cross.parent_id is not None else None
+        parent_has_key = (
+            key_sealed_by_id.get(cross.parent_id, False) if cross.parent_id is not None else False
+        )
+        cross_rows.append(
             {
-                "root": _row_view(db, root, parent_has_key=False, acme_enabled=acme_enabled),
-                "intermediates": [
-                    _row_view(
-                        db,
-                        child,
-                        parent_has_key=key_sealed_by_id.get(root.id, False),
-                        acme_enabled=acme_enabled,
-                    )
-                    for child in children.get(root.id, [])
-                ],
-                "cross_certificates": cross_rows,
-                "chain": {
-                    "default_name": chain_set.default.rows[-1].name,
-                    "default_id": chain_set.default.rows[-1].id,
-                    "default_via_cross": chain_set.default.via_cross_id is not None,
-                    "alternates": [
-                        {
-                            "name": alt.rows[-1].name,
-                            "id": alt.rows[-1].id,
-                            "via_cross": alt.via_cross_id is not None,
-                        }
-                        for alt in chain_set.alternates
-                    ],
-                },
-                "cross_sign_candidates": _cross_sign_candidates(rows, root),
+                **_row_view(db, cross, parent_has_key=parent_has_key, acme_enabled=acme_enabled),
+                "signed_by": signer.name if signer is not None else "unknown",
+                "served": served,
             }
         )
-    return groups
+    return {
+        "root": _row_view(db, root, parent_has_key=False, acme_enabled=acme_enabled),
+        "intermediates": [
+            _row_view(
+                db,
+                child,
+                parent_has_key=key_sealed_by_id.get(root.id, False),
+                acme_enabled=acme_enabled,
+            )
+            for child in children
+        ],
+        "cross_certificates": cross_rows,
+        "chain": {
+            "default_name": chain_set.default.rows[-1].name,
+            "default_id": chain_set.default.rows[-1].id,
+            "default_via_cross": chain_set.default.via_cross_id is not None,
+            "alternates": [
+                {
+                    "name": alt.rows[-1].name,
+                    "id": alt.rows[-1].id,
+                    "via_cross": alt.via_cross_id is not None,
+                }
+                for alt in chain_set.alternates
+            ],
+        },
+        "cross_sign_candidates": _cross_sign_candidates(rows, root),
+    }
 
 
-def _list_page(
+def _root_of(db: Session, row: CACertificate) -> CACertificate:
+    """FR-7's redirect target, and the only place that mapping lives: the
+    row itself for a root, its ``parent_id`` for an intermediate, its
+    ``cross_of_id`` for a cross row -- an action started on a page comes
+    back to that page, wherever in the hierarchy it actually landed."""
+    if row.kind == "root":
+        return row
+    if row.kind == "intermediate":
+        assert row.parent_id is not None  # FR-1's invariant: every intermediate has a parent
+        return ca_service.get_ca(db, row.parent_id)
+    assert row.cross_of_id is not None  # FR-1's invariant: every cross row names its subject
+    return ca_service.get_ca(db, row.cross_of_id)
+
+
+def _detail_page(
     request: Request,
     db: Session,
     user: User,
+    root: CACertificate,
     error: str | None,
+    *,
+    values: dict[str, object] | None = None,
+    open_form: str | None = None,
     status_code: int = 200,
 ) -> Response:
+    """The one renderer for ``ca_detail.html``, used by the GET and by the
+    three POSTs that re-render it (create-intermediate, cross-sign). Loads
+    every row, not just ``root``'s group, for the reason ``_group``'s
+    docstring gives. ``open_form`` is ``"intermediate"``, ``"cross-sign"``
+    or ``None`` and decides which `<details>` carries `open` -- a re-filled
+    form inside a collapsed disclosure is a form nobody can see (FR-8).
+    """
     rows = ca_service.list_cas(db)
     context = base_context(request, user)
     context["error"] = error
-    # Spec 0022 FR-14: ca_setup.html's first-run warning note is read from
-    # this key regardless of which template ends up rendering below.
-    context["tls_self_signed"] = _tls_self_signed(request)
-    if not rows:
-        return templates.TemplateResponse(
-            request, "ca_setup.html", context, status_code=status_code
-        )
-    context["groups"] = _groups(db, rows, acme_enabled=get_flag(db, ACME_ENABLED))
-    return templates.TemplateResponse(request, "ca_list.html", context, status_code=status_code)
+    context["group"] = _group(db, rows, root, acme_enabled=get_flag(db, ACME_ENABLED))
+    context["values"] = values or {}
+    context["open_form"] = open_form
+    return templates.TemplateResponse(request, "ca_detail.html", context, status_code=status_code)
+
+
+def _new_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
+    context = base_context(request, user)
+    context["error"] = error
+    return templates.TemplateResponse(request, "ca_new.html", context, status_code=status_code)
+
+
+def _import_page(
+    request: Request, user: User, error: str | None, status_code: int = 200
+) -> Response:
+    context = base_context(request, user)
+    context["error"] = error
+    return templates.TemplateResponse(request, "ca_import.html", context, status_code=status_code)
 
 
 @router.get("")
@@ -355,7 +414,52 @@ def ca_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
-    return _list_page(request, db, user, None)
+    """FR-2: the list, nothing else. `_overview`'s empty state carries
+    FR-10's TLS note under the same condition ``ca_setup.html`` did: visible
+    only while both hold -- self-signed TLS and no hierarchy at all."""
+    rows = ca_service.list_cas(db)
+    context = base_context(request, user)
+    context["overview"] = _overview(db, rows)
+    context["tls_self_signed"] = _tls_self_signed(request)
+    return templates.TemplateResponse(request, "ca_list.html", context)
+
+
+@router.get("/new")
+def ca_new_page(request: Request, user: User = Depends(require_admin)) -> Response:
+    return _new_page(request, user, None)
+
+
+@router.get("/import")
+def ca_import_page(request: Request, user: User = Depends(require_admin)) -> Response:
+    return _import_page(request, user, None)
+
+
+@router.get("/{ca_id:int}")
+def ca_detail(
+    ca_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """FR-3/FR-9: one hierarchy, named by its root. The ``:int`` converter
+    (matching ``crl_ui.py:93``) is what keeps this route from swallowing
+    ``/ca/new``, ``/ca/import``, ``/ca/{id}.pem`` and the ``.cer`` route
+    that lives in the crl router included after this one -- a bare
+    ``/{ca_id}`` would compile to ``^/ca/(?P<ca_id>[^/]+)$`` and match all
+    four before any of them got a chance to answer (spec 0017's ``/crl/7.pem``
+    bug, exactly). An id naming an intermediate or a cross row, or naming
+    nothing at all, is a 404: a hierarchy is named by its root, not by any
+    row in it.
+    """
+    try:
+        row = ca_service.get_ca(db, ca_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if row.kind != "root":
+        raise HTTPException(
+            status_code=404, detail="a hierarchy is named by its root, not by this id"
+        )
+    return _detail_page(request, db, user, row, None)
 
 
 @router.post("/create")
@@ -382,10 +486,7 @@ def ca_create(
     if form_error is None:
         form_error = constraints_error
     if form_error is not None:
-        context = base_context(request, user)
-        context["error"] = form_error
-        context["tls_self_signed"] = _tls_self_signed(request)
-        return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
+        return _new_page(request, user, form_error, status_code=400)
     assert constraints is not None  # form_error is None only when parsing succeeded
     hierarchy = ca_service.create_hierarchy(
         db,
@@ -460,10 +561,7 @@ def ca_import(
             chain_pem,
         )
     except CAImportError as exc:
-        context = base_context(request, user)
-        context["error"] = str(exc)
-        context["tls_self_signed"] = _tls_self_signed(request)
-        return templates.TemplateResponse(request, "ca_setup.html", context, status_code=400)
+        return _import_page(request, user, str(exc), status_code=400)
     # The subject only -- neither the submitted key nor its passphrase has any
     # business in a log (spec 0004 FR-3).
     subject = _subject(hierarchy)
@@ -502,12 +600,39 @@ def ca_create_intermediate(
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
+    """FR-8: every refusal re-renders ``root_id``'s own detail page at 400,
+    the form re-filled from what was submitted (``values``) with its
+    `<details>` forced open -- the defect this spec exists to fix, in place
+    of the bare ``HTTPException`` this route used to raise on every one of
+    them. ``UnknownIssuerError`` stays a 404: no page can be rendered for a
+    root that does not exist.
+    """
+    try:
+        root = ca_service.get_ca(db, root_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    values: dict[str, object] = {
+        "name": name,
+        "key_type": key_type,
+        "years": years,
+        "permitted_names": permitted_names,
+        "excluded_names": excluded_names,
+    }
     form_error = _key_type_error(key_type) or _year_bounds_error(years, "years")
     constraints, constraints_error = _constraints_form_error(permitted_names, excluded_names)
     if form_error is None:
         form_error = constraints_error
     if form_error is not None:
-        raise HTTPException(status_code=400, detail=form_error)
+        return _detail_page(
+            request,
+            db,
+            user,
+            root,
+            form_error,
+            values=values,
+            open_form="intermediate",
+            status_code=400,
+        )
     assert constraints is not None  # form_error is None only when parsing succeeded
     try:
         row = ca_service.create_intermediate_under(
@@ -522,7 +647,16 @@ def ca_create_intermediate(
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (CANotConfiguredError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _detail_page(
+            request,
+            db,
+            user,
+            root,
+            str(exc),
+            values=values,
+            open_form="intermediate",
+            status_code=400,
+        )
     # Spec 0018 FR-8: same as ca_create above -- the creator is granted the
     # new intermediate immediately.
     grant(db, user_principal(user), row.id)
@@ -547,7 +681,7 @@ def ca_create_intermediate(
         },
         ip=client_ip(request, db),
     )
-    return RedirectResponse("/ca", status_code=303)
+    return RedirectResponse(f"/ca/{root_id}", status_code=303)
 
 
 @router.post("/{ca_id}/cross-sign")
@@ -565,14 +699,19 @@ def ca_cross_sign(
     ``ca_id``'s root, using ``signing_root_id``'s key. Every refusal --
     unknown id, not a root, no stored key, ``path_length`` too small, an
     active cross certificate for this pair already existing -- re-renders
-    the list page at 400 with the message, before any row is written, the
-    same way ``ca_create``'s form errors do (FR-13); nothing here is a bare
-    HTTPException, because the action lives inside a details block on
-    ``/ca`` rather than on its own page.
+    ``ca_id``'s own detail page at 400 with the message and its own
+    `<details>` open (FR-8), before any row is written, the same way
+    ``ca_create_intermediate``'s form errors do (FR-7).
     """
+    try:
+        root = ca_service.get_ca(db, ca_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     form_error = _year_bounds_error(years, "years")
     if form_error is not None:
-        return _list_page(request, db, user, form_error, status_code=400)
+        return _detail_page(
+            request, db, user, root, form_error, open_form="cross-sign", status_code=400
+        )
     try:
         row = ca_service.cross_sign_root(
             db, request.app.state.secrets, ca_id, signing_root_id, years
@@ -580,7 +719,9 @@ def ca_cross_sign(
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (ValueError, CANotConfiguredError, CrossSignError) as exc:
-        return _list_page(request, db, user, str(exc), status_code=400)
+        return _detail_page(
+            request, db, user, root, str(exc), open_form="cross-sign", status_code=400
+        )
     produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     audit.record(
         db,
@@ -597,7 +738,7 @@ def ca_cross_sign(
         },
         ip=client_ip(request, db),
     )
-    return RedirectResponse("/ca", status_code=303)
+    return RedirectResponse(f"/ca/{ca_id}", status_code=303)
 
 
 @router.post("/cross-import")
@@ -614,13 +755,14 @@ def ca_cross_import(
     No key, no name -- the subject root is resolved by matching the
     submitted certificate against what is already on this instance
     (``import_cross``), and 0017's naming rule reads the row's name off its
-    own certificate. Refused the same way ``ca_cross_sign`` is: a re-render
-    of the list page at 400, no row written.
+    own certificate. Refused the same way ``ca_cross_sign`` is refused, but
+    onto ``/ca/import``, the page this form lives on now: a re-render at 400,
+    no row written.
     """
     try:
         row = ca_service.import_cross(db, cross_pem, issuer_pem)
     except CAImportError as exc:
-        return _list_page(request, db, user, str(exc), status_code=400)
+        return _import_page(request, user, str(exc), status_code=400)
     cross_info = ca_x509.describe_certificate(
         x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     )
@@ -655,6 +797,10 @@ def ca_renew(
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
+    """FR-7: unchanged but for its redirect target -- ``root_of_row``
+    (FR-7/``_root_of``) rather than the now-gone list page. Out of Scope: the
+    bare ``HTTPException`` on a form-bounds refusal is left as it was; a
+    single number lost on a 400 is not FR-8's defect."""
     form_error = _year_bounds_error(years, "years")
     if form_error is not None:
         raise HTTPException(status_code=400, detail=form_error)
@@ -674,7 +820,8 @@ def ca_renew(
         detail={"years": years},
         ip=client_ip(request, db),
     )
-    return RedirectResponse("/ca", status_code=303)
+    root = _root_of(db, row)
+    return RedirectResponse(f"/ca/{root.id}", status_code=303)
 
 
 @router.post("/{ca_id}/retire")
@@ -686,6 +833,7 @@ def ca_retire(
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
+    """FR-7: unchanged but for its redirect target, as ``ca_renew`` above."""
     try:
         row = ca_service.get_ca(db, ca_id)
     except UnknownIssuerError as exc:
@@ -708,7 +856,8 @@ def ca_retire(
             target_id=ca_id,
             ip=client_ip(request, db),
         )
-    return RedirectResponse("/ca", status_code=303)
+    root = _root_of(db, row)
+    return RedirectResponse(f"/ca/{root.id}", status_code=303)
 
 
 @router.get("/{ca_id}.pem")

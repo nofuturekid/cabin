@@ -381,11 +381,14 @@ def test_ca_page_shows_cdp_and_aia_links_per_issuer(client: TestClient, cfg: Con
     assert alpha_crl != beta_crl
     assert alpha_aia != beta_aia
 
-    html = client.get("/ca").text
-    assert _anchor_text(html, alpha_crl) == alpha_crl
-    assert _anchor_text(html, alpha_aia) == alpha_aia
-    assert _anchor_text(html, beta_crl) == beta_crl
-    assert _anchor_text(html, beta_aia) == beta_aia
+    # spec 0023: the per-issuer CRL/AIA links live on each hierarchy's own
+    # detail page now, not on the /ca overview.
+    alpha_html = client.get(f"/ca/{alpha.root.id}").text
+    beta_html = client.get(f"/ca/{beta.root.id}").text
+    assert _anchor_text(alpha_html, alpha_crl) == alpha_crl
+    assert _anchor_text(alpha_html, alpha_aia) == alpha_aia
+    assert _anchor_text(beta_html, beta_crl) == beta_crl
+    assert _anchor_text(beta_html, beta_aia) == beta_aia
 
 
 def test_displayed_urls_match_issued_certificate(client: TestClient, cfg: Config) -> None:
@@ -418,15 +421,18 @@ def test_displayed_urls_match_issued_certificate(client: TestClient, cfg: Config
     finally:
         db.close()
 
-    html = client.get("/ca").text
+    # spec 0023: the issuer's own row -- and its CRL/AIA links -- lives on
+    # its hierarchy's detail page now, not on the /ca overview.
+    html = client.get(f"/ca/{hierarchy.root.id}").text
     assert _anchor_text(html, expected_cdp) == expected_cdp
     assert _anchor_text(html, expected_aia) == expected_aia
 
 
 def test_ca_page_urls_absent_without_base_url(client: TestClient, cfg: Config) -> None:
     """Without a base URL there is nothing valid to embed in a certificate,
-    so /ca must show neither link -- and the existing "no base URL" note
-    (ca_list.html:39) must be what appears in its place, not silence."""
+    so the hierarchy's own detail page must show neither link -- and the
+    existing "no base URL" note (``ca_detail.html``) must be what appears
+    in its place, not silence."""
     _setup_superadmin(client)
     db = _db(cfg)
     try:
@@ -434,7 +440,7 @@ def test_ca_page_urls_absent_without_base_url(client: TestClient, cfg: Config) -
     finally:
         db.close()
 
-    html = client.get("/ca").text
+    html = client.get(f"/ca/{hierarchy.root.id}").text
     crl_href = f"/crl/{hierarchy.intermediate.id}"
     aia_href = f"/ca/{hierarchy.intermediate.id}.cer"
     hrefs = {href for href, _text in _anchors(html)}

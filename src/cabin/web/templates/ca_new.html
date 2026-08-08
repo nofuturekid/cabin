@@ -1,28 +1,23 @@
 {% extends "layout.html" %}
-{% set nav_current = "ca" %}
-{% block title %}CA Setup — cabin{% endblock %}
+{% set nav_current = "ca_new" %}
+{% block title %}Create a CA — cabin{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>Set up your CA</h1>
-    <p class="sub">Generate a new hierarchy, or bring one you already have.</p>
+    <h1>Create a CA</h1>
+    <p class="sub">
+      Generates a root and intermediate certificate authority. To bring one
+      you already have instead, <a href="/ca/import">import a CA</a>.
+    </p>
   </div>
 </div>
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
-{% if tls_self_signed %}
-<p id="tls-setup-note" class="note">
-  cabin is serving a self-signed TLS certificate right now, so your browser
-  shows a warning -- that is expected. It stops once a CA exists: cabin then
-  issues and switches to its own certificate automatically, with no restart.
-</p>
-{% endif %}
-
 <div class="section">
   <div>
     <h2>Create a new CA</h2>
-    <p class="help">Generates a root and intermediate certificate authority.</p>
+    <p class="help">A further hierarchy, side by side with what is already here.</p>
   </div>
   <div>
     <form method="post" action="/ca/create">
@@ -64,38 +59,6 @@
         <span class="hint">One DNS suffix or IP network per line. Refused even if covered by a permitted entry above.</span>
       </div>
       <div class="actions"><button type="submit" class="primary">Create CA</button></div>
-    </form>
-  </div>
-</div>
-
-<div class="section">
-  <div>
-    <h2>Import an existing CA</h2>
-    <p class="help">
-      Import a signing CA certificate and private key (optionally
-      passphrase-protected), plus its parent/root certificate.
-    </p>
-  </div>
-  <div>
-    <form method="post" action="/ca/import">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <div class="field">
-        <label for="cert_pem">Signing CA certificate (PEM)</label>
-        <textarea id="cert_pem" name="cert_pem" rows="8" required></textarea>
-      </div>
-      <div class="field">
-        <label for="key_pem">Signing CA private key (PEM)</label>
-        <textarea id="key_pem" name="key_pem" rows="8" required></textarea>
-      </div>
-      <div class="field">
-        <label for="key_passphrase">Private key passphrase (if encrypted)</label>
-        <input id="key_passphrase" type="password" name="key_passphrase" />
-      </div>
-      <div class="field">
-        <label for="chain_pem">Parent/root certificate (PEM)</label>
-        <textarea id="chain_pem" name="chain_pem" rows="8" required></textarea>
-      </div>
-      <div class="actions"><button type="submit" class="primary">Import CA</button></div>
     </form>
   </div>
 </div>

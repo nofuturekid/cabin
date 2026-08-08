@@ -128,6 +128,15 @@ def _sole_intermediate_id(cfg: Config) -> int:
         db.close()
 
 
+def _sole_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(select(CACertificate).where(CACertificate.kind == "root")).one()
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_viewer(client: TestClient, cfg: Config) -> None:
     resp = client.post(
         "/users",
@@ -553,7 +562,9 @@ def test_cdp_present_with_base_url(client: TestClient, cfg: Config) -> None:
     forced = f"http://ca.example.org/crl/{issuer_id}"
     assert _cdp_urls(issued) == [forced]
 
-    page = client.get("/ca")
+    # spec 0023: the issuer's own CDP link lives on its hierarchy's detail
+    # page now, not on the /ca overview.
+    page = client.get(f"/ca/{_sole_root_id(cfg)}")
     assert forced in page.text
     assert "https://ca.example.org/crl" not in page.text
 
@@ -582,8 +593,9 @@ def test_cdp_absent_without_base_url(client: TestClient, cfg: Config) -> None:
 
     with pytest.raises(x509.ExtensionNotFound):
         issued.extensions.get_extension_for_class(x509.CRLDistributionPoints)
-    # ...and the CA page says so, so an operator can find out why
-    assert "base URL" in client.get("/ca").text
+    # ...and the hierarchy's own detail page says so, so an operator can
+    # find out why
+    assert "base URL" in client.get(f"/ca/{_sole_root_id(cfg)}").text
 
 
 def test_base_url_validation(client: TestClient, cfg: Config) -> None:

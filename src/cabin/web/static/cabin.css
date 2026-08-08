@@ -112,7 +112,6 @@ body.with-rail {
   top: 0;
   align-self: start;
   height: 100vh;
-  overflow-y: auto;
   border-right: 1px solid var(--line);
   background: var(--panel);
   padding: var(--pad) 0;
@@ -140,9 +139,16 @@ body.with-rail {
   font-size: 0.72rem;
 }
 
+/* Flexes to fill the space between the brand and the foot, scrolling on its
+   own (spec 0023: a second nav-group made the rail's total content taller
+   than a short viewport) -- so the logout button in .rail-foot stays pinned
+   at the bottom and on screen no matter how many entries nav grows to hold. */
 .rail nav {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .rail .nav-group {
@@ -641,6 +647,48 @@ footer {
   .section {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ---- CA hierarchy rows and disclosures (spec 0023) ---- */
+
+/* One intermediate or cross certificate within a hierarchy's detail page --
+   a border, not just paragraphs run together, is what makes the rows read
+   as separate things instead of one undifferentiated block. */
+.ca-row {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line);
+}
+
+/* The renew/retire controls on one row, inline with its other text rather
+   than stacked the way a page-wide form is. */
+.inline-form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.constraints {
+  margin: var(--space-2) 0;
+}
+
+/* "Add intermediate" / "Cross-sign": a disclosure is a block a click opens,
+   not text that happens to be clickable. */
+details {
+  margin: var(--space-3) 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+details summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+details[open] summary {
+  margin-bottom: var(--space-2);
 }
 
 /* ---- dashboard tiles ---- */

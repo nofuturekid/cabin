@@ -31,6 +31,7 @@ string (the create form gains ``permitted_names`` right next to the import
 form that must never have it).
 """
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
@@ -224,6 +225,57 @@ def _root_with_constraints(
     )
     cert = builder.sign(key, algorithm=hashes.SHA256())
     return cert, key
+
+
+# --- element scoping, mirroring test_web_ca.py's own helper -----------------
+#
+# spec 0023 moved per-hierarchy detail onto /ca/{ca_id}, where an
+# intermediate's own row (and only that row) carries its constraints block --
+# scoped by parsing actual tag nesting, never by slicing a fixed number of
+# characters after a marker (this project has been burned by that before).
+
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
+_CLASS_RE = re.compile(r'class="([^"]*)"')
+
+
+def _row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
+    """The full outer HTML of the innermost ``<tag class="class_name">``
+    element that contains ``marker``'s first occurrence."""
+    marker_idx = html.index(marker)
+    stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
+    for m in _TAG_RE.finditer(html):
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue  # void or self-closing: no nesting depth to track
+        if not closing:
+            stack.append((name, attrs, m.start()))
+            continue
+        if not stack or stack[-1][0] != name:
+            continue  # not well-formed at this point; nothing to close
+        open_name, open_attrs, open_start = stack.pop()
+        if open_start <= marker_idx < m.end():
+            classes = _CLASS_RE.search(open_attrs)
+            if open_name == tag and classes is not None and class_name in classes.group(1).split():
+                return html[open_start : m.end()]
+    raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
 
 
 # --- real DOM parsing --------------------------------------------------------
@@ -467,17 +519,17 @@ def _seed_alpha_beta(cfg: Config) -> None:
 
 
 def test_ca_page_shows_constraints_per_row(client: TestClient, cfg: Config) -> None:
-    """AC-12's positive half: alpha's row renders ``example.com`` as visible
-    text, scoped to alpha's own block -- not found by searching the whole
-    page, which would pass even if it were rendered on the wrong row."""
+    """AC-12's positive half: alpha's intermediate row renders ``example.com``
+    as visible text, scoped to its own ``ca-row`` block on its hierarchy's
+    own detail page (spec 0023 moved per-row detail off ``/ca``) -- not
+    found by searching the whole page, which would pass even if it were
+    rendered on the wrong row."""
     _setup_superadmin(client)
     _seed_alpha_beta(cfg)
 
-    html = client.get("/ca").text
-    alpha_int_i = html.index("alpha Intermediate CA")
-    beta_root_i = html.index("beta Root CA")
-    assert alpha_int_i < beta_root_i
-    alpha_block = html[alpha_int_i:beta_root_i]
+    alpha_root = _by_name(cfg, "alpha Root CA")
+    html = client.get(f"/ca/{alpha_root.id}").text
+    alpha_block = _row(html, "alpha Intermediate CA", class_name="ca-row")
     assert "example.com" in alpha_block
 
     expected = leaf_mod.constraints_of(_cert_of(_by_name(cfg, "alpha Intermediate CA")))
@@ -489,16 +541,15 @@ def test_ca_page_shows_no_block_for_an_unconstrained_row(client: TestClient, cfg
     all. Checked as the absence of the block's own vocabulary
     ("permitted"/"excluded", the words FR-9's UI uses and the words
     ``permitted_names``/``excluded_names`` are built from) inside beta's own
-    slice of the page -- not an empty string, which a block rendering ``""``
-    for an empty tuple would also satisfy."""
+    ``ca-row`` block on its hierarchy's own detail page -- not an empty
+    string, which a block rendering ``""`` for an empty tuple would also
+    satisfy."""
     _setup_superadmin(client)
     _seed_alpha_beta(cfg)
 
-    html = client.get("/ca").text
-    beta_int_i = html.index("beta Intermediate CA")
-    create_section_i = html.index("Create a new CA")
-    assert beta_int_i < create_section_i
-    beta_block = html[beta_int_i:create_section_i].lower()
+    beta_root = _by_name(cfg, "beta Root CA")
+    html = client.get(f"/ca/{beta_root.id}").text
+    beta_block = _row(html, "beta Intermediate CA", class_name="ca-row").lower()
     assert "permitted" not in beta_block
     assert "excluded" not in beta_block
 
@@ -509,7 +560,8 @@ def test_ca_page_shows_an_imported_roots_constraints(client: TestClient, cfg: Co
     """Out of Scope's own configuration, made visible: cabin never writes
     constraints on a root it generates (FR-1), but an *imported* root may
     carry them -- decided by whoever signed it, not by cabin. AC-12 requires
-    that they show up on the root's own row."""
+    that they show up on the root's own row, on its hierarchy's own detail
+    page."""
     _setup_superadmin(client)
     root_cert, root_key = _root_with_constraints("Delegated Root CA", ("partner.example",))
     intermediate_cert, intermediate_key = create_intermediate(
@@ -526,7 +578,8 @@ def test_ca_page_shows_an_imported_roots_constraints(client: TestClient, cfg: Co
     )
     assert resp.status_code == 303, resp.text
 
-    html = client.get("/ca").text
+    root = _by_name(cfg, "Delegated Root CA")
+    html = client.get(f"/ca/{root.id}").text
     root_i = html.index("Delegated Root CA")
     intermediate_i = html.index("Delegated Intermediate CA")
     assert root_i < intermediate_i
@@ -543,33 +596,37 @@ def test_ca_page_shows_an_imported_roots_constraints(client: TestClient, cfg: Co
 def test_import_form_offers_no_constraint_field(client: TestClient, cfg: Config) -> None:
     """An imported certificate is already signed; its constraints were
     decided by whoever signed it, and a field that appeared to change them
-    would change nothing. Checked on both templates the import form lives
-    on -- the first-run wizard (``ca_setup.html``, before any CA exists) and
-    the ongoing list page (``ca_list.html``, once one does) -- since they
-    are two copies of the same form and only one of them accidentally
-    growing the field would be exactly the kind of copy-paste this file
-    exists to catch.
+    would change nothing. Spec 0023 moved the import form onto its own page
+    (``/ca/import``, ``ca_import.html``) and the create form onto a
+    different one (``/ca/new``, ``ca_new.html``) -- they are no longer two
+    copies of the same page, so the counter-proof that the parser is
+    actually scoped to the right form (not merely failing to find either)
+    now has to come from the create form's own page instead.
     """
     _setup_superadmin(client)
 
-    wizard_html = client.get("/ca").text
-    wizard_import = _fields_of_form(wizard_html, "/ca/import")
-    assert wizard_import.found_form is True
-    assert "permitted_names" not in wizard_import.field_names
-    assert "excluded_names" not in wizard_import.field_names
-    # the create form on the very same page DOES grow the fields -- proving
-    # the parser is actually scoped to the right form, not failing to find
-    # either.
-    wizard_create = _fields_of_form(wizard_html, "/ca/create")
-    assert "permitted_names" in wizard_create.field_names
-    assert "excluded_names" in wizard_create.field_names
+    import_html = client.get("/ca/import").text
+    import_form = _fields_of_form(import_html, "/ca/import")
+    assert import_form.found_form is True
+    assert "permitted_names" not in import_form.field_names
+    assert "excluded_names" not in import_form.field_names
 
+    # the create form, on its own page, DOES grow the fields -- proving the
+    # parser is actually scoped to the right form, not failing to find
+    # either.
+    create_html = client.get("/ca/new").text
+    create_form = _fields_of_form(create_html, "/ca/create")
+    assert "permitted_names" in create_form.field_names
+    assert "excluded_names" in create_form.field_names
+
+    # unchanged once a hierarchy exists too -- the import page is not
+    # conditional on there being anything to import alongside.
     _create_ca(client, cfg, "any")
-    list_html = client.get("/ca").text
-    list_import = _fields_of_form(list_html, "/ca/import")
-    assert list_import.found_form is True
-    assert "permitted_names" not in list_import.field_names
-    assert "excluded_names" not in list_import.field_names
+    import_html_after = client.get("/ca/import").text
+    import_form_after = _fields_of_form(import_html_after, "/ca/import")
+    assert import_form_after.found_form is True
+    assert "permitted_names" not in import_form_after.field_names
+    assert "excluded_names" not in import_form_after.field_names
 
 
 def test_imported_intermediate_constraint_is_displayed_on_ca(
@@ -577,7 +634,8 @@ def test_imported_intermediate_constraint_is_displayed_on_ca(
 ) -> None:
     """AC-10's display half: an imported *intermediate* (not just an
     imported root, covered separately above) shows its own constraint on
-    ``/ca``, read from its certificate. Enforcement of this same
+    its hierarchy's own detail page, read from its certificate. Enforcement
+    of this same
     certificate -- issuing inside the permitted set and refusing outside it,
     at every door -- is already proven by
     ``tests/test_name_constraints_doors.py::test_imported_intermediate_is_enforced_from_its_certificate``;
@@ -604,9 +662,9 @@ def test_imported_intermediate_constraint_is_displayed_on_ca(
     )
     assert resp.status_code == 303, resp.text
 
-    html = client.get("/ca").text
-    intermediate_i = html.index("Delegated Partner Intermediate CA")
-    block = html[intermediate_i : intermediate_i + 1000]
+    root = _by_name(cfg, "Delegating Root CA")
+    html = client.get(f"/ca/{root.id}").text
+    block = _row(html, "Delegated Partner Intermediate CA", class_name="ca-row")
     assert "delegated.example" in block
 
 

@@ -19,9 +19,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
+from cabin.ca.service import CACertificate
 from cabin.config import Config
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
@@ -152,6 +154,17 @@ def _csrf(client: TestClient, cfg: Config) -> str:
         db.close()
 
 
+def _root_id(cfg: Config) -> int:
+    """``_populate``'s own hierarchy's root id -- what ``/ca/{id}`` (spec
+    0023's per-hierarchy detail page) is addressed by."""
+    db: Session = create_session_factory(cfg.db_url)()
+    try:
+        row = db.scalars(select(CACertificate).where(CACertificate.kind == "root")).one()
+        return row.id
+    finally:
+        db.close()
+
+
 def _populate(client: TestClient, cfg: Config) -> str:
     """A CA, a certificate with a long name and several SANs, a token and an
     EAB key — the data that made the old layout break."""
@@ -222,7 +235,9 @@ def test_nav_current_marked_once_per_page(client: TestClient, cfg: Config) -> No
     cert_path = _populate(client, cfg)
     expected = {
         "/": "Dashboard",
-        "/ca": "Certificate authority",
+        "/ca": "Hierarchies",
+        "/ca/new": "Create",
+        "/ca/import": "Import",
         "/certs": "Inventory",
         cert_path: "Inventory",
         "/certs/new": "Issue",
@@ -262,6 +277,10 @@ def test_nav_entries_still_role_gated(client: TestClient, cfg: Config) -> None:
         'href="/tokens"',
         'href="/settings"',
         'href="/acme/admin"',
+        # spec 0023: the two new create/import entries are as admin-only as
+        # the forms they now point at.
+        'href="/ca/new"',
+        'href="/ca/import"',
     ):
         assert hidden not in rail
 
@@ -486,6 +505,9 @@ def test_no_horizontal_overflow(
     pages = {
         "dashboard": "/",
         "ca": "/ca",
+        "ca_new": "/ca/new",
+        "ca_import": "/ca/import",
+        "ca_detail": f"/ca/{_root_id(cfg)}",
         "certs": "/certs",
         "certs_new": "/certs/new",
         "certs_sign": "/certs/sign",

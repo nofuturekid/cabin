@@ -18,7 +18,10 @@
       <nav>
         <span class="nav-group">Overview</span>
         {{ nav_link("/", "dashboard", "Dashboard") }}
-        {{ nav_link("/ca", "ca", "Certificate authority") }}
+        <span class="nav-group">Certificate authority</span>
+        {{ nav_link("/ca", "ca", "Hierarchies") }}
+        {% if nav.ca_admin %}{{ nav_link("/ca/new", "ca_new", "Create") }}{% endif %}
+        {% if nav.ca_admin %}{{ nav_link("/ca/import", "ca_import", "Import") }}{% endif %}
         <span class="nav-group">Certificates</span>
         {{ nav_link("/certs", "certs", "Inventory") }}
         {% if nav.issue %}{{ nav_link("/certs/new", "issue", "Issue") }}{% endif %}

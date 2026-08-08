@@ -866,4 +866,16 @@ def test_settings_page_toggles_acme_and_shows_the_directory_url(
     issuer_id = create_ca(cfg)
     assert raw_client.get(f"/acme/ca/{issuer_id}/directory").status_code == 200
     assert "/acme/ca/" not in raw_client.get("/settings").text
-    assert f"https://ca.example.org/acme/ca/{issuer_id}/directory" in raw_client.get("/ca").text
+
+    # spec 0023: the issuer's own ACME directory link lives on its
+    # hierarchy's detail page now, not on the /ca overview.
+    db = db_session(cfg)
+    try:
+        root_id = ca_service.get_ca(db, issuer_id).parent_id
+    finally:
+        db.close()
+    assert root_id is not None
+    assert (
+        f"https://ca.example.org/acme/ca/{issuer_id}/directory"
+        in raw_client.get(f"/ca/{root_id}").text
+    )
