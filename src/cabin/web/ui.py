@@ -294,6 +294,7 @@ def _ca_expiry(row: CACertificate, now: datetime) -> dict[str, object]:
         # year out rather than at the 30 days a leaf gets.
         tag = "tag-bad" if days <= 0 else ("tag-warn" if days <= CA_WARN_DAYS else "")
     return {
+        "id": row.id,
         "name": row.name,
         "kind": row.kind,
         "status": row.status,
@@ -327,6 +328,14 @@ def dashboard(
     if not rows:
         # Nothing to summarise before there is a CA (AC-8).
         return templates.TemplateResponse(request, "dashboard.html", context)
+
+    # Spec 0024 FR-7: `ca_configured` alone is `True` for a lone root, which
+    # used to render a full body including a `Revocation` section with an
+    # empty issuer table -- a heading, an explanation and nothing. This
+    # second flag is what lets the template say "this hierarchy has no
+    # issuer yet" instead, and gate the revocation section's own tables on
+    # there being at least one to show.
+    context["ca_has_issuer"] = bool(ca_service.active_issuers(db))
 
     expiring = certs_service.expiring_soon(db, now, limit=EXPIRING_SHOWN)
     counts = certs_service.status_counts(db, now)

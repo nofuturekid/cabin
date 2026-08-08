@@ -134,7 +134,7 @@ def _imported_root_with_intermediate(
 
 
 def test_keys_sealed_in_db(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "cabin")
+    create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     rows = {row.kind: row for row in db.scalars(select(CACertificate))}
     assert set(rows) == {"root", "intermediate"}
@@ -149,7 +149,7 @@ def test_keys_sealed_in_db(db: Session, secrets: SecretStore) -> None:
 
 
 def test_signing_credentials_roundtrip(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     cert, key = signing_credentials(db, secrets, hierarchy.intermediate.id)
 
@@ -160,7 +160,7 @@ def test_signing_credentials_roundtrip(db: Session, secrets: SecretStore) -> Non
 
 
 def test_signing_credentials_roundtrip_ed25519(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin", key_type="ed25519")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate", key_type="ed25519")
 
     cert, key = signing_credentials(db, secrets, hierarchy.intermediate.id)
 
@@ -181,8 +181,8 @@ def test_signing_credentials_unknown_issuer_raises(db: Session, secrets: SecretS
 def test_second_hierarchy_can_be_created(db: Session, secrets: SecretStore) -> None:
     """The opposite of the pre-0017 test: a second hierarchy is ordinary
     operation now, not a conflict."""
-    first = create_hierarchy(db, secrets, "cabin-one")
-    second = create_hierarchy(db, secrets, "cabin-two")
+    first = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    second = create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
 
     assert first.root.id != second.root.id
     assert first.intermediate.id != second.intermediate.id
@@ -191,7 +191,7 @@ def test_second_hierarchy_can_be_created(db: Session, secrets: SecretStore) -> N
 
 
 def test_import_hierarchy_can_add_a_further_hierarchy(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "cabin-one")
+    create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
 
     root_cert, root_key = create_root("Other Root CA", "ecdsa-p256")
     intermediate_cert, intermediate_key = create_intermediate(
@@ -264,8 +264,8 @@ def test_signing_credentials_raises_when_no_ca(db: Session, secrets: SecretStore
 
 
 def test_list_cas_orders_by_id(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    h2 = create_hierarchy(db, secrets, "cabin-two")
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    h2 = create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
 
     rows = list_cas(db)
 
@@ -279,7 +279,7 @@ def test_list_cas_orders_by_id(db: Session, secrets: SecretStore) -> None:
 
 
 def test_list_cas_filters_by_status_and_kind(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
     # FR-4: the last active intermediate cannot be retired, so the
     # replacement must exist before the old one is retired (the rotation
     # order the spec's own user story describes).
@@ -294,7 +294,7 @@ def test_list_cas_filters_by_status_and_kind(db: Session, secrets: SecretStore) 
 def test_chain_for_walks_parent_id_nearest_first_root_last(
     db: Session, secrets: SecretStore
 ) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     chain = chain_for(db, hierarchy.intermediate.id)
 
@@ -302,7 +302,7 @@ def test_chain_for_walks_parent_id_nearest_first_root_last(
 
 
 def test_chain_for_root_has_no_ancestors(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     chain = chain_for(db, hierarchy.root.id)
 
@@ -315,8 +315,8 @@ def test_chain_for_unknown_id_raises(db: Session, secrets: SecretStore) -> None:
 
 
 def test_active_issuers_excludes_retired_and_roots(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    h2 = create_hierarchy(db, secrets, "cabin-two")
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    h2 = create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
     retire(db, h2.intermediate.id)
 
     ids = {row.id for row in active_issuers(db)}
@@ -332,7 +332,7 @@ def test_get_ca_unknown_id_raises(db: Session, secrets: SecretStore) -> None:
 
 
 def test_get_ca_returns_row_regardless_of_status(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
     # FR-4: the last active intermediate cannot be retired, so create the
     # replacement first (the rotation order the spec's own user story
     # describes).
@@ -351,7 +351,7 @@ def test_get_ca_returns_row_regardless_of_status(db: Session, secrets: SecretSto
 def test_create_intermediate_under_root_signs_with_parent_key(
     db: Session, secrets: SecretStore
 ) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin", root_years=20)
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate", root_years=20)
 
     second = create_intermediate_under(db, secrets, hierarchy.root.id, "cabin second", years=8)
 
@@ -366,7 +366,7 @@ def test_create_intermediate_under_root_signs_with_parent_key(
 
 
 def test_create_intermediate_under_rejects_non_root(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     with pytest.raises(ValueError, match="root"):
         create_intermediate_under(db, secrets, hierarchy.intermediate.id, "nope")
@@ -380,7 +380,7 @@ def test_create_intermediate_under_rejects_non_root(db: Session, secrets: Secret
 def test_create_intermediate_under_clamps_validity_to_root(
     db: Session, secrets: SecretStore
 ) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin", root_years=1)
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate", root_years=1)
     root_cert = x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii"))
 
     second = create_intermediate_under(db, secrets, hierarchy.root.id, "clamped", years=10)
@@ -404,8 +404,10 @@ def test_create_intermediate_under_imported_root_raises(db: Session, secrets: Se
 
 
 def test_retire_sets_status_and_is_idempotent(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    create_hierarchy(db, secrets, "cabin-two")  # keeps an active issuer elsewhere
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    create_hierarchy(
+        db, secrets, "cabin-two", "cabin-two Intermediate"
+    )  # keeps an active issuer elsewhere
 
     retire(db, h1.intermediate.id)
     assert get_ca(db, h1.intermediate.id).status == "retired"
@@ -415,7 +417,7 @@ def test_retire_sets_status_and_is_idempotent(db: Session, secrets: SecretStore)
 
 
 def test_retire_last_active_intermediate_refused(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     with pytest.raises(RetireError):
         retire(db, hierarchy.intermediate.id)
@@ -424,8 +426,8 @@ def test_retire_last_active_intermediate_refused(db: Session, secrets: SecretSto
 
 
 def test_retire_root_cascades_to_intermediates(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    create_hierarchy(db, secrets, "cabin-two")  # elsewhere active issuer
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")  # elsewhere active issuer
     second_under_root1 = create_intermediate_under(db, secrets, h1.root.id, "second")
 
     retire(db, h1.root.id)
@@ -438,7 +440,7 @@ def test_retire_root_cascades_to_intermediates(db: Session, secrets: SecretStore
 def test_retire_root_refused_when_it_would_leave_no_active_issuer(
     db: Session, secrets: SecretStore
 ) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     with pytest.raises(RetireError):
         retire(db, hierarchy.root.id)
@@ -450,8 +452,8 @@ def test_retire_root_refused_when_it_would_leave_no_active_issuer(
 def test_retire_root_allowed_when_another_hierarchy_stays_active(
     db: Session, secrets: SecretStore
 ) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    h2 = create_hierarchy(db, secrets, "cabin-two")
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    h2 = create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
 
     retire(db, h1.root.id)  # h2's intermediate is still active
 
@@ -464,7 +466,7 @@ def test_retire_root_allowed_when_another_hierarchy_stays_active(
 
 
 def test_renew_in_place_same_key_name_id_longer_validity(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin", root_years=1)
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate", root_years=1)
     before_cert = x509.load_pem_x509_certificate(hierarchy.root.cert_pem.encode("ascii"))
     before_ski = before_cert.extensions.get_extension_for_class(
         x509.SubjectKeyIdentifier
@@ -522,8 +524,8 @@ def test_renew_in_place_intermediate_under_imported_root_raises(
 
 
 def test_resolve_issuer_explicit_id(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    h2 = create_hierarchy(db, secrets, "cabin-two")
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    h2 = create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
 
     resolved = resolve_issuer(db, h2.intermediate.id)
 
@@ -532,15 +534,15 @@ def test_resolve_issuer_explicit_id(db: Session, secrets: SecretStore) -> None:
 
 
 def test_resolve_issuer_unknown_id_raises(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "cabin")
+    create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     with pytest.raises(UnknownIssuerError):
         resolve_issuer(db, 999_999)
 
 
 def test_resolve_issuer_retired_id_raises(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "cabin-one")
-    create_hierarchy(db, secrets, "cabin-two")
+    h1 = create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
     retire(db, h1.intermediate.id)
 
     with pytest.raises(IssuerRetiredError):
@@ -548,7 +550,7 @@ def test_resolve_issuer_retired_id_raises(db: Session, secrets: SecretStore) -> 
 
 
 def test_resolve_issuer_defaults_when_one_active(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "cabin")
+    hierarchy = create_hierarchy(db, secrets, "cabin", "cabin Intermediate")
 
     resolved = resolve_issuer(db, None)
 
@@ -556,8 +558,8 @@ def test_resolve_issuer_defaults_when_one_active(db: Session, secrets: SecretSto
 
 
 def test_resolve_issuer_requires_id_when_several_active(db: Session, secrets: SecretStore) -> None:
-    create_hierarchy(db, secrets, "cabin-one")
-    create_hierarchy(db, secrets, "cabin-two")
+    create_hierarchy(db, secrets, "cabin-one", "cabin-one Intermediate")
+    create_hierarchy(db, secrets, "cabin-two", "cabin-two Intermediate")
 
     with pytest.raises(IssuerRequiredError):
         resolve_issuer(db, None)

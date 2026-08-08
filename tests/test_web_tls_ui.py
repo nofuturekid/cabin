@@ -367,8 +367,8 @@ def test_ca_page_shows_cdp_and_aia_links_per_issuer(client: TestClient, cfg: Con
     db = _db(cfg)
     try:
         secrets = _secrets(cfg)
-        alpha = ca_service.create_hierarchy(db, secrets, "alpha")
-        beta = ca_service.create_hierarchy(db, secrets, "beta")
+        alpha = ca_service.create_hierarchy(db, secrets, "alpha", "alpha intermediate")
+        beta = ca_service.create_hierarchy(db, secrets, "beta", "beta intermediate")
         settings_mod.set_setting(db, settings_mod.BASE_URL, "https://ca.example.lan")
         alpha_crl = crl_service.distribution_url(db, alpha.intermediate.id)
         alpha_aia = crl_service.ca_issuers_url(db, alpha.intermediate.id)
@@ -403,7 +403,7 @@ def test_displayed_urls_match_issued_certificate(client: TestClient, cfg: Config
     db = _db(cfg)
     try:
         secrets = _secrets(cfg)
-        hierarchy = ca_service.create_hierarchy(db, secrets, "cabin")
+        hierarchy = ca_service.create_hierarchy(db, secrets, "cabin", "cabin intermediate")
         principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
         settings_mod.set_setting(db, settings_mod.BASE_URL, "https://ca.example.lan")
         issued = certs_service.issue_and_store(
@@ -436,7 +436,13 @@ def test_ca_page_urls_absent_without_base_url(client: TestClient, cfg: Config) -
     _setup_superadmin(client)
     db = _db(cfg)
     try:
-        hierarchy = ca_service.create_hierarchy(db, _secrets(cfg), "cabin")
+        # distinct root/intermediate names (spec 0024 no longer gives them
+        # one on its own): `_window`'s marker below needs the intermediate's
+        # name to be unique on the page, or it lands on the root's own
+        # heading instead.
+        hierarchy = ca_service.create_hierarchy(
+            db, _secrets(cfg), "cabin root", "cabin intermediate"
+        )
     finally:
         db.close()
 
@@ -462,7 +468,7 @@ def test_settings_issuer_select_rendered_only_with_tls(tmp_path: Path) -> None:
         _setup_superadmin(on_client)
         db = _db(on_cfg)
         try:
-            ca_service.create_hierarchy(db, _secrets(on_cfg), "cabin")
+            ca_service.create_hierarchy(db, _secrets(on_cfg), "cabin", "cabin intermediate")
         finally:
             db.close()
         on_html = on_client.get("/settings").text
@@ -471,7 +477,7 @@ def test_settings_issuer_select_rendered_only_with_tls(tmp_path: Path) -> None:
         _setup_superadmin(off_client)
         db = _db(off_cfg)
         try:
-            ca_service.create_hierarchy(db, _secrets(off_cfg), "cabin")
+            ca_service.create_hierarchy(db, _secrets(off_cfg), "cabin", "cabin intermediate")
         finally:
             db.close()
         off_html = off_client.get("/settings").text
@@ -490,8 +496,8 @@ def test_settings_shows_current_tls_issuer_binding(tmp_path: Path) -> None:
         db = _db(cfg)
         try:
             secrets = _secrets(cfg)
-            first = ca_service.create_hierarchy(db, secrets, "first")
-            second = ca_service.create_hierarchy(db, secrets, "second")
+            first = ca_service.create_hierarchy(db, secrets, "first", "first intermediate")
+            second = ca_service.create_hierarchy(db, secrets, "second", "second intermediate")
             settings_mod.set_setting(db, TLS_ISSUER_ID_KEY, str(second.intermediate.id))
         finally:
             db.close()
@@ -519,8 +525,8 @@ def test_settings_ambiguous_tls_issuer_binding_shown_explicitly(tmp_path: Path) 
         db = _db(cfg)
         try:
             secrets = _secrets(cfg)
-            first = ca_service.create_hierarchy(db, secrets, "first")
-            second = ca_service.create_hierarchy(db, secrets, "second")
+            first = ca_service.create_hierarchy(db, secrets, "first", "first intermediate")
+            second = ca_service.create_hierarchy(db, secrets, "second", "second intermediate")
         finally:
             db.close()
 
@@ -553,8 +559,8 @@ def test_settings_changing_tls_issuer_binding_persists_and_triggers_ensure_curre
         db = _db(cfg)
         try:
             secrets = _secrets(cfg)
-            first = ca_service.create_hierarchy(db, secrets, "first")
-            second = ca_service.create_hierarchy(db, secrets, "second")
+            first = ca_service.create_hierarchy(db, secrets, "first", "first intermediate")
+            second = ca_service.create_hierarchy(db, secrets, "second", "second intermediate")
         finally:
             db.close()
 
@@ -628,7 +634,7 @@ def test_dashboard_banner_ca_issued_links_root(tmp_path: Path) -> None:
         db = _db(cfg)
         try:
             secrets = _secrets(cfg)
-            hierarchy = ca_service.create_hierarchy(db, secrets, "cabin")
+            hierarchy = ca_service.create_hierarchy(db, secrets, "cabin", "cabin intermediate")
             _plant_system_certificate(db, hierarchy.intermediate)
         finally:
             db.close()

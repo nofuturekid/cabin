@@ -63,7 +63,10 @@ def issuer_id(client: TestClient, cfg: Config) -> int:
     db = create_session_factory(cfg.db_url)()
     try:
         hierarchy = ca_service.create_hierarchy(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            "cabin test",
+            "cabin test Intermediate",
         )
         return hierarchy.intermediate.id
     finally:
@@ -493,7 +496,10 @@ def test_finalize_never_uses_the_default_rule(acme: Acme, cfg: Config) -> None:
     db = db_session(cfg)
     try:
         second = ca_service.create_hierarchy(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "second"
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            "second",
+            "second Intermediate",
         )
         second_issuer_id = second.intermediate.id
     finally:
@@ -528,7 +534,10 @@ def test_finalize_leaves_no_certificate_when_the_ca_is_missing(acme: Acme, cfg: 
     db = db_session(cfg)
     try:
         ca_service.create_hierarchy(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "second"
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            "second",
+            "second Intermediate",
         )
         ca_service.retire(db, acme.issuer_id)
     finally:

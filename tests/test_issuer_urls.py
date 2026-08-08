@@ -90,7 +90,7 @@ def _configured(client: TestClient, cfg: Config) -> int:
     )
     db = _db(cfg)
     try:
-        hierarchy = ca_service.create_hierarchy(db, _secrets(cfg), "cabin")
+        hierarchy = ca_service.create_hierarchy(db, _secrets(cfg), "cabin", "cabin Intermediate")
         set_setting(db, BASE_URL, HTTPS_BASE_URL)
         set_setting(db, ACME_ENABLED, TRUE)
         set_setting(db, MCP_ENABLED, TRUE)

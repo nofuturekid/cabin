@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
@@ -64,17 +65,51 @@ def _superadmin(client: TestClient) -> None:
     )
 
 
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_ca(
     client: TestClient, cfg: Config, name: str = "cabin", intermediate_years: int = 10
 ) -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names (``name`` with
+    " Root CA"/" Intermediate CA" appended by *this test file*, not by
+    production) so this file's many name/window-based lookups below keep
+    telling the two rows apart.
+    """
     assert (
         client.post(
             "/ca/create",
             data={
-                "name": name,
+                "name": f"{name} Root CA",
                 "key_type": "ecdsa-p256",
                 "root_years": 20,
-                "intermediate_years": intermediate_years,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+    root_id = _last_root_id(cfg)
+    assert (
+        client.post(
+            f"/ca/{root_id}/intermediate",
+            data={
+                "name": f"{name} Intermediate CA",
+                "key_type": "ecdsa-p256",
+                "years": intermediate_years,
                 "csrf_token": _csrf(client, cfg),
             },
         ).status_code

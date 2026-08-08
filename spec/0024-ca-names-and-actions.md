@@ -90,6 +90,39 @@ the same sentence. After this spec it is the state of every instance
 between creating a root and adding its first intermediate, which is to say
 the state of every fresh instance.
 
+### The suffix was not merely cosmetic
+
+Dropping `" Root CA"`/`" Intermediate CA"` (FR-1) has a second consequence
+the User Stories above don't name: nothing stops an operator from typing
+the same label for a root and the intermediate created under it, and both
+are built as a single-CN subject the same way
+(`ca/x509.py:create_root`/`create_intermediate`), so that types a root and
+its own intermediate into carrying an **identical subject DN**:
+
+```
+root          subject=CN=Smuggle    issuer=CN=Smuggle
+intermediate  subject=CN=Smuggle    issuer=CN=Smuggle
+```
+
+Two tests that passed before this suffix came off went red, and both are
+real, not fixture artefacts: `tests/test_cross_signing.py`'s
+`test_smuggled_cross_certificate_fails_path_length_in_openssl` — which
+builds a cross certificate whose path length lets it smuggle in an
+out-of-subtree subtree, and relies on `openssl verify` refusing it — now
+finds `openssl verify` **accepting** the chain, because with the root and
+its intermediate sharing one subject DN, OpenSSL's path builder resolves
+the issuer for the smuggled certificate to the wrong one of the two
+identically-named certificates. `tests/test_name_constraints_doors.py`'s
+`test_openssl_rejects_a_smuggled_name` degrades the same way: it expects
+OpenSSL error 47 (`X509_V_ERR_PERMITTED_VIOLATION`, the name-constraint
+refusal being tested) and gets error 7 (a signature failure) instead, for
+the same reason — the wrong certificate was picked while building the
+path. In both cases this is exactly the failure mode a real relying party's
+validator would hit, not a fixture that happened to collide: an operator
+who names a root and its intermediate the same thing has built a hierarchy
+that degrades path validation for everyone who trusts it. FR-13 below
+closes it.
+
 ## User Stories
 
 - As an operator, the CA I create is called what I typed. If I type
@@ -338,6 +371,36 @@ the state of every fresh instance.
   list, `/ca/import`, the API, MCP and ACME are untouched except for the
   one shared message of FR-7.
 
+- FR-13: **An intermediate may not carry its own parent root's exact
+  subject.** `create_intermediate_under` (`service.py:533-588`) refuses
+  with `ValueError` when the subject it is about to build — the same
+  single-CN `x509.Name` `ca/x509.py:create_intermediate` builds from
+  `name` — has the same DER encoding as `root_id`'s own certificate's
+  subject. Compared as parsed subject DER, not as the `name` string against
+  `root.name`: the two happen to always agree under 0017's naming
+  invariant, but the collision that matters is between the encoded
+  subjects a validator actually compares, and comparing the DER is what
+  stays correct if that invariant ever stops holding. Not compared with
+  `_same_ca` (`service.py:591-607`) either — its public-key half can never
+  match a freshly generated intermediate key, which would make it a silent
+  no-op here; this check is deliberately subject-only.
+
+  The check lives in the service layer, not the route, for the same reason
+  spec 0018 made `issuer_id` a required parameter rather than a
+  route-level convention: a second caller of `create_intermediate_under` —
+  another route, a script, a future MCP tool — gets the refusal for free,
+  where a check bolted onto `POST /ca/{root_id}/intermediate` alone would
+  need to be remembered a second time and could be forgotten.
+
+  **This must never fire for cross-signing.** `cross_sign_root`
+  (`service.py:610-688`) and `import_cross` (`service.py:691-769`)
+  deliberately produce a `kind="cross"` row whose subject equals the root
+  it duplicates — that duplication is spec 0021's entire point (FR-1) and
+  is exactly what `ChainSet`/`chains_for` exist to serve as an alternate
+  path. Neither function calls `create_intermediate_under`; FR-13 only
+  reaches a `kind="intermediate"` row being created under its own
+  `parent_id`-to-be, never a cross row, so it cannot touch either path.
+
 ## Interface Contract
 
 ### Routes
@@ -386,10 +449,13 @@ def create_hierarchy(
   `create_intermediate_under(root.id, intermediate_name, ...)`, and
   returns `CAHierarchy(root, intermediate)`. It is a composition with no
   logic of its own.
-- `create_intermediate_under` keeps its signature; only the two
-  interpolations inside it change.
+- `create_intermediate_under` keeps its signature; the two interpolations
+  inside it change, and it gains the FR-13 subject-collision check, raising
+  `ValueError` when `name` would build the same subject as `root_id`'s own.
 - `import_hierarchy`, `import_cross`, `cross_sign_root`, `retire`,
   `renew_in_place`, `chains_for` and every other function are unchanged.
+  `import_cross` and `cross_sign_root` in particular: FR-13's check lives
+  only inside `create_intermediate_under`, which neither calls.
 - One module-level message for "no usable issuer", raised by
   `resolve_issuer` and imported by `issuer_grants.resolve_granted_issuer`,
   replacing the two duplicated string literals at `service.py:340` and
@@ -603,16 +669,31 @@ cross-signing is offered.
   raise or grant the root, which is not an issuer), or if the audit event
   keeps naming a row it did not write.
 
-- AC-15: **The fixtures name things the way production does.** For every
-  row `ca_fixtures.make_hierarchy` writes, `name` equals the name the
-  caller passed and equals the CN of that row's own certificate; and
-  `create_ca_via_http` followed by its intermediate request produces the
-  same two names a direct `create_hierarchy` call with those names
-  produces. Asserted over the fixture module itself, so the convention
-  cannot survive in the test world after leaving production.
-  _Goes red if_: `ca_fixtures.py` keeps its own copy of the suffixes,
-  which is otherwise invisible: every suite stays green while naming
-  everything differently.
+- AC-15: **The fixtures follow production's naming _rule_, not a literal
+  reading production has since made impossible.** This criterion was
+  written before FR-13 existed and, read literally, asks
+  `ca_fixtures.make_hierarchy` to give a root and its own intermediate the
+  same name -- exactly the subject collision FR-13 makes
+  `create_intermediate_under` refuse. The rule production actually follows
+  is narrower and still applies to the fixtures: a name is never decorated
+  and always equals the CN of that row's own certificate. Applied to a
+  hierarchy, where root and intermediate are two rows, that rule requires
+  two _distinguishable_ names, not one name worn twice.
+
+  `ca_fixtures.make_hierarchy` derives both from the single `name` its
+  callers pass -- the root keeps `name` verbatim, the intermediate is
+  `f"{name} Intermediate"` -- so that for every row it writes, `name`
+  equals the CN of that row's own certificate, and the root and its
+  intermediate never collide the way FR-13 forbids. `create_ca_via_http`
+  followed by its intermediate request produces the same two names a
+  direct `create_hierarchy` call with those two names produces. Asserted
+  over the fixture module itself, so the convention cannot survive in the
+  test world after leaving production.
+  _Goes red if_: `ca_fixtures.py` keeps its own copy of the old suffix
+  convention (invisible: every suite stays green while naming everything
+  differently), if `make_hierarchy`'s root and intermediate end up sharing
+  one name (the exact collision FR-13 refuses in production), or if `name`
+  disagrees with the CN of either row's own certificate.
 
 - AC-16: **Everything that was not this spec's subject still works.** The
   0004-0023 suite passes: every POST path, guard and CSRF rule is
@@ -630,6 +711,24 @@ cross-signing is offered.
   and no element's right edge extends past its container's. The section
   split multiplies the number of grid rows on the detail page, which is
   exactly the change that has broken this before.
+
+- AC-18: **The subject collision is refused, and cross-signing still
+  works.** Both halves belong in one test: a check that only proves
+  `create_intermediate_under` refuses the collision would equally pass an
+  implementation that (wrongly) blocks cross-signing too. `create_root` a
+  root named `"Smuggle"`, then call `create_intermediate_under` for that
+  root with `name="Smuggle"`: raises `ValueError`, and `active_issuers(db)`
+  for that root is still empty afterwards. The same call with
+  `name="Smuggle Issuing"` succeeds. Then, on a second root,
+  `cross_sign_root` (and, from an exported PEM, `import_cross`) still
+  succeeds when the resulting cross row's subject equals the root it
+  duplicates — which it always does, by spec 0021 FR-1 — proving FR-13 did
+  not turn into a blanket "no two rows may share a subject" rule.
+  _Goes red if_: the collision is not refused, if it is refused by
+  comparing `name` strings rather than parsed subjects and therefore misses
+  a case the string comparison can't see, or if the refusal (or a broader
+  one written to get AC-18's first half green) also raises for
+  `cross_sign_root`/`import_cross`.
 
 ## Test list
 
@@ -653,7 +752,9 @@ test_stylesheet_and_templates_agree_in_both_directions,
 test_tls_swaps_when_the_intermediate_appears,
 test_grant_and_audit_follow_the_intermediate,
 test_fixtures_name_rows_the_way_production_does,
-test_no_horizontal_overflow (0015, re-run)
+test_no_horizontal_overflow (0015, re-run),
+test_intermediate_matching_root_subject_is_refused_cross_signing_unaffected
+(AC-18)
 
 Existing tests that change, each named because each is load-bearing:
 
@@ -670,6 +771,14 @@ Existing tests that change, each named because each is load-bearing:
   `test_web_ca.py`, `test_ca_service.py`, `test_ca_multi.py`,
   `test_cross_signing.py` and `test_web_name_constraints.py` carry most of
   them.
+- **`tests/test_cross_signing.py`**'s
+  `test_smuggled_cross_certificate_fails_path_length_in_openssl` and
+  **`tests/test_name_constraints_doors.py`**'s
+  `test_openssl_rejects_a_smuggled_name` both call `create_hierarchy` with
+  the same string for `root_name` and `intermediate_name` (see "The suffix
+  was not merely cosmetic" above). FR-13 makes that call raise, so both
+  fixtures need a root name and an intermediate name that differ — a
+  one-line change to the two calls, not to what either test asserts.
 - **`test_web_ca_pages.py:459-490`**
   `test_intermediate_error_refills_the_form_and_opens_the_details` asserts
   `block.details_open is True` (0023 AC-3). The re-fill half stays; the

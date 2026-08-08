@@ -28,6 +28,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
@@ -96,14 +97,46 @@ def _create_user_as_superadmin(client: TestClient, cfg: Config, username: str, r
     assert resp.status_code == 303
 
 
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(ca_service.CACertificate)
+            .where(ca_service.CACertificate.kind == "root")
+            .order_by(ca_service.CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_ca(client: TestClient, cfg: Config, name: str = "cabin") -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names (``name`` with
+    " Root CA"/" Intermediate CA" appended by *this test file*, not by
+    production) so this file's many ``_by_name(cfg, "... Root CA")``-style
+    lookups keep finding exactly one row each.
+    """
     resp = client.post(
         "/ca/create",
         data={
-            "name": name,
+            "name": f"{name} Root CA",
             "key_type": "ecdsa-p256",
             "root_years": 20,
-            "intermediate_years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": f"{name} Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 10,
             "csrf_token": _csrf(client, cfg),
         },
     )
@@ -297,10 +330,10 @@ def test_ca_page_lists_hierarchies(client: TestClient, cfg: Config) -> None:
         db.close()
 
     beta_window = _row(
-        client.get(f"/ca/{beta_root.id}").text, "beta Intermediate CA", class_name="ca-row"
+        client.get(f"/ca/{beta_root.id}").text, "beta Intermediate CA", class_name="section"
     )
     alpha_window = _row(
-        client.get(f"/ca/{alpha_root.id}").text, "alpha Intermediate CA", class_name="ca-row"
+        client.get(f"/ca/{alpha_root.id}").text, "alpha Intermediate CA", class_name="section"
     )
     assert "retired" in beta_window.lower()
     assert "retired" not in alpha_window.lower()
@@ -393,15 +426,22 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     # scoped to the section this test measures.
     generated_window = _row(generated_html, "<h2>generated Root CA</h2>", class_name="section")
     imported_window = _row(imported_html, "<h2>Imported Root CA</h2>", class_name="section")
+    # spec 0024 FR-8: "Add intermediate" is its own headed section now, a
+    # sibling of the root's rather than nested inside it -- scoped to that
+    # section on its own, not to the root's.
+    generated_create_window = _row(generated_html, "Add intermediate", class_name="section")
 
     create_intermediate_url = f"/ca/{generated_root.id}/intermediate"
     renew_url = f"/ca/{generated_root.id}/renew"
-    assert create_intermediate_url in generated_window
+    assert create_intermediate_url in generated_create_window
     assert renew_url in generated_window
 
     blocked_create_url = f"/ca/{imported_root.id}/intermediate"
     blocked_renew_url = f"/ca/{imported_root.id}/renew"
-    assert blocked_create_url not in imported_window
+    # can_create_intermediate is False, so the whole section -- heading
+    # included -- is omitted rather than merely emptied.
+    assert "Add intermediate" not in imported_html
+    assert blocked_create_url not in imported_html
     assert blocked_renew_url not in imported_window
 
 
@@ -439,7 +479,7 @@ def test_root_path_length_bounds_rejected(client: TestClient, cfg: Config) -> No
         },
     )
     assert resp.status_code == 303
-    root = _by_name(cfg, "cabin Root CA")
+    root = _by_name(cfg, "cabin")
     cert = x509.load_pem_x509_certificate(root.cert_pem.encode("ascii"))
     bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
     assert bc.path_length == 1
@@ -653,30 +693,6 @@ def test_ca_create_invalid_years_rerenders_setup_with_error(
     assert _rows(cfg) == []
 
 
-def test_ca_create_intermediate_years_exceeds_root_rerenders_error(
-    client: TestClient, cfg: Config
-) -> None:
-    """An intermediate must never be requested to outlive its root."""
-    _setup_superadmin(client)
-    csrf = _csrf(client, cfg)
-
-    resp = client.post(
-        "/ca/create",
-        data={
-            "name": "cabin",
-            "key_type": "ecdsa-p256",
-            "root_years": 5,
-            "intermediate_years": 10,  # exceeds root_years
-            "csrf_token": csrf,
-        },
-    )
-    assert resp.status_code == 400
-    assert resp.headers["content-type"].startswith("text/html")
-    assert "intermediate_years" in resp.text
-
-    assert _rows(cfg) == []
-
-
 def test_ca_create_invalid_key_type_rerenders_setup_with_error(
     client: TestClient, cfg: Config
 ) -> None:
@@ -786,8 +802,8 @@ def _two_hierarchies(cfg: Config) -> tuple[int, int, int, int]:
     db = _db(cfg)
     try:
         secrets = _secrets(cfg)
-        alpha = ca_service.create_hierarchy(db, secrets, "alpha")
-        beta = ca_service.create_hierarchy(db, secrets, "beta")
+        alpha = ca_service.create_hierarchy(db, secrets, "alpha", "alpha intermediate")
+        beta = ca_service.create_hierarchy(db, secrets, "beta", "beta intermediate")
         return alpha.root.id, alpha.intermediate.id, beta.root.id, beta.intermediate.id
     finally:
         db.close()
@@ -809,7 +825,9 @@ def test_retire_bound_tls_issuer_is_refused(tls_client: TestClient, tls_cfg: Con
     _bind_tls_issuer(tls_cfg, intermediate_a)
     csrf = _csrf(tls_client, tls_cfg)
 
-    resp = tls_client.post(f"/ca/{intermediate_a}/retire", data={"csrf_token": csrf})
+    resp = tls_client.post(
+        f"/ca/{intermediate_a}/retire", data={"confirm": "on", "csrf_token": csrf}
+    )
 
     assert resp.status_code == 400, resp.text
     assert _status_of(tls_cfg, intermediate_a) == "active"
@@ -830,7 +848,7 @@ def test_retire_root_of_bound_tls_issuer_is_refused_via_cascade(
     _bind_tls_issuer(tls_cfg, intermediate_a)
     csrf = _csrf(tls_client, tls_cfg)
 
-    resp = tls_client.post(f"/ca/{root_a}/retire", data={"csrf_token": csrf})
+    resp = tls_client.post(f"/ca/{root_a}/retire", data={"confirm": "on", "csrf_token": csrf})
 
     assert resp.status_code == 400, resp.text
     assert _status_of(tls_cfg, root_a) == "active"
@@ -849,7 +867,7 @@ def test_retire_bound_tls_issuer_succeeds_when_tls_is_off(client: TestClient, cf
     _bind_tls_issuer(cfg, intermediate_a)
     csrf = _csrf(client, cfg)
 
-    resp = client.post(f"/ca/{intermediate_a}/retire", data={"csrf_token": csrf})
+    resp = client.post(f"/ca/{intermediate_a}/retire", data={"confirm": "on", "csrf_token": csrf})
 
     assert resp.status_code == 303, resp.text
     assert _status_of(cfg, intermediate_a) == "retired"
@@ -866,7 +884,9 @@ def test_retire_non_bound_issuer_succeeds_while_tls_is_on(
     _bind_tls_issuer(tls_cfg, intermediate_a)
     csrf = _csrf(tls_client, tls_cfg)
 
-    resp = tls_client.post(f"/ca/{intermediate_b}/retire", data={"csrf_token": csrf})
+    resp = tls_client.post(
+        f"/ca/{intermediate_b}/retire", data={"confirm": "on", "csrf_token": csrf}
+    )
 
     assert resp.status_code == 303, resp.text
     assert _status_of(tls_cfg, intermediate_b) == "retired"

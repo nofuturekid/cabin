@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cabin.api.models import IssueRequest, KeyType, StatusFilter
@@ -22,7 +23,7 @@ from cabin.app import create_app
 from cabin.ca.certs import STATUS_FILTERS, get_certificate
 from cabin.ca.crl import current_crl
 from cabin.ca.leaf import MAX_CN_LENGTH, MAX_DAYS, MAX_SANS, MIN_DAYS
-from cabin.ca.service import active_issuers, create_hierarchy, get_ca, retire
+from cabin.ca.service import CACertificate, active_issuers, create_hierarchy, get_ca, retire
 from cabin.ca.x509 import KEY_TYPES
 from cabin.config import Config
 from cabin.secrets import SecretStore
@@ -69,14 +70,46 @@ def _setup_superadmin(client: TestClient) -> None:
     )
 
 
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_ca(client: TestClient, cfg: Config) -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names --
+    ``create_intermediate_under`` refuses an intermediate whose subject
+    collides with its own root's (spec 0024 FR-13), and "cabin" reused for
+    both is exactly that collision.
+    """
     resp = client.post(
         "/ca/create",
         data={
-            "name": "cabin",
+            "name": "cabin Root CA",
             "key_type": "ecdsa-p256",
             "root_years": 20,
-            "intermediate_years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": "cabin Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 10,
             "csrf_token": _csrf(client, cfg),
         },
     )
@@ -241,14 +274,22 @@ def test_token_does_not_authenticate_ui(api: TestClient, cfg: Config) -> None:
 def test_api_get_ca(api: TestClient, cfg: Config) -> None:
     """AC-15/FR-15: one entry per ``ca_certificates`` row, not a
     ``{root, intermediate}`` pair -- so the shape still describes an
-    instance once a second hierarchy exists."""
+    instance once a second hierarchy exists.
+
+    Keyed by ``kind`` rather than ``name``: names are not guaranteed unique
+    across rows in general -- cross-signing gives a ``kind="cross"`` row the
+    same name as the root it duplicates (spec 0021 FR-1) -- so a dict keyed
+    by name would be fragile even though this fixture's own root and
+    intermediate happen to differ (spec 0024 FR-13)."""
     resp = api.get("/api/v1/ca", headers=_auth(_token(cfg, Role.viewer)))
     assert resp.status_code == 200
     body = resp.json()
-    issuers = {row["name"]: row for row in body["issuers"]}
-    assert issuers.keys() == {"cabin Root CA", "cabin Intermediate CA"}
-    root = issuers["cabin Root CA"]
-    intermediate = issuers["cabin Intermediate CA"]
+    issuers = {row["kind"]: row for row in body["issuers"]}
+    assert issuers.keys() == {"root", "intermediate"}
+    root = issuers["root"]
+    intermediate = issuers["intermediate"]
+    assert root["name"] == "cabin Root CA"
+    assert intermediate["name"] == "cabin Intermediate CA"
     assert root["kind"] == "root"
     assert root["parent_id"] is None
     assert root["status"] == "active"
@@ -283,7 +324,7 @@ def test_api_get_ca_reports_retired_status(api: TestClient, cfg: Config) -> None
 
     db = _db(cfg)
     try:
-        create_hierarchy(db, SecretStore.open(cfg.data_dir, None), "second")
+        create_hierarchy(db, SecretStore.open(cfg.data_dir, None), "second", "second Intermediate")
         retire(db, first_issuer_id)
     finally:
         db.close()
@@ -387,7 +428,9 @@ def test_api_chain_pem_comes_from_the_leafs_own_issuer(api: TestClient, cfg: Con
     db = _db(cfg)
     try:
         first_issuer_id = active_issuers(db)[0].id
-        second = create_hierarchy(db, SecretStore.open(cfg.data_dir, None), "second")
+        second = create_hierarchy(
+            db, SecretStore.open(cfg.data_dir, None), "second", "second Intermediate"
+        )
         second_issuer_id = second.intermediate.id
         secret, token = create_token(db, "admin-token", Role.admin)
         grant_fixtures.grant_token(db, token, first_issuer_id)
@@ -428,15 +471,24 @@ def test_api_capped_validity_reported_in_response(client: TestClient, cfg: Confi
     the issuer's own expiry, and ``validity_capped_from`` names what was
     actually requested."""
     _setup_superadmin(client)
-    csrf = _csrf(client, cfg)
     resp = client.post(
         "/ca/create",
         data={
-            "name": "cabin",
+            "name": "cabin Root CA",
             "key_type": "ecdsa-p256",
             "root_years": 5,
-            "intermediate_years": 1,
-            "csrf_token": csrf,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": "cabin Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 1,
+            "csrf_token": _csrf(client, cfg),
         },
     )
     assert resp.status_code == 303

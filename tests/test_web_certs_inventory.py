@@ -12,10 +12,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
 from cabin.ca.certs import get_certificate
+from cabin.ca.service import CACertificate
 from cabin.config import Config
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
@@ -56,14 +58,46 @@ def _setup_superadmin(client: TestClient) -> None:
     )
 
 
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_ca(client: TestClient, cfg: Config) -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names --
+    ``create_intermediate_under`` refuses an intermediate whose subject
+    collides with its own root's (spec 0024 FR-13), and "cabin" reused for
+    both is exactly that collision.
+    """
     resp = client.post(
         "/ca/create",
         data={
-            "name": "cabin",
+            "name": "cabin Root CA",
             "key_type": "ecdsa-p256",
             "root_years": 20,
-            "intermediate_years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": "cabin Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 10,
             "csrf_token": _csrf(client, cfg),
         },
     )

@@ -714,6 +714,12 @@ def test_migration_0010_downgrade_drops_both_tables(tmp_path: Path) -> None:
 
 
 def test_ca_create_grants_the_creator_and_not_the_root(client: TestClient, cfg: Config) -> None:
+    """Spec 0024 FR-5 moved the grant off ``POST /ca/create`` entirely (a
+    bare root is not an issuer, so it has nothing to grant) onto
+    ``POST /ca/{root_id}/intermediate`` -- the step that actually produces
+    one. Both requests are posted here so "not the root" still has a root
+    to prove itself against.
+    """
     _setup_superadmin(client)
     _create_user(client, cfg, "adam", "admin")
     _create_user(client, cfg, "beth", "admin")
@@ -725,7 +731,6 @@ def test_ca_create_grants_the_creator_and_not_the_root(client: TestClient, cfg: 
             "name": "lab",
             "key_type": "ecdsa-p256",
             "root_years": 20,
-            "intermediate_years": 10,
             "path_length": 1,
             "csrf_token": _csrf(client, cfg),
         },
@@ -734,9 +739,28 @@ def test_ca_create_grants_the_creator_and_not_the_root(client: TestClient, cfg: 
 
     db = _db(cfg)
     try:
+        root_id = next(r.id for r in ca_service.list_cas(db) if r.name == "lab")
+    finally:
+        db.close()
+
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": "lab Intermediate",
+            "key_type": "ecdsa-p256",
+            "years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+
+    db = _db(cfg)
+    try:
         rows = ca_service.list_cas(db)
-        root = next(r for r in rows if r.name == "lab Root CA")
-        intermediate = next(r for r in rows if r.name == "lab Intermediate CA")
+        root = next(r for r in rows if r.id == root_id)
+        intermediate = next(
+            r for r in rows if r.name == "lab Intermediate" and r.kind == "intermediate"
+        )
         adam_row = _user_by_name(db, "adam")
         beth_row = _user_by_name(db, "beth")
 
@@ -831,7 +855,7 @@ def test_ca_intermediate_grants_the_creator(client: TestClient, cfg: Config) -> 
     )
     db = _db(cfg)
     try:
-        root_id = next(r.id for r in ca_service.list_cas(db) if r.name == "root-only Root CA")
+        root_id = next(r.id for r in ca_service.list_cas(db) if r.name == "root-only")
     finally:
         db.close()
 
@@ -849,7 +873,7 @@ def test_ca_intermediate_grants_the_creator(client: TestClient, cfg: Config) -> 
 
     db = _db(cfg)
     try:
-        second = next(r for r in ca_service.list_cas(db) if r.name == "second Intermediate CA")
+        second = next(r for r in ca_service.list_cas(db) if r.name == "second")
         adam_row = _user_by_name(db, "adam")
         assert issuers_of(db, user_principal(adam_row)) == [second.id]
 
@@ -884,8 +908,24 @@ def test_superadmin_creator_keeps_its_hierarchy_after_demotion(
                 "name": "solo",
                 "key_type": "ecdsa-p256",
                 "root_years": 20,
-                "intermediate_years": 10,
                 "path_length": 1,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+    db = _db(cfg)
+    try:
+        root_id = next(r.id for r in ca_service.list_cas(db) if r.name == "solo")
+    finally:
+        db.close()
+    assert (
+        client.post(
+            f"/ca/{root_id}/intermediate",
+            data={
+                "name": "solo Intermediate",
+                "key_type": "ecdsa-p256",
+                "years": 10,
                 "csrf_token": _csrf(client, cfg),
             },
         ).status_code
@@ -895,7 +935,9 @@ def test_superadmin_creator_keeps_its_hierarchy_after_demotion(
     db = _db(cfg)
     try:
         intermediate_id = next(
-            r.id for r in ca_service.list_cas(db) if r.name == "solo Intermediate CA"
+            r.id
+            for r in ca_service.list_cas(db)
+            if r.name == "solo Intermediate" and r.kind == "intermediate"
         )
         alice_id = _user_by_name(db, "alice").id
     finally:

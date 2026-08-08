@@ -12,7 +12,7 @@
   </div>
 </div>
 
-{% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% if error %}<div class="error">{{ error }}{% if error_href %} <a href="{{ error_href }}">{{ error_href_text }}</a>{% endif %}</div>{% endif %}
 
 <div class="section">
   <div>

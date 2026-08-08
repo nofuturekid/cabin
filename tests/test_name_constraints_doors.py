@@ -166,9 +166,10 @@ def _setup(client: TestClient, cfg: Config) -> TwoIssuers:
             db,
             secrets,
             "alpha",
+            "alpha intermediate",
             constraints=leaf_mod.NameConstraintSpec(permitted_dns=("example.com",)),
         )
-        hierarchy_b = ca_service.create_hierarchy(db, secrets, "beta")
+        hierarchy_b = ca_service.create_hierarchy(db, secrets, "beta", "beta intermediate")
         secret, _row = create_token(db, "door-token", Role.superadmin)
     finally:
         db.close()
@@ -675,7 +676,7 @@ def test_tls_certificate_is_not_exempt_from_the_check(cfg: Config, tmp_path: Pat
     secrets = SecretStore.open(tmp_path, None)
     try:
         set_setting(db, BASE_URL, f"https://{hostname}")
-        open_hierarchy = ca_service.create_hierarchy(db, secrets, "open")
+        open_hierarchy = ca_service.create_hierarchy(db, secrets, "open", "open intermediate")
         set_setting(db, TLS_ISSUER_ID, str(open_hierarchy.intermediate.id))
 
         manager = TlsManager(tmp_path / "tls-data")
@@ -686,6 +687,7 @@ def test_tls_certificate_is_not_exempt_from_the_check(cfg: Config, tmp_path: Pat
             db,
             secrets,
             "blocked",
+            "blocked intermediate",
             constraints=leaf_mod.NameConstraintSpec(excluded_dns=(hostname,)),
         )
         set_setting(db, TLS_ISSUER_ID, str(blocked_hierarchy.intermediate.id))
@@ -724,6 +726,7 @@ def test_tls_certificate_is_not_exempt_from_the_check(cfg: Config, tmp_path: Pat
             db,
             secrets,
             "permitted",
+            "permitted intermediate",
             constraints=leaf_mod.NameConstraintSpec(permitted_dns=(hostname,)),
         )
         set_setting(db, TLS_ISSUER_ID, str(permitted_hierarchy.intermediate.id))
@@ -867,6 +870,7 @@ def test_openssl_agrees_on_excluded_subtree(
             db,
             secrets,
             "excl",
+            "excl intermediate",
             constraints=leaf_mod.NameConstraintSpec(
                 permitted_dns=("example.com",), excluded_dns=("secret.example.com",)
             ),

@@ -89,17 +89,26 @@ def make_hierarchy(
     against) rather than as the thing being tested. A test that asserts on
     ``create_hierarchy``'s own behaviour must keep calling it directly.
     """
-    root_cert, root_key = ca_x509.create_root(f"{name} Root CA", key_type, years=root_years)
+    # Distinct names for root and intermediate, derived from the single
+    # `name` a caller passes: production refuses an intermediate whose
+    # subject collides with its own parent root's (spec 0024 FR-13), and a
+    # fixture that gave both rows the same name would keep working here --
+    # this module writes rows directly through the ORM, bypassing that
+    # refusal -- while quietly training every caller onto a shape production
+    # forbids. `create_ca_via_http` below picks the same "{name} Intermediate"
+    # convention for the same reason.
+    intermediate_name = f"{name} Intermediate"
+    root_cert, root_key = ca_x509.create_root(name, key_type, years=root_years)
     intermediate_cert, intermediate_key = ca_x509.create_intermediate(
         root_cert,
         root_key,
-        f"{name} Intermediate CA",
+        intermediate_name,
         key_type,
         years=intermediate_years,
     )
     root_row = CACertificate(
         kind="root",
-        name=f"{name} Root CA",
+        name=name,
         status="active",
         cert_pem=_cert_pem(root_cert),
         key_sealed=secrets.seal(_key_pem(root_key)),
@@ -108,7 +117,7 @@ def make_hierarchy(
     db.flush()  # assigns root_row.id, needed for the intermediate's parent_id
     intermediate_row = CACertificate(
         kind="intermediate",
-        name=f"{name} Intermediate CA",
+        name=intermediate_name,
         parent_id=root_row.id,
         status="active",
         cert_pem=_cert_pem(intermediate_cert),
@@ -156,12 +165,21 @@ def create_ca_via_http(
     root_years: int = 20,
     intermediate_years: int = 10,
 ) -> None:
-    """``POST /ca/create`` with a fresh CSRF token, asserting success.
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate``, each with
+    a fresh CSRF token, asserting success on both (spec 0024 FR-3/FR-11: the
+    two steps that used to be one).
 
     Replacement for the 20 near-identical ``_create_ca`` helper bodies
     across the web/API test files. Needs a real session cookie (from
     ``client``) already established by first-run setup, exactly like the
-    helpers it replaces.
+    helpers it replaces. The root keeps ``name`` verbatim; the intermediate
+    is given a derived, distinct label (`` Intermediate``, appended here --
+    not by production) instead of reusing ``name`` outright, because
+    ``create_intermediate_under`` now refuses an intermediate whose subject
+    collides with its own root's (spec 0024 FR-13), and a root plus its
+    intermediate sharing one label is exactly that collision. Callers who
+    want the two names to differ some other way pass
+    :func:`_create_root`/:func:`_create_intermediate`-style calls directly.
     """
     resp = client.post(
         "/ca/create",
@@ -169,11 +187,39 @@ def create_ca_via_http(
             "name": name,
             "key_type": key_type,
             "root_years": root_years,
-            "intermediate_years": intermediate_years,
             "csrf_token": _csrf_token(client, cfg),
         },
     )
     assert resp.status_code == 303, resp.text
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": f"{name} Intermediate",
+            "key_type": key_type,
+            "years": intermediate_years,
+            "csrf_token": _csrf_token(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+
+def _last_root_id(cfg: Config) -> int:
+    """The id of the most recently created root row -- what
+    ``create_ca_via_http`` needs to reach the second, now-separate creation
+    step, since ``POST /ca/create`` redirects to ``/ca`` rather than to the
+    row it just made."""
+    db = create_session_factory(cfg.db_url)()
+    try:
+        row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
 
 
 def sole_active_issuer(db: Session, name: str = "stub") -> int:

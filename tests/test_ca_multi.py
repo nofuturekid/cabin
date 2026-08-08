@@ -126,8 +126,8 @@ def _imported_root(db: Session, name: str = "Imported") -> CACertificate:
 def test_two_hierarchies_verify_against_own_chain_only(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
-    h1 = create_hierarchy(db, secrets, "Alpha")
-    h2 = create_hierarchy(db, secrets, "Beta")
+    h1 = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
+    h2 = create_hierarchy(db, secrets, "Beta", "Beta Intermediate")
     principal = grant_fixtures.granted_admin(db, h1.intermediate.id, h2.intermediate.id)
 
     issued_a = issue_and_store(
@@ -164,8 +164,8 @@ def test_two_hierarchies_verify_against_own_chain_only(
 
 
 def test_issuer_required_with_multiple_active(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "Alpha")
-    h2 = create_hierarchy(db, secrets, "Beta")
+    h1 = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
+    h2 = create_hierarchy(db, secrets, "Beta", "Beta Intermediate")
     principal = grant_fixtures.granted_admin(db, h1.intermediate.id, h2.intermediate.id)
 
     with pytest.raises(IssuerRequiredError):
@@ -182,7 +182,7 @@ def test_issuer_required_with_multiple_active(db: Session, secrets: SecretStore)
 
 
 def test_issuer_defaulted_with_single_active(db: Session, secrets: SecretStore) -> None:
-    hierarchy = create_hierarchy(db, secrets, "Alpha")
+    hierarchy = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
     principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
 
     issued = issue_and_store(
@@ -200,8 +200,8 @@ def test_issuer_defaulted_with_single_active(db: Session, secrets: SecretStore) 
 def test_issuer_defaults_to_remaining_active_after_retiring_one_of_two(
     db: Session, secrets: SecretStore
 ) -> None:
-    h1 = create_hierarchy(db, secrets, "Alpha")
-    h2 = create_hierarchy(db, secrets, "Beta")
+    h1 = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
+    h2 = create_hierarchy(db, secrets, "Beta", "Beta Intermediate")
     principal = grant_fixtures.granted_admin(db, h1.intermediate.id, h2.intermediate.id)
     retire(db, h1.intermediate.id)
 
@@ -221,8 +221,8 @@ def test_issuer_defaults_to_remaining_active_after_retiring_one_of_two(
 
 
 def test_issue_with_retired_issuer_refused(db: Session, secrets: SecretStore) -> None:
-    h1 = create_hierarchy(db, secrets, "Alpha")
-    create_hierarchy(db, secrets, "Beta")  # keeps an active issuer elsewhere
+    h1 = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
+    create_hierarchy(db, secrets, "Beta", "Beta Intermediate")  # keeps an active issuer elsewhere
     principal = grant_fixtures.granted_admin(db, h1.intermediate.id)
     retire(db, h1.intermediate.id)
 
@@ -243,8 +243,8 @@ def test_issue_with_retired_issuer_refused(db: Session, secrets: SecretStore) ->
 def test_retired_issuer_still_serves_chain_and_crl(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
-    h1 = create_hierarchy(db, secrets, "Alpha")
-    create_hierarchy(db, secrets, "Beta")
+    h1 = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
+    create_hierarchy(db, secrets, "Beta", "Beta Intermediate")
     principal = grant_fixtures.granted_admin(db, h1.intermediate.id)
     issued = issue_and_store(
         db,
@@ -275,7 +275,7 @@ def test_retired_issuer_still_serves_chain_and_crl(
 
 
 def test_create_intermediate_under_root(db: Session, secrets: SecretStore, tmp_path: Path) -> None:
-    hierarchy = create_hierarchy(db, secrets, "Alpha")
+    hierarchy = create_hierarchy(db, secrets, "Alpha", "Alpha Intermediate")
 
     second = create_intermediate_under(db, secrets, hierarchy.root.id, "Alpha II", years=5)
 
@@ -295,7 +295,7 @@ def test_create_intermediate_under_imported_root_errors(db: Session, secrets: Se
 
 
 def test_rotation_leaves_old_certs_valid(db: Session, secrets: SecretStore, tmp_path: Path) -> None:
-    hierarchy = create_hierarchy(db, secrets, "Rotate")
+    hierarchy = create_hierarchy(db, secrets, "Rotate", "Rotate Intermediate")
     i1 = hierarchy.intermediate
     principal = grant_fixtures.granted_admin(db, i1.id)
 
@@ -339,7 +339,7 @@ def test_crl_per_issuer_partitions_revocations(
     """AC-4: revoking a certificate from I1 puts its serial in I1's CRL and
     not in I2's, asserted in both directions, plus the CRL issuer name is per
     issuer as read by the real ``openssl crl`` CLI."""
-    hierarchy = create_hierarchy(db, secrets, "Rotate")
+    hierarchy = create_hierarchy(db, secrets, "Rotate", "Rotate Intermediate")
     i1 = hierarchy.intermediate
     principal = grant_fixtures.granted_admin(db, i1.id)
     leaf_a = issue_and_store(
@@ -409,7 +409,7 @@ def test_crl_per_issuer_partitions_revocations(
 def test_certs_issued_before_renewal_verify_against_renewed_ca(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
-    hierarchy = create_hierarchy(db, secrets, "Renew", root_years=1)
+    hierarchy = create_hierarchy(db, secrets, "Renew", "Renew Intermediate", root_years=1)
     principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
     original_root_pem = hierarchy.root.cert_pem
     leaf = issue_and_store(

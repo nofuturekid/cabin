@@ -66,7 +66,10 @@ def issuer_id(client: TestClient, cfg: Config) -> int:
     db = db_session(cfg)
     try:
         hierarchy = ca_service.create_hierarchy(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin test"
+            db,
+            SecretStore.open(cfg.data_dir, cfg.master_passphrase),
+            "cabin test",
+            "cabin test Intermediate",
         )
         return hierarchy.intermediate.id
     finally:

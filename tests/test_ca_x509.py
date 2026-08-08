@@ -492,7 +492,7 @@ def test_no_aia_on_root_and_intermediate_certificates(db: Session, secrets: Secr
     )
     _no_aia(intermediate_cert)
 
-    hierarchy = create_hierarchy(db, secrets, "No AIA Hierarchy")
+    hierarchy = create_hierarchy(db, secrets, "No AIA Hierarchy", "No AIA Hierarchy Intermediate")
     rotated = create_intermediate_under(
         db, secrets, hierarchy.root.id, "No AIA Rotated Intermediate"
     )

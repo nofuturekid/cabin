@@ -32,6 +32,7 @@ from cabin.ca.service import (
     IssuerRequiredError,
     active_issuers,
     get_ca,
+    no_active_issuer_message,
     resolve_issuer,
 )
 from cabin.store import Base
@@ -249,7 +250,11 @@ def resolve_granted_issuer(
         raise IssuerRequiredError("more than one granted issuer exists; an issuer_id is required")
     if active_issuers(db):
         raise NoGrantedIssuerError("no granted active issuer; ask an operator for a grant")
-    raise CANotConfiguredError("no CA hierarchy has been created or imported yet")
+    # Spec 0024 FR-7: this used to carry its own copy of the "no CA
+    # hierarchy" string -- a duplicate this module's own docstring warns
+    # against for the join tables, one level up. no_active_issuer_message is
+    # the one place both this raise and resolve_issuer's agree.
+    raise CANotConfiguredError(no_active_issuer_message(db))
 
 
 @dataclass(frozen=True)

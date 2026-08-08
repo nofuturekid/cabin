@@ -147,8 +147,10 @@ def _seed_two_hierarchies(cfg: Config) -> tuple[int, int, int, int]:
     db = _db(cfg)
     try:
         secrets = _secrets(cfg)
-        alpha = ca_service.create_hierarchy(db, secrets, "alpha", path_length=2)
-        beta = ca_service.create_hierarchy(db, secrets, "beta")
+        alpha = ca_service.create_hierarchy(
+            db, secrets, "alpha", "alpha intermediate", path_length=2
+        )
+        beta = ca_service.create_hierarchy(db, secrets, "beta", "beta intermediate")
         return alpha.root.id, alpha.intermediate.id, beta.root.id, beta.intermediate.id
     finally:
         db.close()
@@ -231,9 +233,11 @@ def _form_actions(html: str) -> list[str | None]:
 
 class _FormBlock(HTMLParser):
     """The state of the `<form>` whose `action` equals `action`: its input
-    values by name, its textarea text by name, and whether the nearest
-    `<details>` ancestor (if any) carries the boolean `open` attribute --
-    the collapsed disclosure a re-filled form can hide inside (FR-8).
+    values by name and its textarea text by name (FR-8's re-fill on a
+    refused submission). Spec 0024 moved every create/add form out of a
+    collapsible `<details>` wrapper into its own open `.section`
+    (FR-10), so this no longer tracks disclosure state -- there is none
+    left to track.
     """
 
     def __init__(self, action: str) -> None:
@@ -242,20 +246,14 @@ class _FormBlock(HTMLParser):
         self.found_form = False
         self.input_values: dict[str, str | None] = {}
         self.textarea_values: dict[str, str] = {}
-        self.details_open: bool | None = None
-        self._details_stack: list[bool] = []
         self._in_form_depth = 0
         self._current_textarea: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = dict(attrs)
-        if tag == "details":
-            self._details_stack.append("open" in attrs_dict)
         if tag == "form" and attrs_dict.get("action") == self._action:
             self.found_form = True
             self._in_form_depth = 1
-            if self._details_stack:
-                self.details_open = self._details_stack[-1]
             return
         if self._in_form_depth > 0:
             if tag == "form":
@@ -278,8 +276,6 @@ class _FormBlock(HTMLParser):
             self._current_textarea = None
         if self._in_form_depth > 0 and tag == "form":
             self._in_form_depth -= 1
-        if tag == "details" and self._details_stack:
-            self._details_stack.pop()
 
 
 def _form_block(html: str, action: str) -> _FormBlock:
@@ -431,15 +427,20 @@ def test_ca_detail_shows_only_its_own_hierarchy(client: TestClient, cfg: Config)
 
     alpha_page = client.get(f"/ca/{alpha_root}")
     assert alpha_page.status_code == 200
-    assert "alpha Intermediate CA" in alpha_page.text
+    assert "alpha" in alpha_page.text
     assert alpha_root_fingerprint in alpha_page.text
-    assert "beta Intermediate CA" not in alpha_page.text
+    # spec 0024 FR-1: alpha and beta's rows are no longer distinguished by a
+    # " Intermediate CA" suffix (both hierarchies are literally named just
+    # "alpha"/"beta" now), so cross-hierarchy isolation is checked against
+    # beta's own fingerprint -- unambiguous, unlike a name that could now
+    # collide -- rather than a marker string that no longer exists.
+    assert beta_root_fingerprint not in alpha_page.text
 
     beta_page = client.get(f"/ca/{beta_root}")
     assert beta_page.status_code == 200
-    assert "beta Intermediate CA" in beta_page.text
+    assert "beta" in beta_page.text
     assert beta_root_fingerprint in beta_page.text
-    assert "alpha Intermediate CA" not in beta_page.text
+    assert alpha_root_fingerprint not in beta_page.text
 
 
 def test_ca_detail_404_for_a_non_root_id(client: TestClient, cfg: Config) -> None:
@@ -453,12 +454,15 @@ def test_ca_detail_404_for_a_non_root_id(client: TestClient, cfg: Config) -> Non
     assert client.get("/ca/999999").status_code == 404
 
 
-# === AC-3/FR-8: a refused intermediate keeps what was typed, visibly =======
+# === FR-8: a refused intermediate keeps what was typed, visibly ============
 
 
-def test_intermediate_error_refills_the_form_and_opens_the_details(
-    client: TestClient, cfg: Config
-) -> None:
+def test_intermediate_error_refills_the_form(client: TestClient, cfg: Config) -> None:
+    """The defect FR-8 guards against: a refused submission must not lose
+    what the operator typed. Spec 0024 moved this form out of a collapsible
+    `<details>` into its own open `.section` (FR-10), so there is no longer
+    a wrapper to assert `open` on -- only the re-fill itself, which is what
+    this test was written for."""
     _setup_superadmin(client)
     alpha_root, _alpha_int, _beta_root, _beta_int = _seed_two_hierarchies(cfg)
 
@@ -481,12 +485,12 @@ def test_intermediate_error_refills_the_form_and_opens_the_details(
     assert block.found_form is True, "the refused form is gone -- not re-rendered at all"
     assert block.input_values.get("name") == "edge"
     assert block.input_values.get("years") == "7"
-    assert block.textarea_values.get("permitted_names") == "not a name constraint!!"
-    assert block.textarea_values.get("excluded_names") == "shadow.example.com"
-    assert block.details_open is True, (
-        "the <details> wrapping the refilled form must carry `open`, or the "
-        "operator is looking at an error about fields that appear to be gone"
-    )
+    # A leading "\n" is HTML boilerplate right after <textarea> (the
+    # template writes the Jinja expression on its own line so browsers,
+    # which swallow exactly one leading newline there, never show a blank
+    # first row); html.parser does not swallow it, so strip it here too.
+    assert block.textarea_values.get("permitted_names", "").strip() == "not a name constraint!!"
+    assert block.textarea_values.get("excluded_names", "").strip() == "shadow.example.com"
 
     error_block = _row(html, "not a valid name-constraint entry", class_name="error", tag=None)
     assert "not a valid name-constraint entry" in error_block
@@ -616,7 +620,7 @@ def test_viewer_reads_the_detail_page_and_sees_no_form(client: TestClient, cfg: 
     _login(client, "vera", "whatever12345")
     viewer_page = client.get(f"/ca/{alpha_root}")
     assert viewer_page.status_code == 200
-    assert "alpha Intermediate CA" in viewer_page.text
+    assert "alpha" in viewer_page.text
     expected_crl_url = f"http://ca.example.org/crl/{alpha_int}"
     assert f'href="{expected_crl_url}"' in viewer_page.text  # readable, not gated
     assert _form_actions(viewer_page.text) == ["/logout"]

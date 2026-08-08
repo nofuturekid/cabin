@@ -16,6 +16,7 @@ this identity is not granted for is refused before anything is written.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
 from urllib.parse import urlencode
@@ -79,6 +80,15 @@ from cabin.web.deps import (
 router = APIRouter(prefix="/certs")
 
 _NO_CA = "no CA yet: create or import one under CA before issuing certificates"
+#: Spec 0024 FR-7: the middle case, between "nothing exists" and "something
+#: exists but I'm not granted it" -- a CA hierarchy exists but carries no
+#: active intermediate yet, the normal state right after ``POST /ca/create``
+#: and before its own ``POST .../intermediate``. Kept distinct from
+#: ``_NO_CA``, which sends an operator to *create* a hierarchy they are
+#: already looking at.
+_NO_ACTIVE_ISSUER = (
+    "this CA hierarchy has no active issuer yet: add an intermediate under its own page"
+)
 #: Spec 0018 FR-4/FR-11: the other reason the selector can be empty -- a CA
 #: exists and is active, but this identity holds no grant on any of them.
 #: Kept distinct from ``_NO_CA``, which sends an operator off to build a
@@ -116,11 +126,34 @@ def _issuer_options(db: Session, principal: Principal) -> list[CACertificate]:
     return granted_issuers(db, principal)
 
 
-def _no_issuer_message(db: Session) -> str:
-    """Which of the two reasons an empty issuer list has (spec 0018 FR-4):
-    no CA exists at all, or one does and this identity simply is not granted
-    any of it."""
-    return _NO_CA if not ca_service.active_issuers(db) else _NO_GRANT
+@dataclass(frozen=True)
+class _NoIssuer:
+    """What the empty-issuer-list message says, and where it sends an
+    operator to fix it (spec 0024 FR-7, AC-7): ``href``/``link_text`` are
+    both ``None`` for ``_NO_GRANT``, which points at asking a superadmin,
+    not at a page this operator can act on alone.
+    """
+
+    message: str
+    href: str | None
+    link_text: str | None
+
+
+def _no_issuer_message(db: Session) -> _NoIssuer:
+    """Which of the three reasons an empty issuer list has (spec 0018 FR-4,
+    spec 0024 FR-7): no ``ca_certificates`` row exists at all, one exists
+    but carries no active intermediate, or one does and this identity simply
+    is not granted any of it. The first two differ in more than wording --
+    each points at a different place to fix it, ``/ca/new`` versus that
+    hierarchy's own detail page -- which is what AC-7 tells apart.
+    """
+    if not ca_service.list_cas(db):
+        return _NoIssuer(_NO_CA, "/ca/new", "Create a CA")
+    if not ca_service.active_issuers(db):
+        roots = ca_service.list_cas(db, kind="root")
+        href = f"/ca/{roots[0].id}" if roots else None
+        return _NoIssuer(_NO_ACTIVE_ISSUER, href, "Add an intermediate")
+    return _NoIssuer(_NO_GRANT, None, None)
 
 
 def _form_page(
@@ -132,6 +165,8 @@ def _form_page(
     issuers: Sequence[CACertificate] = (),
     values: dict[str, object] | None = None,
     status_code: int = 200,
+    error_href: str | None = None,
+    error_href_text: str | None = None,
 ) -> Response:
     """The two ways to get a certificate are separate pages (spec 0015 FR-10)
     but ask for the same things, so they share one context.
@@ -139,11 +174,19 @@ def _form_page(
     ``values`` carries back whatever the operator typed on a rejected POST
     (spec 0017 AC-2): losing it on a 400 would be its own bug, so every
     error path re-renders the form with the submitted values intact.
+
+    ``error_href``/``error_href_text`` (spec 0024 FR-7, AC-7): the empty-
+    issuer message names a place to fix it -- ``/ca/new`` or a specific
+    hierarchy's own page -- and the two states must differ by more than
+    wording for AC-7 to hold, so the link rides alongside ``error`` rather
+    than being folded into that string, which stays plain autoescaped text.
     """
     context = base_context(request, user)
     context.update(
         {
             "error": error,
+            "error_href": error_href,
+            "error_href_text": error_href_text,
             "profiles": list(Profile),
             "key_types": list(KEY_TYPES),
             "default_days": DEFAULT_DAYS,
@@ -167,6 +210,8 @@ def _new_page(
     issuers: Sequence[CACertificate] = (),
     values: dict[str, object] | None = None,
     status_code: int = 200,
+    error_href: str | None = None,
+    error_href_text: str | None = None,
 ) -> Response:
     return _form_page(
         request,
@@ -176,6 +221,8 @@ def _new_page(
         issuers=issuers,
         values=values,
         status_code=status_code,
+        error_href=error_href,
+        error_href_text=error_href_text,
     )
 
 
@@ -187,6 +234,8 @@ def _sign_page(
     issuers: Sequence[CACertificate] = (),
     values: dict[str, object] | None = None,
     status_code: int = 200,
+    error_href: str | None = None,
+    error_href_text: str | None = None,
 ) -> Response:
     return _form_page(
         request,
@@ -196,6 +245,8 @@ def _sign_page(
         issuers=issuers,
         values=values,
         status_code=status_code,
+        error_href=error_href,
+        error_href_text=error_href_text,
     )
 
 
@@ -275,8 +326,15 @@ def certs_new(
     user: User = Depends(require_admin),
 ) -> Response:
     issuers = _issuer_options(db, user_principal(user))
-    error = None if issuers else _no_issuer_message(db)
-    return _new_page(request, user, error, issuers=issuers)
+    no_issuer = None if issuers else _no_issuer_message(db)
+    return _new_page(
+        request,
+        user,
+        no_issuer.message if no_issuer else None,
+        issuers=issuers,
+        error_href=no_issuer.href if no_issuer else None,
+        error_href_text=no_issuer.link_text if no_issuer else None,
+    )
 
 
 @router.get("/sign")
@@ -286,8 +344,15 @@ def certs_sign_form(
     user: User = Depends(require_admin),
 ) -> Response:
     issuers = _issuer_options(db, user_principal(user))
-    error = None if issuers else _no_issuer_message(db)
-    return _sign_page(request, user, error, issuers=issuers)
+    no_issuer = None if issuers else _no_issuer_message(db)
+    return _sign_page(
+        request,
+        user,
+        no_issuer.message if no_issuer else None,
+        issuers=issuers,
+        error_href=no_issuer.href if no_issuer else None,
+        error_href_text=no_issuer.link_text if no_issuer else None,
+    )
 
 
 #: spec 0017 FR-7: the result page names both the requested and the granted
@@ -354,7 +419,17 @@ def certs_issue(
     except IssueError as exc:
         return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     except CANotConfiguredError:
-        return _new_page(request, user, _NO_CA, issuers=issuers, values=values, status_code=400)
+        no_issuer = _no_issuer_message(db)
+        return _new_page(
+            request,
+            user,
+            no_issuer.message,
+            issuers=issuers,
+            values=values,
+            status_code=400,
+            error_href=no_issuer.href,
+            error_href_text=no_issuer.link_text,
+        )
     except _GRANT_ERRORS as exc:
         return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
     except _ISSUER_ERRORS as exc:
@@ -417,7 +492,17 @@ def certs_sign(
     except IssueError as exc:
         return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
     except CANotConfiguredError:
-        return _sign_page(request, user, _NO_CA, issuers=issuers, values=values, status_code=400)
+        no_issuer = _no_issuer_message(db)
+        return _sign_page(
+            request,
+            user,
+            no_issuer.message,
+            issuers=issuers,
+            values=values,
+            status_code=400,
+            error_href=no_issuer.href,
+            error_href_text=no_issuer.link_text,
+        )
     except _GRANT_ERRORS as exc:
         return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
     except _ISSUER_ERRORS as exc:
@@ -538,7 +623,11 @@ def cert_revoke(
             db, request.app.state.secrets, cert_id, parsed, principal=user_principal(user)
         )
     except CANotConfiguredError:
-        return _detail_page(request, user, row, _NO_CA, status_code=400)
+        # Spec 0024 FR-7: the same three-way distinction certs_new/certs_sign
+        # make, though this page's own `_detail_page` carries no link -- a
+        # revoke that hits this is already deep in a specific certificate's
+        # page, not the issuer-selection form the link is for.
+        return _detail_page(request, user, row, _no_issuer_message(db).message, status_code=400)
     except IssuerForbiddenError as exc:
         return _detail_page(request, user, row, str(exc), status_code=403)
     if not was_revoked:

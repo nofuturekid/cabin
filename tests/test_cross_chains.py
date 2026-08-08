@@ -134,8 +134,8 @@ def _setup(client: TestClient, cfg: Config, base: str = "http://testserver") -> 
 
         set_setting(db, BASE_URL, base)
         set_setting(db, ACME_ENABLED, TRUE)
-        old = ca_service.create_hierarchy(db, secrets, "old", path_length=2)
-        new = ca_service.create_hierarchy(db, secrets, "new")
+        old = ca_service.create_hierarchy(db, secrets, "old", "old intermediate", path_length=2)
+        new = ca_service.create_hierarchy(db, secrets, "new", "new intermediate")
         cross = ca_service.cross_sign_root(db, secrets, new.root.id, old.root.id)
         secret, _row = create_token(db, "door-token", Role.superadmin)
         root_a, root_b, intermediate_id, cross_id = (
@@ -399,7 +399,9 @@ def test_only_one_cross_hop_is_followed(client: TestClient, cfg: Config) -> None
     db = _db(cfg)
     secrets = _secrets(cfg)
     try:
-        oldest = ca_service.create_hierarchy(db, secrets, "oldest", path_length=2)
+        oldest = ca_service.create_hierarchy(
+            db, secrets, "oldest", "oldest intermediate", path_length=2
+        )
         # oldest cross-signs A -- a second hop above A, which chains_for(I)
         # must not follow.
         ca_service.cross_sign_root(db, secrets, scenario.root_a, oldest.root.id)
@@ -419,7 +421,9 @@ def test_two_cross_certificates_default_to_the_lowest_id(client: TestClient, cfg
     db = _db(cfg)
     secrets = _secrets(cfg)
     try:
-        another_signer = ca_service.create_hierarchy(db, secrets, "another", path_length=2)
+        another_signer = ca_service.create_hierarchy(
+            db, secrets, "another", "another intermediate", path_length=2
+        )
         second_cross = ca_service.cross_sign_root(
             db, secrets, scenario.root_b, another_signer.root.id
         )
@@ -734,7 +738,9 @@ def test_acme_order_certificate_field_is_unchanged(client: TestClient, cfg: Conf
 
 def test_retire_cross_certificate_serves_the_short_chain(client: TestClient, cfg: Config) -> None:
     scenario = _setup(client, cfg)
-    resp = client.post(f"/ca/{scenario.cross}/retire", data={"csrf_token": _csrf(client, cfg)})
+    resp = client.post(
+        f"/ca/{scenario.cross}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
     assert resp.status_code == 303, resp.text
 
     chain = _door_download_chain(client, scenario)
@@ -745,7 +751,9 @@ def test_retiring_the_signing_root_retires_the_cross_certificate(
     client: TestClient, cfg: Config
 ) -> None:
     scenario = _setup(client, cfg)
-    resp = client.post(f"/ca/{scenario.root_a}/retire", data={"csrf_token": _csrf(client, cfg)})
+    resp = client.post(
+        f"/ca/{scenario.root_a}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
     assert resp.status_code == 303, resp.text
 
     chain = _door_download_chain(client, scenario)
@@ -756,7 +764,9 @@ def test_retiring_the_subject_root_leaves_the_long_chain_served(
     client: TestClient, cfg: Config
 ) -> None:
     scenario = _setup(client, cfg)
-    resp = client.post(f"/ca/{scenario.root_b}/retire", data={"csrf_token": _csrf(client, cfg)})
+    resp = client.post(
+        f"/ca/{scenario.root_b}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
     assert resp.status_code == 303, resp.text
 
     chain = _door_download_chain(client, scenario)
@@ -945,14 +955,17 @@ def test_ca_page_marks_an_expired_cross_certificate_as_not_served(
     page = client.get(f"/ca/{row_b.id}").text
     cross_row = _row(cfg, scenario.cross)
     # The cross row's name equals its subject root's own name (0017's
-    # naming rule) and even recurs within the cross row's own markup (once
-    # bold next to the "cross" tag, again in the fingerprint line), so a
-    # plain index() would land on the wrong occurrence. The "cross" tag
-    # immediately after the bold name is what only the cross row's own
-    # ``ca-row`` block has -- scoped by parsing the actual tag nesting
-    # rather than a fixed character count past that marker.
+    # naming rule), so its own <h2> heading recurs verbatim as the root's
+    # own section heading too (spec 0024 FR-8 gave every action its own
+    # headed .section) -- a plain index() on the name alone would land on
+    # the wrong occurrence. The "cross" tag on the line right after the
+    # heading is what only the cross row's own section has -- scoped by
+    # parsing the actual tag nesting rather than a fixed character count
+    # past that marker.
     block = _dom_row(
-        page, f'<b>{cross_row.name}</b> <span class="tag">cross</span>', class_name="ca-row"
+        page,
+        f'<h2>{cross_row.name}</h2>\n    <p><span class="tag">cross</span>',
+        class_name="section",
     )
     assert "not served" in block
 
@@ -975,11 +988,15 @@ def test_dashboard_warns_a_year_before_a_cross_certificate_expires(
     page = client.get("/").text
     cross_row = _row(cfg, scenario.cross)
     assert "tag-warn" in page
-    # see the /ca test above for why the *last* occurrence is the cross
-    # row's own entry, not its subject root's (same name, spec 0017).
-    marker_index = page.rindex(cross_row.name)
-    window = page[marker_index : marker_index + 400]
-    assert "tag-warn" in window
+    # The dashboard's CA table has no per-row class to scope on (spec
+    # 0016's plain <tr>), so the row itself -- not a fixed character count
+    # past a marker -- is what is checked: every <tr> naming the cross
+    # row's name (see the /ca test above for why that name recurs), the
+    # *last* of which is the cross row's own entry, not its subject root's
+    # (list_cas orders by id, and the cross row is created after both).
+    rows = re.findall(rf"<tr>\s*<th>{re.escape(cross_row.name)}</th>.*?</tr>", page, re.DOTALL)
+    assert rows, f"no dashboard row found for {cross_row.name!r}"
+    assert "tag-warn" in rows[-1]
 
 
 # --- AC-17: the REST surface reports a cross row ---------------------------------

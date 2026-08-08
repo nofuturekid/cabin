@@ -132,7 +132,7 @@ def _spki_der(cert_or_key: x509.Certificate | CertificatePublicKeyTypes) -> byte
 def _root_row(
     db: Session, secrets: SecretStore, name: str, *, path_length: int = 1
 ) -> CACertificate:
-    hierarchy = create_hierarchy(db, secrets, name, path_length=path_length)
+    hierarchy = create_hierarchy(db, secrets, name, f"{name} intermediate", path_length=path_length)
     return hierarchy.root
 
 
@@ -441,8 +441,8 @@ def test_forged_cross_certificate_fails_direct_verification(
 @_openssl
 def test_openssl_builds_the_long_path(db: Session, secrets: SecretStore, tmp_path: Path) -> None:
     """AC-2 step 2: A alone in ``-CAfile``, X and I in ``-untrusted``."""
-    a = create_hierarchy(db, secrets, "alpha", path_length=2)
-    b = create_hierarchy(db, secrets, "beta")
+    a = create_hierarchy(db, secrets, "alpha", "alpha intermediate", path_length=2)
+    b = create_hierarchy(db, secrets, "beta", "beta intermediate")
     a_cert = x509.load_pem_x509_certificate(a.root.cert_pem.encode("ascii"))
     a_key = ca_service.signing_credentials(db, secrets, a.root.id)[1]
     b_cert = x509.load_pem_x509_certificate(b.root.cert_pem.encode("ascii"))
@@ -460,8 +460,8 @@ def test_openssl_fails_without_the_cross_certificate(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
     """AC-2 step 3: proves step 2 went *through* the cross certificate."""
-    a = create_hierarchy(db, secrets, "alpha", path_length=2)
-    b = create_hierarchy(db, secrets, "beta")
+    a = create_hierarchy(db, secrets, "alpha", "alpha intermediate", path_length=2)
+    b = create_hierarchy(db, secrets, "beta", "beta intermediate")
     leaf = _issue_leaf(db, secrets, b.intermediate.id)
 
     proc = _openssl_verify(
@@ -478,8 +478,8 @@ def test_openssl_fails_with_a_forged_cross_certificate(
     db: Session, secrets: SecretStore, tmp_path: Path
 ) -> None:
     """AC-2 step 4."""
-    a = create_hierarchy(db, secrets, "alpha", path_length=2)
-    b = create_hierarchy(db, secrets, "beta")
+    a = create_hierarchy(db, secrets, "alpha", "alpha intermediate", path_length=2)
+    b = create_hierarchy(db, secrets, "beta", "beta intermediate")
     a_cert = x509.load_pem_x509_certificate(a.root.cert_pem.encode("ascii"))
     b_cert = x509.load_pem_x509_certificate(b.root.cert_pem.encode("ascii"))
     leaf = _issue_leaf(db, secrets, b.intermediate.id)
@@ -518,7 +518,7 @@ def test_openssl_passes_a_forged_cross_certificate_in_cafile(
     for that convenient invocation without knowing it proves nothing about
     the anchor's own signature.
     """
-    b = create_hierarchy(db, secrets, "beta")
+    b = create_hierarchy(db, secrets, "beta", "beta intermediate")
     b_cert = x509.load_pem_x509_certificate(b.root.cert_pem.encode("ascii"))
     leaf = _issue_leaf(db, secrets, b.intermediate.id)
     unrelated_key = ec.generate_private_key(ec.SECP256R1())
@@ -593,8 +593,8 @@ def test_smuggled_cross_certificate_fails_path_length_in_openssl(
     """AC-4: a cross certificate built by calling ``cross_sign`` directly --
     bypassing the service-layer check -- is accepted by neither cabin's own
     check (previous test) nor a real validator."""
-    a1 = create_hierarchy(db, secrets, "alpha1", path_length=1)
-    b = create_hierarchy(db, secrets, "beta")
+    a1 = create_hierarchy(db, secrets, "alpha1", "alpha1 intermediate", path_length=1)
+    b = create_hierarchy(db, secrets, "beta", "beta intermediate")
     a1_cert = x509.load_pem_x509_certificate(a1.root.cert_pem.encode("ascii"))
     a1_key = ca_service.signing_credentials(db, secrets, a1.root.id)[1]
     b_cert = x509.load_pem_x509_certificate(b.root.cert_pem.encode("ascii"))
@@ -630,7 +630,7 @@ def test_cross_sign_root_writes_expected_row(db: Session, secrets: SecretStore) 
 
 def test_cross_sign_root_refuses_non_root_subject(db: Session, secrets: SecretStore) -> None:
     signer, _subject = _two_roots(db, secrets)
-    intermediate = create_hierarchy(db, secrets, "gamma").intermediate
+    intermediate = create_hierarchy(db, secrets, "gamma", "gamma intermediate").intermediate
     before = _row_count(db)
 
     with pytest.raises(ValueError, match="root"):
@@ -1350,7 +1350,7 @@ def test_renew_imported_root_still_refuses(db: Session, secrets: SecretStore) ->
 def test_renew_intermediate_is_unchanged(db: Session, secrets: SecretStore) -> None:
     """Sanity check for the guard move: an ordinary intermediate renews
     exactly as it did before this spec."""
-    hierarchy = create_hierarchy(db, secrets, "gamma")
+    hierarchy = create_hierarchy(db, secrets, "gamma", "gamma intermediate")
     before = x509.load_pem_x509_certificate(hierarchy.intermediate.cert_pem.encode("ascii"))
 
     renewed = renew_in_place(db, secrets, hierarchy.intermediate.id, 5)

@@ -179,7 +179,32 @@ def _populate(client: TestClient, cfg: Config) -> str:
                 "name": "Acme Corporation Internal Issuing Authority",
                 "key_type": "ecdsa-p256",
                 "root_years": 20,
-                "intermediate_years": 10,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+    db: Session = create_session_factory(cfg.db_url)()
+    try:
+        root_row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert root_row is not None, "no root row exists"
+        root_id = root_row.id
+    finally:
+        db.close()
+    assert (
+        client.post(
+            f"/ca/{root_id}/intermediate",
+            data={
+                # Distinct from the root's own name: create_intermediate_under
+                # refuses an intermediate whose subject collides with its
+                # parent root's (spec 0024 FR-13).
+                "name": "Acme Corporation Internal Issuing Authority Intermediate",
+                "key_type": "ecdsa-p256",
+                "years": 10,
                 "csrf_token": _csrf(client, cfg),
             },
         ).status_code

@@ -332,12 +332,33 @@ def resolve_issuer(db: Session, issuer_id: int | None) -> CACertificate:
         return issuers[0]
     if len(issuers) > 1:
         raise IssuerRequiredError("more than one active issuer exists; an issuer_id is required")
-    # Deliberately worded about a hierarchy, not an issuer: retire() refuses
-    # to leave zero active issuers (FR-4), so the only way to land here with
-    # no explicit issuer_id is that no CA was ever created or imported. An
-    # "issuer" framing would describe a state that cannot exist on its own,
-    # and would tell a first-time operator nothing about what to do next.
-    raise CANotConfiguredError("no CA hierarchy has been created or imported yet")
+    # Spec 0024 FR-7: this used to be argued safe because retire() refuses to
+    # leave zero active issuers anywhere (FR-4), so "no explicit issuer_id
+    # and none active" could only mean nothing was ever created or imported.
+    # That argument broke the moment root creation stopped also creating an
+    # intermediate (FR-3): a bare root is now the ordinary state of every
+    # fresh instance, not a corner retire() rules out. no_active_issuer_message
+    # tells the two states apart instead of describing both with one sentence.
+    raise CANotConfiguredError(no_active_issuer_message(db))
+
+
+def no_active_issuer_message(db: Session) -> str:
+    """FR-7: the one place the "no usable issuer" sentence is written down,
+    imported by :func:`cabin.issuer_grants.resolve_granted_issuer` for its
+    own equivalent raise -- the path the API, MCP and ACME finalize actually
+    take -- so the two call sites cannot drift back into two copies of one
+    string the way they had before this spec.
+
+    Distinguishes an instance with no ``ca_certificates`` row at all (still
+    "no CA hierarchy has been created or imported yet") from one whose rows
+    exist but include no active intermediate: a bare root with nothing
+    signing under it yet, which after FR-3 is the normal state between
+    creating a root and adding its first intermediate, not a state worth
+    telling an operator "no CA" about when they are looking straight at one.
+    """
+    if not list_cas(db):
+        return "no CA hierarchy has been created or imported yet"
+    return "this CA hierarchy has no active issuer yet; add an intermediate under its own page"
 
 
 def signing_credentials(
@@ -357,79 +378,96 @@ def signing_credentials(
     return cert, key
 
 
-def create_hierarchy(
+def create_root(
     db: Session,
     secrets: SecretStore,
     name: str,
+    key_type: str = "ecdsa-p256",
+    years: int = 20,
+    path_length: int = 1,
+) -> CACertificate:
+    """Generate a fresh, self-signed root and store it -- the root half of
+    what :func:`create_hierarchy` used to do in one step (spec 0024
+    FR-3/FR-6). One row, sealing its private key before insert (never
+    plaintext in the DB).
+
+    ``name`` is used verbatim, both as the subject CN handed to
+    :func:`cabin.ca.x509.create_root` and as the stored ``name`` (FR-1): no
+    suffix is composed here or anywhere else, which is what keeps 0017's
+    naming rule -- ``name`` always equals the CN of that row's own
+    certificate -- true on this write path too. Callers own the name check
+    (FR-2, ``web/ca_ui.py:_name_error``) and the stripping it does the same
+    way :func:`create_intermediate_under` already leaves ``path_length``
+    unbounded for its own caller to police (below).
+
+    ``path_length`` (spec 0017 FR-13) is forwarded to
+    :func:`cabin.ca.x509.create_root` as-is -- this layer does not bound it,
+    the create form does (AC-11).
+    """
+    root_cert, root_key = ca_x509.create_root(name, key_type, years=years, path_length=path_length)
+    root_row = CACertificate(
+        kind="root",
+        name=name,
+        status="active",
+        cert_pem=_cert_pem(root_cert),
+        key_sealed=secrets.seal(_key_pem(root_key)),
+    )
+    db.add(root_row)
+    db.commit()
+    return root_row
+
+
+def create_hierarchy(
+    db: Session,
+    secrets: SecretStore,
+    root_name: str,
+    intermediate_name: str,
     key_type: str = "ecdsa-p256",
     root_years: int = 20,
     intermediate_years: int = 10,
     path_length: int = 1,
     constraints: leaf.NameConstraintSpec | None = None,
 ) -> CAHierarchy:
-    """Generate a fresh root+intermediate hierarchy and store both rows,
-    sealing both private keys before insert (never plaintext in the DB).
+    """Generate a fresh root+intermediate hierarchy in one call: exactly
+    :func:`create_root` followed by :func:`create_intermediate_under`, with
+    no logic of its own (spec 0024 FR-6).
 
-    Adds a *further* hierarchy alongside whatever already exists
-    (spec 0017 FR-2): the pre-0017 "only one CA ever" guard, and the
-    IntegrityError backstop that assumed any constraint violation here
-    meant that guard raced, are both gone. That backstop was already wrong
-    the moment a second NOT NULL constraint (``name``) existed on the same
-    table -- it would have reported "a CA already exists" for what was
-    actually a missing column, which is exactly the bug this spec fixes
-    first.
+    **It survives deliberately, and this docstring says so, so nobody later
+    removes it as dead weight.** ``POST /ca/create`` stopped calling it the
+    moment root creation and intermediate creation became separate HTTP
+    steps (FR-3) -- it has no production caller left. It keeps 194 call
+    sites across 32 test files green, including
+    ``tests/ca_fixtures.py:make_hierarchy``, which is the same composition
+    written a second time for tests that need a signing CA to exist and are
+    not testing hierarchy creation itself. Collapsing every one of those
+    onto two separate calls would spread this spec's cost over every suite
+    that merely needs a CA, instead of the ten HTTP helpers (FR-11) that
+    actually test the split. A test helper that builds a fixture is a
+    legitimate caller; a function used only by tests is not automatically
+    dead.
 
-    ``path_length`` (spec 0017 FR-13) is forwarded to
-    :func:`cabin.ca.x509.create_root` as-is -- this layer does not bound it,
-    the create form does (AC-11). It is not in the spec's own
-    interface-contract table for this function, which otherwise pins the
-    signature unchanged from before 0017; added because this is the only
-    function that ever builds a root during hierarchy creation, so FR-13's
-    form field has no other way to reach ``create_root``, and
-    ``web/ca_ui.py`` already calls this with the keyword.
+    Takes **two** names, ``root_name`` and ``intermediate_name``, because
+    there is no longer a rule (FR-1) by which one name could produce two
+    subjects -- the pre-0024 version composed both from a single ``name``
+    with an appended suffix, which is exactly what this spec removes.
 
     ``constraints`` (spec 0020 FR-1) applies to the **intermediate only**:
     the root, built here too, never takes one -- a root does not sign
     leaves in cabin, so a constraint on it would only ever be evaluated by
-    somebody else's validator. ``None`` and an empty spec both mean "no
-    constraints" (``leaf.name_constraints_extension`` is where that
-    collapsing happens); either way the intermediate carries no
-    ``NameConstraints`` extension at all, exactly as it did before this
-    spec.
+    somebody else's validator.
     """
-    root_cert, root_key = ca_x509.create_root(
-        f"{name} Root CA", key_type, years=root_years, path_length=path_length
+    root_row = create_root(
+        db, secrets, root_name, key_type, years=root_years, path_length=path_length
     )
-    intermediate_cert, intermediate_key = ca_x509.create_intermediate(
-        root_cert,
-        root_key,
-        f"{name} Intermediate CA",
-        key_type,
+    intermediate_row = create_intermediate_under(
+        db,
+        secrets,
+        root_row.id,
+        intermediate_name,
+        key_type=key_type,
         years=intermediate_years,
-        name_constraints=leaf.name_constraints_extension(
-            constraints if constraints is not None else leaf.NameConstraintSpec()
-        ),
+        constraints=constraints,
     )
-
-    root_row = CACertificate(
-        kind="root",
-        name=f"{name} Root CA",
-        status="active",
-        cert_pem=_cert_pem(root_cert),
-        key_sealed=secrets.seal(_key_pem(root_key)),
-    )
-    db.add(root_row)
-    db.flush()  # assigns root_row.id, needed for the intermediate's parent_id
-    intermediate_row = CACertificate(
-        kind="intermediate",
-        name=f"{name} Intermediate CA",
-        parent_id=root_row.id,
-        status="active",
-        cert_pem=_cert_pem(intermediate_cert),
-        key_sealed=secrets.seal(_key_pem(intermediate_key)),
-    )
-    db.add(intermediate_row)
-    db.commit()
     return CAHierarchy(root=root_row, intermediate=intermediate_row)
 
 
@@ -518,6 +556,16 @@ def create_intermediate_under(
     ``constraints`` (spec 0020 FR-1): the only other way to add a further
     intermediate, so it gets the same parameter ``create_hierarchy`` does,
     forwarded the same way.
+
+    Also raises ``ValueError`` when ``name`` would produce the same subject
+    DN as ``root_id``'s own (spec 0024's "Also"): dropping the composed
+    suffixes made that reachable by typing the root's name again, and two
+    certificates with one subject DN in the same chain is not a cosmetic
+    duplicate -- a validator's path builder cannot tell them apart. This is
+    the one place that check can live: both the parent row and the
+    requested name are already in hand here, and every caller -- the route
+    and any future one -- goes through this function to get an
+    intermediate signed.
     """
     root = get_ca(db, root_id)
     if root.kind != "root":
@@ -525,12 +573,44 @@ def create_intermediate_under(
     if root.key_sealed is None:
         raise CANotConfiguredError(f"root {root_id}'s private key is not available")
     root_cert = x509.load_pem_x509_certificate(root.cert_pem.encode("utf-8"))
+
+    # Spec 0024 dropped the " Root CA"/" Intermediate CA" suffixes cabin used
+    # to compose subjects with (FR-1); nothing stops an operator from typing
+    # the SAME name for a root and the intermediate created under it, and
+    # both are built as a single-CN subject the same way (ca/x509.py's
+    # create_root/create_intermediate), so that produces two certificates in
+    # one chain with an IDENTICAL subject DN. A validator's path builder
+    # matches issuer to subject by name, and cannot tell those two apart:
+    # tests/test_cross_signing.py::test_smuggled_cross_certificate_fails_path_length_in_openssl
+    # and tests/test_name_constraints_doors.py::test_openssl_rejects_a_smuggled_name
+    # both went from refusing a bad chain to openssl silently picking the
+    # wrong one of the two once a fixture collided this way, which is what
+    # this refusal exists to make impossible again. Compared as parsed
+    # subject DER, exactly like the candidate certificate's own subject would
+    # be encoded (a plain x509.Name([NameAttribute(CN, name)])) -- not by
+    # comparing to ``_same_ca`` below, whose public-key half a freshly
+    # generated intermediate key can never match, which would make that
+    # check a silent no-op here. Not by comparing to ``root.name`` as a
+    # string either, for the same reason ``_same_ca``'s docstring gives for
+    # avoiding that: a name is a display label, and the collision that
+    # matters is between the encoded subjects two validators actually
+    # compare, not between two Python strings that happen to hold it.
+    candidate_subject = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, name)])
+    if candidate_subject.public_bytes() == root_cert.subject.public_bytes():
+        raise ValueError(
+            f"name {name!r} is the same as root {root_id}'s own name; an "
+            "intermediate cannot carry its parent root's exact subject, "
+            "because a certificate validator building a path cannot tell "
+            "the two apart by subject alone and may pick the wrong one -- "
+            "choose a name that differs from the root's"
+        )
+
     root_key = _unseal_signing_key(secrets, root.key_sealed)
 
     intermediate_cert, intermediate_key = ca_x509.create_intermediate(
         root_cert,
         root_key,
-        f"{name} Intermediate CA",
+        name,
         key_type,
         years=years,
         name_constraints=leaf.name_constraints_extension(
@@ -539,7 +619,7 @@ def create_intermediate_under(
     )
     row = CACertificate(
         kind="intermediate",
-        name=f"{name} Intermediate CA",
+        name=name,
         parent_id=root_id,
         status="active",
         cert_pem=_cert_pem(intermediate_cert),

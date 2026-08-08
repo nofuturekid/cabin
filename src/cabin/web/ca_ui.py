@@ -23,7 +23,6 @@ from cabin.ca import x509 as ca_x509
 from cabin.ca.leaf import NameConstraintError, NameConstraintSpec
 from cabin.ca.service import (
     CACertificate,
-    CAHierarchy,
     CANotConfiguredError,
     CrossSignError,
     RetireError,
@@ -53,6 +52,40 @@ _MAX_YEARS = 50
 #: bound is a sanity cap, not an X.509 invariant.
 _MIN_PATH_LENGTH = 1
 _MAX_PATH_LENGTH = 4
+#: FR-2: not cabin's own policy -- what `x509.NameAttribute` enforces on
+#: `NameOID.COMMON_NAME` (cryptography 49.0.0), measured as UTF-8 bytes, not
+#: characters.
+_MAX_NAME_BYTES = 64
+
+
+def _name_error(name: str) -> str | None:
+    """FR-2: refuses what `create_root`/`create_intermediate_under` would
+    otherwise hand straight to `cryptography`'s `NameAttribute`, so its own
+    sentence -- "Attribute's length must be >= 1 and <= 64, but it was 0" --
+    never reaches an operator as if cabin had written it.
+
+    Takes ``name`` already stripped: the caller strips once and reuses that
+    same stripped value both for this check and for what is actually signed
+    and stored (AC-3), so the two can never disagree the way "validated
+    unstripped, stored stripped" would.
+
+    The bound is bytes, not characters: `NameAttribute` measures the value's
+    UTF-8 encoding, so 64 U+00E4 characters (128 bytes) would be refused by
+    cryptography where 64 ASCII characters (64 bytes) would not -- counting
+    characters here would silently disagree with what is actually enforced
+    one layer down.
+    """
+    if not name:
+        return "name must not be empty"
+    if len(name.encode("utf-8")) > _MAX_NAME_BYTES:
+        return f"name must be at most {_MAX_NAME_BYTES} bytes long (UTF-8 encoded)"
+    return None
+
+
+#: FR-9: the same pattern `certs_ui._CONFIRM_REVOKE` already sets for a
+#: dangerous action's confirm checkbox -- refused before the row is touched
+#: rather than assumed ticked.
+_CONFIRM_RETIRE = "tick the confirmation box: retiring cannot be undone from here"
 
 
 def _cert_info(row: CACertificate) -> dict[str, object]:
@@ -96,16 +129,14 @@ def _year_bounds_error(value: int, field: str) -> str | None:
     return None
 
 
-def _years_error(root_years: int, intermediate_years: int) -> str | None:
-    return (
-        _year_bounds_error(root_years, "root_years")
-        or _year_bounds_error(intermediate_years, "intermediate_years")
-        or (
-            "intermediate_years must not exceed root_years"
-            if intermediate_years > root_years
-            else None
-        )
-    )
+def _years_error(root_years: int) -> str | None:
+    """FR-3: used to also compare `intermediate_years` against `root_years`;
+    that comparison went with the second field the moment a create stopped
+    asking for one. Kept as a named wrapper -- rather than inlined at its one
+    call site -- because the Interface Contract pins its name across this
+    spec as "loses its `intermediate_years` argument", not "is removed".
+    """
+    return _year_bounds_error(root_years, "root_years")
 
 
 def _path_length_error(path_length: int) -> str | None:
@@ -120,10 +151,14 @@ def _key_type_error(key_type: str) -> str | None:
     return None
 
 
-def _subject(hierarchy: CAHierarchy) -> str:
-    """The signing CA's subject, read back off the stored certificate -- what
-    an audit entry has to name, since "the CA" is otherwise anonymous."""
-    return str(_cert_info(hierarchy.intermediate)["subject"])
+def _subject(row: CACertificate) -> str:
+    """``row``'s own subject, read back off its stored certificate -- what an
+    audit entry has to name, since "the CA" is otherwise anonymous. Takes the
+    row whose subject is meant (FR-4: a root for a root create, an
+    intermediate for an intermediate create) rather than a `CAHierarchy`,
+    since after FR-3 a create only ever produces one row at a time.
+    """
+    return str(_cert_info(row)["subject"])
 
 
 def _tls_self_signed(request: Request) -> bool:
@@ -375,22 +410,21 @@ def _detail_page(
     error: str | None,
     *,
     values: dict[str, object] | None = None,
-    open_form: str | None = None,
     status_code: int = 200,
 ) -> Response:
-    """The one renderer for ``ca_detail.html``, used by the GET and by the
-    three POSTs that re-render it (create-intermediate, cross-sign). Loads
-    every row, not just ``root``'s group, for the reason ``_group``'s
-    docstring gives. ``open_form`` is ``"intermediate"``, ``"cross-sign"``
-    or ``None`` and decides which `<details>` carries `open` -- a re-filled
-    form inside a collapsed disclosure is a form nobody can see (FR-8).
+    """The one renderer for ``ca_detail.html``, used by the GET and by every
+    POST that re-renders it (create-intermediate, cross-sign, retire without
+    its confirmation). Loads every row, not just ``root``'s group, for the
+    reason ``_group``'s docstring gives.
+
+    No longer takes ``open_form`` (FR-8): every action is its own `<details>`-
+    free `.section` now, so there is nothing left to open.
     """
     rows = ca_service.list_cas(db)
     context = base_context(request, user)
     context["error"] = error
     context["group"] = _group(db, rows, root, acme_enabled=get_flag(db, ACME_ENABLED))
     context["values"] = values or {}
-    context["open_form"] = open_form
     return templates.TemplateResponse(request, "ca_detail.html", context, status_code=status_code)
 
 
@@ -465,74 +499,73 @@ def ca_detail(
 @router.post("/create")
 def ca_create(
     request: Request,
-    name: str = Form(...),
+    # `Form(...)` treats an empty submitted value as *missing* rather than
+    # present-and-invalid, which is a 422 FastAPI answers before `_name_error`
+    # ever runs (verified against a bare FastAPI app) -- an explicit default
+    # is what lets `name=""` reach the validator at all (FR-2, AC-2).
+    name: str = Form(""),
     key_type: str = Form("ecdsa-p256"),
     root_years: int = Form(20),
-    intermediate_years: int = Form(10),
     path_length: int = Form(1),
-    permitted_names: str = Form(""),
-    excluded_names: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
+    """FR-3: creates a root and nothing else -- the intermediate, if any, is
+    a separate decision made on the root's own page
+    (``ca_create_intermediate`` below), which is also where the grant now
+    lives (FR-5): it has nothing to act on here, since a bare root is not an
+    issuer.
+
+    ``name`` is stripped once (FR-2) and the stripped value is what
+    `_name_error` checks and what is signed and stored -- never the raw
+    submission, which could carry the leading/trailing space AC-3 exists to
+    catch.
+    """
+    stripped_name = name.strip()
     form_error = (
-        _key_type_error(key_type)
-        or _years_error(root_years, intermediate_years)
+        _name_error(stripped_name)
+        or _key_type_error(key_type)
+        or _years_error(root_years)
         or _path_length_error(path_length)
     )
-    constraints, constraints_error = _constraints_form_error(permitted_names, excluded_names)
-    if form_error is None:
-        form_error = constraints_error
     if form_error is not None:
         return _new_page(request, user, form_error, status_code=400)
-    assert constraints is not None  # form_error is None only when parsing succeeded
-    hierarchy = ca_service.create_hierarchy(
+    root = ca_service.create_root(
         db,
         request.app.state.secrets,
-        name,
+        stripped_name,
         key_type=key_type,
-        root_years=root_years,
-        intermediate_years=intermediate_years,
+        years=root_years,
         path_length=path_length,
-        constraints=constraints,
     )
-    # Spec 0018 FR-8: whoever creates a hierarchy is granted it immediately --
-    # written even for a superadmin, so a later demotion does not take the
-    # hierarchy they built away from them.
-    grant(db, user_principal(user), hierarchy.intermediate.id)
-    # FR-10: read back off the certificate that was actually produced, not
-    # echoed from the form -- so the log matches what was signed even if a
-    # future bug in the writer drifted from what was typed.
-    produced = x509.load_pem_x509_certificate(hierarchy.intermediate.cert_pem.encode("utf-8"))
-    permitted, excluded = _canonical_entries(leaf.constraints_of(produced))
     audit.record(
         db,
         actor,
         AuditAction.ca_created,
-        summary=f"created CA hierarchy {name!r}",
+        summary=f"created CA root {stripped_name!r}",
         target_type="ca_certificate",
-        target_id=hierarchy.intermediate.id,
+        target_id=root.id,
         detail={
-            "name": name,
+            "name": stripped_name,
             "key_type": key_type,
             "root_years": root_years,
-            "intermediate_years": intermediate_years,
             "path_length": path_length,
-            "subject": _subject(hierarchy),
-            "granted_to": user.id,
-            "permitted": permitted,
-            "excluded": excluded,
+            "subject": _subject(root),
         },
         ip=client_ip(request, db),
     )
-    # Spec 0022 FR-6: a freshly created CA can now sign cabin's own
-    # certificate, so the swap is offered the chance to happen immediately
-    # rather than waiting for the hourly check. A failure here is logged and
-    # audited by `ensure_current` itself and never turned into a 5xx -- the
-    # CA *was* created, and losing that outcome over a certificate swap
-    # would be the worse error.
+    # Spec 0022 FR-6: a root alone has no active issuer, so this can only
+    # ever bootstrap or keep a *self-signed* certificate (`resolve_tls_issuer`
+    # finds nothing to swap to yet) -- the actual swap away from it happens
+    # in `ca_create_intermediate` below, the step that produces one (FR-5).
+    # Still called here so a fresh instance with TLS on has *something*
+    # loaded the moment its first root exists, rather than nothing until the
+    # hourly check runs. A failure here is logged and audited by
+    # `ensure_current` itself and never turned into a 5xx -- the root *was*
+    # created, and losing that outcome over a certificate swap would be the
+    # worse error.
     tls_manager = request.app.state.tls
     if tls_manager is not None:
         tls_manager.ensure_current(db, request.app.state.secrets)
@@ -564,7 +597,7 @@ def ca_import(
         return _import_page(request, user, str(exc), status_code=400)
     # The subject only -- neither the submitted key nor its passphrase has any
     # business in a log (spec 0004 FR-3).
-    subject = _subject(hierarchy)
+    subject = _subject(hierarchy.intermediate)
     # Spec 0018 FR-8: same as ca_create above -- the importer is granted the
     # new intermediate immediately.
     grant(db, user_principal(user), hierarchy.intermediate.id)
@@ -590,7 +623,10 @@ def ca_import(
 def ca_create_intermediate(
     root_id: int,
     request: Request,
-    name: str = Form(...),
+    # `Form(...)` treats an empty submitted value as *missing* (see
+    # `ca_create`'s own comment) -- an explicit default is what lets
+    # `name=""` reach `_name_error` as a 400 instead of FastAPI's own 422.
+    name: str = Form(""),
     key_type: str = Form("ecdsa-p256"),
     years: int = Form(10),
     permitted_names: str = Form(""),
@@ -601,11 +637,14 @@ def ca_create_intermediate(
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
     """FR-8: every refusal re-renders ``root_id``'s own detail page at 400,
-    the form re-filled from what was submitted (``values``) with its
-    `<details>` forced open -- the defect this spec exists to fix, in place
-    of the bare ``HTTPException`` this route used to raise on every one of
+    the form re-filled from what was submitted (``values``) -- in place of
+    the bare ``HTTPException`` this route used to raise on every one of
     them. ``UnknownIssuerError`` stays a 404: no page can be rendered for a
     root that does not exist.
+
+    FR-5: the grant and cabin's own TLS hook move here from ``ca_create``,
+    since this is now the route that actually produces an issuer -- a bare
+    root has nothing for either to act on.
     """
     try:
         root = ca_service.get_ca(db, root_id)
@@ -618,28 +657,24 @@ def ca_create_intermediate(
         "permitted_names": permitted_names,
         "excluded_names": excluded_names,
     }
-    form_error = _key_type_error(key_type) or _year_bounds_error(years, "years")
+    stripped_name = name.strip()
+    form_error = (
+        _name_error(stripped_name)
+        or _key_type_error(key_type)
+        or _year_bounds_error(years, "years")
+    )
     constraints, constraints_error = _constraints_form_error(permitted_names, excluded_names)
     if form_error is None:
         form_error = constraints_error
     if form_error is not None:
-        return _detail_page(
-            request,
-            db,
-            user,
-            root,
-            form_error,
-            values=values,
-            open_form="intermediate",
-            status_code=400,
-        )
+        return _detail_page(request, db, user, root, form_error, values=values, status_code=400)
     assert constraints is not None  # form_error is None only when parsing succeeded
     try:
         row = ca_service.create_intermediate_under(
             db,
             request.app.state.secrets,
             root_id,
-            name,
+            stripped_name,
             key_type=key_type,
             years=years,
             constraints=constraints,
@@ -647,18 +682,11 @@ def ca_create_intermediate(
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (CANotConfiguredError, ValueError) as exc:
-        return _detail_page(
-            request,
-            db,
-            user,
-            root,
-            str(exc),
-            values=values,
-            open_form="intermediate",
-            status_code=400,
-        )
-    # Spec 0018 FR-8: same as ca_create above -- the creator is granted the
-    # new intermediate immediately.
+        return _detail_page(request, db, user, root, str(exc), values=values, status_code=400)
+    # Spec 0018 FR-8: whoever creates the intermediate is granted it
+    # immediately -- written even for a superadmin, so a later demotion does
+    # not take it away from them. Spec 0024 FR-5: the only call site on this
+    # path now, a root-only create has nothing to grant.
     grant(db, user_principal(user), row.id)
     # FR-10: read back off the certificate that was actually produced.
     produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
@@ -671,7 +699,7 @@ def ca_create_intermediate(
         target_type="ca_certificate",
         target_id=row.id,
         detail={
-            "name": name,
+            "name": stripped_name,
             "key_type": key_type,
             "years": years,
             "root_id": root_id,
@@ -681,6 +709,16 @@ def ca_create_intermediate(
         },
         ip=client_ip(request, db),
     )
+    # Spec 0022 FR-6, moved here by spec 0024 FR-5: this is now the step that
+    # can actually produce an issuer, so this is where the swap away from a
+    # self-signed certificate gets the chance to happen immediately rather
+    # than waiting for the hourly check. A failure here is logged and audited
+    # by `ensure_current` itself and never turned into a 5xx -- the
+    # intermediate *was* created, and losing that outcome over a certificate
+    # swap would be the worse error.
+    tls_manager = request.app.state.tls
+    if tls_manager is not None:
+        tls_manager.ensure_current(db, request.app.state.secrets)
     return RedirectResponse(f"/ca/{root_id}", status_code=303)
 
 
@@ -700,8 +738,8 @@ def ca_cross_sign(
     unknown id, not a root, no stored key, ``path_length`` too small, an
     active cross certificate for this pair already existing -- re-renders
     ``ca_id``'s own detail page at 400 with the message and its own
-    `<details>` open (FR-8), before any row is written, the same way
-    ``ca_create_intermediate``'s form errors do (FR-7).
+    before any row is written, the same way ``ca_create_intermediate``'s
+    form errors do (FR-7).
     """
     try:
         root = ca_service.get_ca(db, ca_id)
@@ -709,9 +747,7 @@ def ca_cross_sign(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     form_error = _year_bounds_error(years, "years")
     if form_error is not None:
-        return _detail_page(
-            request, db, user, root, form_error, open_form="cross-sign", status_code=400
-        )
+        return _detail_page(request, db, user, root, form_error, status_code=400)
     try:
         row = ca_service.cross_sign_root(
             db, request.app.state.secrets, ca_id, signing_root_id, years
@@ -719,9 +755,7 @@ def ca_cross_sign(
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (ValueError, CANotConfiguredError, CrossSignError) as exc:
-        return _detail_page(
-            request, db, user, root, str(exc), open_form="cross-sign", status_code=400
-        )
+        return _detail_page(request, db, user, root, str(exc), status_code=400)
     produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     audit.record(
         db,
@@ -828,16 +862,28 @@ def ca_renew(
 def ca_retire(
     ca_id: int,
     request: Request,
+    confirm: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
-    """FR-7: unchanged but for its redirect target, as ``ca_renew`` above."""
+    """FR-9: the confirmation checkbox is enforced here, the same way
+    ``certs_ui.cert_revoke`` enforces its own (``certs_ui.py:515, 527``) --
+    refused before the row is touched, re-rendering the row's own detail
+    page at 400 rather than the bare ``HTTPException`` this route used to
+    raise unconditionally. This is the one place this spec extends 0023's
+    Out of Scope note about ``ca_retire``'s bare ``HTTPException``: a missing
+    checkbox is a state an operator reaches by forgetting one click, not a
+    domain refusal, so it gets a form response rather than a JSON error
+    document.
+    """
     try:
         row = ca_service.get_ca(db, ca_id)
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not confirm:
+        return _detail_page(request, db, user, _root_of(db, row), _CONFIRM_RETIRE, status_code=400)
     was_active = row.status == "active"
     try:
         _refuse_retire_of_tls_issuer(request, db, ca_id, row)

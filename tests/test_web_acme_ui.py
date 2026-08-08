@@ -77,7 +77,7 @@ def _setup(client: TestClient, cfg: Config) -> str:
     try:
         set_setting(db, BASE_URL, "https://ca.example.org")
         ca_service.create_hierarchy(
-            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin"
+            db, SecretStore.open(cfg.data_dir, cfg.master_passphrase), "cabin", "cabin Intermediate"
         )
     finally:
         db.close()
@@ -248,7 +248,9 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
     db = _db(cfg)
     try:
         secrets = SecretStore.open(cfg.data_dir, cfg.master_passphrase)
-        hierarchy = ca_service.create_hierarchy(db, secrets, "cabin test")
+        hierarchy = ca_service.create_hierarchy(
+            db, secrets, "cabin test", "cabin test Intermediate"
+        )
         principal = grant_fixtures.granted_admin(db, hierarchy.intermediate.id)
         # spec 0017 FR-7: issue_and_store/sign_csr_and_store now return an
         # Issued(row, capped_from) wrapper rather than a bare row.

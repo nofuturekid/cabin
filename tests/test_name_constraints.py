@@ -429,6 +429,7 @@ def test_create_hierarchy_applies_constraints_to_the_intermediate(
         db,
         secrets,
         "Wired",
+        "Wired Intermediate",
         constraints=_spec(permitted_dns=("example.com",)),
     )
     intermediate_cert = x509.load_pem_x509_certificate(
@@ -445,7 +446,7 @@ def test_create_hierarchy_applies_constraints_to_the_intermediate(
 def test_create_hierarchy_without_constraints_is_unconstrained(
     db: Session, secrets: SecretStore
 ) -> None:
-    hierarchy = ca_service.create_hierarchy(db, secrets, "Default")
+    hierarchy = ca_service.create_hierarchy(db, secrets, "Default", "Default Intermediate")
     intermediate_cert = x509.load_pem_x509_certificate(
         hierarchy.intermediate.cert_pem.encode("ascii")
     )
@@ -455,7 +456,7 @@ def test_create_hierarchy_without_constraints_is_unconstrained(
 def test_create_intermediate_under_applies_constraints(db: Session, secrets: SecretStore) -> None:
     """FR-1: the rotation path (0017) gains the same parameter -- the only
     other way to add a further intermediate."""
-    base = ca_service.create_hierarchy(db, secrets, "Rotation Base")
+    base = ca_service.create_hierarchy(db, secrets, "Rotation Base", "Rotation Base Intermediate")
     row = ca_service.create_intermediate_under(
         db,
         secrets,

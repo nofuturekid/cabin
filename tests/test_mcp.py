@@ -92,7 +92,13 @@ def _csrf(client: TestClient, cfg: Config) -> str:
 
 def _configure(client: TestClient, cfg: Config, *, enable_mcp: bool) -> None:
     """A configured instance with no browser session left behind: MCP knows
-    nothing about cookies, and every test here starts from that."""
+    nothing about cookies, and every test here starts from that.
+
+    Root and intermediate are given distinct literal names --
+    ``create_intermediate_under`` refuses an intermediate whose subject
+    collides with its own root's (spec 0024 FR-13), and "cabin" reused for
+    both is exactly that collision.
+    """
     assert (
         client.post("/setup", data={"username": "alice", "password": "correcthorse1"}).status_code
         == 303
@@ -101,10 +107,32 @@ def _configure(client: TestClient, cfg: Config, *, enable_mcp: bool) -> None:
         client.post(
             "/ca/create",
             data={
-                "name": "cabin",
+                "name": "cabin Root CA",
                 "key_type": "ecdsa-p256",
                 "root_years": 20,
-                "intermediate_years": 10,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+    db = _db(cfg)
+    try:
+        root_row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert root_row is not None, "no root row exists"
+        root_id = root_row.id
+    finally:
+        db.close()
+    assert (
+        client.post(
+            f"/ca/{root_id}/intermediate",
+            data={
+                "name": "cabin Intermediate CA",
+                "key_type": "ecdsa-p256",
+                "years": 10,
                 "csrf_token": _csrf(client, cfg),
             },
         ).status_code
@@ -517,7 +545,7 @@ def test_mcp_ca_info_matches_rest_for_cross_rows(mcp: TestClient, cfg: Config) -
         subject_root = db.scalars(select(CACertificate).where(CACertificate.kind == "root")).one()
         # path_length=2: room for the cross certificate and the subject's
         # own intermediate below it (spec 0021 FR-3).
-        signer = create_hierarchy(db, secrets, "signer", path_length=2)
+        signer = create_hierarchy(db, secrets, "signer", "signer Intermediate", path_length=2)
         cross = cross_sign_root(db, secrets, subject_root.id, signer.root.id)
         cross_id, subject_root_id = cross.id, subject_root.id
     finally:

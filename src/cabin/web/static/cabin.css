@@ -649,46 +649,10 @@ footer {
   }
 }
 
-/* ---- CA hierarchy rows and disclosures (spec 0023) ---- */
-
-/* One intermediate or cross certificate within a hierarchy's detail page --
-   a border, not just paragraphs run together, is what makes the rows read
-   as separate things instead of one undifferentiated block. */
-.ca-row {
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--line);
-}
-
-/* The renew/retire controls on one row, inline with its other text rather
-   than stacked the way a page-wide form is. */
-.inline-form {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-2) 0;
-}
+/* ---- CA hierarchy rows (spec 0017) ---- */
 
 .constraints {
   margin: var(--space-2) 0;
-}
-
-/* "Add intermediate" / "Cross-sign": a disclosure is a block a click opens,
-   not text that happens to be clickable. */
-details {
-  margin: var(--space-3) 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
-}
-
-details summary {
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-details[open] summary {
-  margin-bottom: var(--space-2);
 }
 
 /* ---- dashboard tiles ---- */

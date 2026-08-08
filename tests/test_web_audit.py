@@ -85,14 +85,47 @@ def _login(client: TestClient, username: str, password: str = USER_PASSWORD) -> 
     assert resp.status_code == 303
 
 
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(ca_service.CACertificate)
+            .where(ca_service.CACertificate.kind == "root")
+            .order_by(ca_service.CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_ca(client: TestClient, cfg: Config, name: str = "cabin") -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names (``name`` with
+    " Root CA"/" Intermediate CA" appended by *this test file*, not by
+    production) -- ``create_intermediate_under`` refuses an intermediate
+    whose subject collides with its own root's (spec 0024 FR-13), and one
+    label reused for both is exactly that collision.
+    """
     resp = client.post(
         "/ca/create",
         data={
-            "name": name,
+            "name": f"{name} Root CA",
             "key_type": "ecdsa-p256",
             "root_years": 20,
-            "intermediate_years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": f"{name} Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 10,
             "csrf_token": _csrf(client, cfg),
         },
     )
@@ -280,13 +313,18 @@ def test_ca_create_import_recorded(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
     _create_ca(client, cfg, name="Acme")
 
-    created = _one(cfg, AuditAction.ca_created)
+    # spec 0024 FR-3/FR-5: creating a hierarchy is now two requests -- a
+    # root create and an intermediate create -- each its own ca_created
+    # event; this checks the root's.
+    created = next(
+        e for e in _events(cfg, AuditAction.ca_created) if e.summary.startswith("created CA root")
+    )
     assert created.actor_label == "alice"
     # spec 0017 FR-15: target_type="ca" is replaced by "ca_certificate" --
     # one table, one target type, shared with cert issuance's "certificate".
     assert created.target_type == "ca_certificate"
     assert created.detail is not None
-    assert created.detail["name"] == "Acme"
+    assert created.detail["name"] == "Acme Root CA"
     assert created.detail["key_type"] == "ecdsa-p256"
     assert "Acme" in created.summary
 
@@ -353,9 +391,12 @@ def test_ca_created_and_imported_use_the_ca_certificate_target_type(
     )
     assert resp.status_code == 303
 
-    created = _one(cfg, AuditAction.ca_created)
+    # spec 0024 FR-3/FR-5: two ca_created events now (root, then
+    # intermediate), both must carry the new target_type.
+    created_events = _events(cfg, AuditAction.ca_created)
+    assert len(created_events) == 2
     imported = _one(cfg, AuditAction.ca_imported)
-    assert created.target_type == "ca_certificate"
+    assert all(event.target_type == "ca_certificate" for event in created_events)
     assert imported.target_type == "ca_certificate"
     assert all(event.target_type != "ca" for event in _events(cfg))
 
@@ -373,8 +414,10 @@ def test_audit_ca_renewed_and_retired(client: TestClient, cfg: Config) -> None:
     dbsession = _db(cfg)
     try:
         rows = ca_service.list_cas(dbsession)
-        root = next(r for r in rows if r.name == "rotate Root CA")
-        intermediate = next(r for r in rows if r.name == "rotate Intermediate CA")
+        root = next(r for r in rows if r.name == "rotate Root CA" and r.kind == "root")
+        intermediate = next(
+            r for r in rows if r.name == "rotate Intermediate CA" and r.kind == "intermediate"
+        )
         root_id, intermediate_id = root.id, intermediate.id
     finally:
         dbsession.close()
@@ -387,7 +430,8 @@ def test_audit_ca_renewed_and_retired(client: TestClient, cfg: Config) -> None:
 
     retired = client.post(
         f"/ca/{intermediate_id}/retire",
-        data={"csrf_token": _csrf(client, cfg)},
+        # spec 0024 FR-9: retire is refused without the confirmation box.
+        data={"confirm": "on", "csrf_token": _csrf(client, cfg)},
     )
     assert retired.status_code == 303
 

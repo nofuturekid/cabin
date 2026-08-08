@@ -51,7 +51,7 @@ from cabin.issuer_grants import Principal, PrincipalKind, UserIssuer, resolve_gr
 from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.settings import TLS_ISSUER_ID, get_setting
-from cabin.store import create_session_factory
+from cabin.store import create_session_factory, run_migrations
 from cabin.tls import TlsManager, cert_path
 from cabin.users import Role, User
 
@@ -969,6 +969,14 @@ def test_retire_requires_the_confirmation_box(client: TestClient, cfg: Config) -
     assert _create_root(client, cfg, name="Acme Root CA").status_code == 303
     root_id = _last_root_id(cfg)
     assert _create_intermediate(client, cfg, root_id, name="Acme Issuing CA").status_code == 303
+    # 0017 FR-4 refuses to retire the last active issuer instance-wide, so a
+    # second, unrelated hierarchy has to exist before Acme's root can be
+    # retired below.
+    assert _create_root(client, cfg, name="Spare Root CA").status_code == 303
+    spare_root_id = _last_root_id(cfg)
+    assert (
+        _create_intermediate(client, cfg, spare_root_id, name="Spare Issuing CA").status_code == 303
+    )
 
     detail = client.get(f"/ca/{root_id}").text
     retire_action = f"/ca/{root_id}/retire"
@@ -1168,16 +1176,37 @@ def test_grant_and_audit_follow_the_intermediate(client: TestClient, cfg: Config
     assert issue_resp.status_code == 303
 
 
-# === FR-11/AC-15: the fixtures name things the way production does =========
+# === FR-11/AC-15: the fixtures follow production's naming rule =============
 
 
-def test_fixtures_name_rows_the_way_production_does(client: TestClient, cfg: Config) -> None:
-    db = _db(cfg)
-    secrets = _secrets(cfg)
+def test_fixtures_name_rows_the_way_production_does(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-11/AC-15: the direct-fixture half runs against its own, isolated
+    database -- sharing ``cfg``'s with the HTTP half below would leave two
+    active issuers behind (Fixture CA's and Http CA's) and break that
+    half's own "exactly one active issuer" assertion, which is about
+    ``create_ca_via_http`` and has nothing to do with what this half checks.
+
+    The rule under test is not "root and intermediate share one label" --
+    production refuses exactly that (FR-13: an intermediate may not carry
+    its parent root's own subject). It is that ``name`` is never decorated
+    and always agrees with the row's own certificate, and that root and
+    intermediate get two distinguishable names derived from the single
+    argument a caller passes, the same way ``create_ca_via_http`` derives
+    the intermediate's name from ``name`` below.
+    """
+    fixture_cfg = make_config(tmp_path / "fixture-check")
+    fixture_cfg.data_dir.mkdir(parents=True)
+    run_migrations(fixture_cfg.db_url)
+    db = _db(fixture_cfg)
+    secrets = _secrets(fixture_cfg)
     try:
         hierarchy = ca_fixtures.make_hierarchy(db, secrets, "Fixture CA")
+        assert hierarchy.root.name == "Fixture CA"
+        assert hierarchy.intermediate.name == "Fixture CA Intermediate"
+        assert hierarchy.root.name != hierarchy.intermediate.name
         for row in (hierarchy.root, hierarchy.intermediate):
-            assert row.name == "Fixture CA"
             assert row.name == _cn_of(row.cert_pem)
     finally:
         db.close()

@@ -41,6 +41,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import socket
 import ssl
 import threading
@@ -845,7 +846,16 @@ def test_renewal_replaces_exactly_once_with_healthy_issuer(
 # ==============================================================================
 
 
+#: Scraped off ``/ca``'s own listing -- spec 0024 FR-3 split creation into
+#: two requests, and the first no longer redirects to the row it made, so
+#: the second request's URL has to be read back off the page rather than a
+#: response header. Never the child's database (see the module docstring).
+_ROOT_LINK_RE = re.compile(r'href="/ca/(\d+)"')
+
+
 def _create_ca_via_live_client(client: LiveClient, *, name: str = "cabin") -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11)."""
     token = client.csrf_token("/")
     resp = client.post(
         "/ca/create",
@@ -853,7 +863,25 @@ def _create_ca_via_live_client(client: LiveClient, *, name: str = "cabin") -> No
             "name": name,
             "key_type": "ecdsa-p256",
             "root_years": "20",
-            "intermediate_years": "10",
+            "csrf_token": token,
+        },
+    )
+    assert resp.status_code in (200, 303), resp.text
+
+    match = _ROOT_LINK_RE.search(client.get("/ca").text)
+    assert match is not None, "no root link found on /ca after create"
+    root_id = match.group(1)
+
+    token = client.csrf_token(f"/ca/{root_id}")
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        {
+            # Distinct from the root's own name: create_intermediate_under
+            # refuses an intermediate whose subject collides with its
+            # parent root's (spec 0024 FR-13).
+            "name": f"{name} Intermediate",
+            "key_type": "ecdsa-p256",
+            "years": "10",
             "csrf_token": token,
         },
     )

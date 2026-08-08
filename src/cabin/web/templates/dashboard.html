@@ -44,6 +44,16 @@
   {% endfor %}
 </div>
 
+{% if not ca_has_issuer %}
+{% set no_issuer_root = (ca_certs | selectattr("kind", "equalto", "root") | list | first) %}
+{% if no_issuer_root %}
+<div id="ca-no-issuer" class="note">
+  This hierarchy has no active issuer yet.
+  <a href="/ca/{{ no_issuer_root.id }}">Add an intermediate</a> to start issuing.
+</div>
+{% endif %}
+{% endif %}
+
 <div class="section">
   <div>
     <h2>Expiring soon</h2>
