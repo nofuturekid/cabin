@@ -15,6 +15,7 @@
 
 {% macro renew_retire(row, retire_help) %}
 {% if nav.ca_admin %}
+<div class="row-controls">
 {% if row.can_renew %}
 <form method="post" action="/ca/{{ row.id }}/renew">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -36,6 +37,7 @@
   <div class="actions"><button type="submit" class="danger">Retire</button></div>
 </form>
 {% endif %}
+</div>
 {% endif %}
 {% endmacro %}
 

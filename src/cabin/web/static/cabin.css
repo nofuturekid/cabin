@@ -663,6 +663,15 @@ footer {
   margin: var(--space-2) 0;
 }
 
+/* The renew/retire forms sit after whatever optional lines (CRL/AIA, ACME,
+   constraints) a row happens to have. Without their own margin they'd be
+   flush against the last of those when a row has none of them -- their
+   spacing has to come from the controls themselves, not from a neighbour
+   that might not be there. */
+.row-controls {
+  margin-top: var(--space-2);
+}
+
 /* ---- dashboard tiles ---- */
 
 .tiles {
