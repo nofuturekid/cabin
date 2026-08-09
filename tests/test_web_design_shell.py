@@ -299,7 +299,7 @@ def brief_tokens() -> dict[str, str]:
 
 
 def section_one_colours() -> set[str]:
-    """Every colour literal the brief's section 1 names in a table row.
+    """Every colour literal the brief's section 1 names.
 
     AC-6's third provenance. Section 10 calls itself a *suggested* token set
     and omits one colour the Interface Contract requires --
@@ -308,16 +308,19 @@ def section_one_colours() -> set[str]:
     the colours of this design actually come from, so it is provenance; the
     clause is narrow (it cannot re-value a token section 10 already names) so
     a nudged colour still fails.
+
+    Spec 0028 FR-11 widens the clause from "in a table row of section 1" to
+    "in section 1", and the reason is that the old form turned out to depend
+    on a typographic accident. `--bar-active: #3f7d55` is named in section 1 --
+    in the paragraph *after* the status table, "Two more status colours appear
+    exactly once each, as the 2px left edge bar on hierarchy-list rows" -- and
+    not in a row of any table. Section 1 is the design's inventory of what it
+    is made of either way; the clause still cannot re-value a token section 10
+    already names, and the divergence register is still pinned at three rows.
     """
     text = BRIEF.read_text()
     body = text[text.index("## 1. Palette") : text.index("## 2. Typography")]
-    found = set()
-    for line in body.splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        for literal in re.findall(r"`(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))`", line):
-            found.add(norm(literal))
-    return found
+    return {norm(literal) for literal in re.findall(r"`(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))`", body)}
 
 
 def register_rows() -> list[tuple[str, str, str, str]]:
@@ -911,8 +914,28 @@ window.addEventListener('load', function () {
       scroller: pick('.scroller', ['borderTopLeftRadius']),
       h1: pick('h1', ['fontSize']),
       h2: pick('h2', ['fontSize']),
-      td: pick('tbody td', ['paddingTop', 'paddingLeft'])
+      rowTd: pick('.rows tbody td', ['paddingTop', 'paddingLeft']),
+      rowTr: pick('.rows tbody tr', ['paddingTop', 'paddingLeft'])
     });
+    document.body.appendChild(out);
+  }, 300);
+});
+</script>
+"""
+
+#: The twelfth number, on a table spec 0028 does not convert (FR-12).
+ORDINARY_ROW_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var el = document.querySelector('tbody td');
+    var out = document.createElement('div');
+    out.id = 'probe-result';
+    out.textContent = JSON.stringify(el ? {
+      paddingTop: getComputedStyle(el).paddingTop,
+      paddingLeft: getComputedStyle(el).paddingLeft,
+      grid: getComputedStyle(el.parentElement).display
+    } : null);
     document.body.appendChild(out);
   }, 300);
 });
@@ -931,10 +954,22 @@ def test_the_twelve_numbers(rendered: dict[str, str], tmp_path: Path) -> None:
     The content wrapper is addressed as `#main`'s first element child, because
     FR-6 gives it no class name -- it is "main's inner wrapper", the one
     element 0027 owns and the one `cabinIn` is applied to (FR-16).
+
+    **The twelfth number is re-pointed** (spec 0028 FR-12/AC-13) and not
+    dropped. It asserts that a list row's padding is the design's `10px 12px`.
+    After spec 0028 FR-8 every table on `/ca/{root}` is a `.rows` table, where
+    the 12px horizontal inset is on the `<tr>` and the cells are `10px 0` -- so
+    the old reading would fail against a build that is exactly right. It is
+    therefore read from `/certs`, whose table spec 0028 does not convert and
+    which is the design's ordinary list row (brief section 6.2, "10px 12px
+    (inventory, issuer lists)"), and a thirteenth reading asserts the same two
+    numbers on the page they were read from before. A number moved to a page
+    where it can be read is still that number; a number left where it cannot
+    be is a criterion that gets deleted the first time someone is in a hurry.
     """
     found = one_page(tmp_path, "ca_detail", rendered["ca_detail"], NUMBERS_PROBE)
     assert isinstance(found, dict)
-    for key in ("rail", "section", "main", "tag", "button", "scroller", "h1", "h2", "td"):
+    for key in ("rail", "section", "main", "tag", "button", "scroller", "h1", "h2"):
         assert found[key] is not None, f"the page has no element for {key}"
     assert found["wrapper"] is not None, "main has no inner wrapper (FR-6)"
 
@@ -953,8 +988,31 @@ def test_the_twelve_numbers(rendered: dict[str, str], tmp_path: Path) -> None:
     assert found["scroller"]["borderTopLeftRadius"] == "8px"
     assert found["h1"]["fontSize"] == "29px"
     assert found["h2"]["fontSize"] == "17px"
-    assert found["td"]["paddingTop"] == "10px"
-    assert found["td"]["paddingLeft"] == "12px"
+
+    # twelfth, re-pointed: the design's ordinary list row, on a table this
+    # redesign step does not convert.
+    ordinary = one_page(tmp_path, "certs", rendered["certs"], ORDINARY_ROW_PROBE)
+    assert ordinary is not None, "/certs renders no table row to read the number off"
+    assert isinstance(ordinary, dict)
+    assert ordinary["grid"] != "grid", (
+        "/certs' table is a grid table too, so this reading is no longer the "
+        "ordinary list row it was moved here to be (spec 0028 FR-12)"
+    )
+    assert ordinary["paddingTop"] == "10px"
+    assert ordinary["paddingLeft"] == "12px"
+
+    # thirteenth: the same two numbers, on the page the twelfth was read from,
+    # in the two places the grid row puts them.
+    assert found["rowTd"] is not None and found["rowTr"] is not None, (
+        f"/ca/{{root}} carries no .rows table at all (spec 0028 FR-8): {found}"
+    )
+    assert found["rowTd"]["paddingTop"] == "10px", found["rowTd"]
+    assert found["rowTd"]["paddingLeft"] == "0px", (
+        f"a .rows cell keeps its own horizontal inset, so the row's rule would not "
+        f"run the full width of the row as the design draws it: {found['rowTd']}"
+    )
+    assert found["rowTr"]["paddingTop"] == "0px", found["rowTr"]
+    assert found["rowTr"]["paddingLeft"] == "12px", found["rowTr"]
 
 
 # === AC-19: type is in rem and honours a raised root =======================
@@ -1197,4 +1255,256 @@ def test_no_colour_outside_the_token_blocks() -> None:
                 literals.append(f"{selector} {{ {name}: {value} }}")
     assert literals == [], (
         f"every colour belongs to a token; these rules carry their own: {literals}"
+    )
+
+
+# ==========================================================================
+# spec 0028: what the vocabulary this file pinned is allowed to become
+# ==========================================================================
+
+#: Spec 0027 FR-18 reserved eight names without defining them, because
+#: `test_stylesheet_and_templates_agree_in_both_directions` fails in its
+#: reverse direction on a rule with no user. Spec 0028 renders two of them
+#: (`.panel`, `.panel-danger`) and drops `.group-row` in favour of two clearer
+#: names; these six stay reserved and undefined until the spec that first
+#: renders one.
+RESERVED = ("nav-count", "seg", "pill", "toggle", "kicker", "flash")
+
+#: FR-10's table: every class spec 0028 defines, each of which must have a
+#: rule *and* a literal user.
+DEFINED_BY_0028 = (
+    "rows",
+    "cols-hierarchies",
+    "cols-issuers",
+    "cols-crosses",
+    "facts",
+    "facts-indent",
+    "rowlink",
+    "row-root",
+    "row-child",
+    "state-active",
+    "state-retired",
+    "tree",
+    "panel",
+    "panel-danger",
+)
+
+
+def literal_class_tokens() -> set[str]:
+    """Every class name a template carries *statically* (spec 0027 FR-20).
+
+    A `{{ … }}` or `{% … %}` fragment contributes no name, so
+    `class="state-{{ row.status }}"` contributes nothing at all -- which is
+    why FR-10 requires the status classes to be written out by a branch. A
+    rule for `.state-retired` with only an interpolated user is a rule with no
+    user, and the agreement test's reverse direction fails on it.
+    """
+    names: set[str] = set()
+    for path in TEMPLATES.glob("*.html"):
+        for classes in re.findall(r'class="([^"]*)"', path.read_text()):
+            marked = re.sub(r"{{.*?}}|{%.*?%}", "\x00", classes, flags=re.S)
+            names.update(name for name in marked.split() if "\x00" not in name)
+    return names
+
+
+def test_the_reserved_classes_are_still_reserved() -> None:
+    """AC-11: a class is defined by the spec that first renders one.
+
+    Two directions, and the second is the one that bites today. The six names
+    spec 0027 reserved and spec 0028 does not render must still have no rule
+    -- "while we are in the file" is how a stylesheet acquires components
+    nothing uses. And each of the fourteen names spec 0028 *does* define must
+    have both a rule and a literal user, because a rule whose only user is an
+    interpolation has no user at all as far as
+    `test_stylesheet_and_templates_agree_in_both_directions` is concerned.
+    """
+    defined = class_selectors(CSS.read_text())
+
+    premature = [name for name in RESERVED if name in defined]
+    assert premature == [], (
+        f"spec 0027 reserved these names and spec 0028 renders none of them, so a "
+        f"rule for one is a rule with no user: {premature}"
+    )
+
+    without_rule = [name for name in DEFINED_BY_0028 if name not in defined]
+    assert without_rule == [], f"rendered by spec 0028, no rule in cabin.css: {without_rule}"
+
+    literal = literal_class_tokens()
+    without_user = [name for name in DEFINED_BY_0028 if name not in literal]
+    assert without_user == [], (
+        f"these have a rule and no template writes them out literally. A status "
+        f"class glued to an interpolation -- `state-{{{{ row.status }}}}` -- "
+        f"contributes no name at all, which is what FR-10's branch requirement is "
+        f"for: {without_user}"
+    )
+
+    # The exemption list the agreement test carries is for `tag-*` values that
+    # only ever exist as an interpolation. AC-11 requires this spec to add
+    # nothing to it; a widened list is how a rule with no user gets parked.
+    agreement = (REPO / "tests/test_ca_names_and_actions.py").read_text()
+    assert 'exempt = {name for name in defined - used if re.match(r"^tag-", name)}' in agreement, (
+        "the agreement test's exemption list is no longer exactly the `^tag-` names; "
+        "spec 0028 adds nothing to it (AC-11)"
+    )
+
+
+def test_the_status_bar_colour_has_provenance() -> None:
+    """AC-12/FR-11: one new token, and the criterion it overturns.
+
+    `#3f7d55` is in the brief's section 1 -- in the paragraph after the status
+    table rather than in a row of it, which is the whole of why spec 0027
+    AC-6's clause 3 had to be widened (`section_one_colours`). The colour's
+    two counterparts are asserted here as well: the light scheme has one of
+    its own (spec 0027 FR-13), and the *expired* bar the design also draws is
+    deliberately not shipped, because a `ca_certificates` row is `active` or
+    `retired` and inventing a third state behind a colour would be a content
+    change.
+    """
+    text = CSS.read_text()
+    dark = dark_tokens(text)
+    light = light_tokens(text)
+
+    assert "--bar-active" in dark, "the status bar's colour is not a token (FR-11/AC-12)"
+    assert dark["--bar-active"] == norm("#3f7d55"), dark["--bar-active"]
+    assert norm("#3f7d55") in section_one_colours(), (
+        "clause 3 admits a token section 10 does not name only when section 1 "
+        "inventories its value; this one is not there"
+    )
+    assert light["--bar-active"] != dark["--bar-active"], (
+        "the light scheme repeats the dark bar colour; spec 0027 FR-13 requires a "
+        "counterpart that differs"
+    )
+
+    used = [
+        selector
+        for selector, body in css_rules(text)
+        for _name, value in declarations(body)
+        if "--bar-active" in value
+    ]
+    assert used != [], "a token nothing draws with is a colour that is not on any page"
+
+    assert norm("#8c3f3d") not in set(dark.values()), (
+        "the design's *expired* status bar is not shipped (FR-11): cabin computes no "
+        "expired state for a CA row, and inventing one behind a colour would be a "
+        "content change"
+    )
+    assert dark["--line-control"] == norm("#3f424d"), (
+        "the retired bar reuses --line-control, which has to still be the design's "
+        "own value for that to be the design's retired colour"
+    )
+
+
+#: AC-14: who claims the decoration exemption, and where the tree glyphs are.
+ARIA_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    function label(el) {
+      return el.tagName.toLowerCase() + '.' + (el.className || '').toString()
+        + ' "' + el.textContent.trim().slice(0, 12) + '"';
+    }
+    var hidden = [], trees = [], untagged = [];
+    document.querySelectorAll('[aria-hidden="true"]').forEach(function (el) {
+      hidden.push(label(el));
+    });
+    document.querySelectorAll('.tree').forEach(function (el) {
+      trees.push(label(el));
+      if (el.getAttribute('aria-hidden') !== 'true') untagged.push(label(el));
+    });
+    var out = document.createElement('div');
+    out.id = 'probe-result';
+    out.textContent = JSON.stringify({hidden: hidden, trees: trees, untagged: untagged});
+    document.body.appendChild(out);
+  }, 300);
+});
+</script>
+"""
+
+#: A span the contrast probe would report: `--accent-deep` (#5d5294) is
+#: 2.60:1 on the page ground, which is what the design draws the tree glyph
+#: in and what spec 0027's Out of Scope left open.
+PLANTED_DECORATION = '<span %s style="color:#5d5294">planted decoration</span>'
+
+
+@needs_chrome
+def test_the_tree_glyph_is_the_only_decoration(rendered: dict[str, str], tmp_path: Path) -> None:
+    """FR-13/AC-14: the exemption is bounded rather than trusted.
+
+    WCAG 1.4.3 exempts text that is pure decoration, and the tree glyph is
+    decoration -- the indentation, the kind tag and the position under the
+    root all carry the structure; the glyph draws a line. So `CONTRAST_PROBE`
+    skips `[aria-hidden="true"]`. But an exemption keyed on an attribute an
+    author writes is an exemption an author can spread, and the only way it
+    can do harm is by silencing a real failure on something that is not
+    decoration. This asserts the set of elements claiming it is exactly the
+    tree glyphs, across every page the probe covers.
+
+    The contrast run itself is `test_contrast_holds_on_every_rendered_page`,
+    which already covers this same page list in both schemes with the
+    `examined >= 30` floor; repeating it here would double the most expensive
+    run in the suite to assert the same thing twice. What is added here is the
+    pair of counter-checks that gives both halves teeth: the planted element
+    is genuinely below the threshold (the probe reports it without the
+    attribute), the attribute is genuinely what silences it (the probe stops
+    reporting it with the attribute), and the guard reports the planted
+    element as an unbudgeted user of the exemption.
+    """
+    root = tmp_path / "aria"
+    root.mkdir()
+    probes.stage(root, STATIC, rendered, ARIA_PROBE)
+    httpd, port = probes.serve(root)
+    try:
+        results = {
+            name: probes.run(f"http://127.0.0.1:{port}/{name}.html", 1440, 1150)
+            for name in rendered
+        }
+    finally:
+        httpd.shutdown()
+
+    assert results["ca"]["trees"], (
+        "the grouped list draws no tree glyph at all (FR-5/FR-13), so this "
+        "exemption has no user and the argument for it has not been made"
+    )
+    untagged = {name: found["untagged"] for name, found in results.items() if found["untagged"]}
+    assert untagged == {}, f"a .tree glyph is read out to a screen reader: {untagged}"
+
+    spread = {
+        name: sorted(set(found["hidden"]) - set(found["trees"]))
+        for name, found in results.items()
+        if set(found["hidden"]) != set(found["trees"])
+    }
+    assert spread == {}, (
+        f"aria-hidden is claimed by something that is not a tree glyph. A second "
+        f"user of the decoration exemption is argued for in the spec that adds it, "
+        f"not discovered later in a screenshot: {spread}"
+    )
+
+    # Counter-check, three ways, on one page.
+    page = rendered["certs"]
+    visible = page.replace("</main>", PLANTED_DECORATION % "" + "</main>")
+    hidden = page.replace("</main>", PLANTED_DECORATION % 'aria-hidden="true"' + "</main>")
+    assert visible != page and hidden != page, "the planted span was not inserted"
+
+    clean = one_page(tmp_path, "planted-none", page, probes.CONTRAST_PROBE)
+    reported = one_page(tmp_path, "planted-visible", visible, probes.CONTRAST_PROBE)
+    assert isinstance(clean, dict) and isinstance(reported, dict)
+    assert clean["bad"] == [], f"this page was already failing contrast: {clean}"
+    assert reported["bad"] != [], (
+        f"the planted span is #5d5294 on the page ground -- 2.60:1 -- and the "
+        f"contrast probe did not report it, so nothing below is measuring an "
+        f"exemption: {reported}"
+    )
+
+    silenced = one_page(tmp_path, "planted-hidden", hidden, probes.CONTRAST_PROBE)
+    assert isinstance(silenced, dict)
+    assert silenced["bad"] == [], (
+        f"aria-hidden did not silence the planted span, so the skip clause spec 0028 "
+        f"added to CONTRAST_PROBE is not in effect: {silenced}"
+    )
+
+    guarded = one_page(tmp_path, "planted-guard", hidden, ARIA_PROBE)
+    assert isinstance(guarded, dict)
+    assert set(guarded["hidden"]) - set(guarded["trees"]) != set(), (
+        "the guard did not notice an aria-hidden element that is not a tree glyph -- "
+        "it cannot go red, and an exemption nobody bounds is a hole"
     )

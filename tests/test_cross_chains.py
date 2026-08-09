@@ -214,9 +214,17 @@ _TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
 _CLASS_RE = re.compile(r'class="([^"]*)"')
 
 
-def _dom_row(html: str, marker: str, *, class_name: str | None = None, tag: str = "div") -> str:
+def _dom_row(
+    html: str, marker: str, *, class_name: str | None = None, tag: str | None = "div"
+) -> str:
     """The full outer HTML of the innermost ``<tag class="class_name">``
-    element that contains ``marker``'s first occurrence."""
+    element that contains ``marker``'s first occurrence.
+
+    ``tag=None`` matches any tag name, as the copies of this helper in
+    ``test_ca_issuer_pages.py`` and ``test_ca_names_and_actions.py`` already
+    allow: a block is then scoped by its class alone, which is what a
+    ``.panel`` wants -- the class is the contract, the element it is written
+    on is not."""
     # A marker that is not on the page at all is a distinct failure from
     # "no element of that class wraps it"; `html.index` alone would report
     # it as a bare ValueError from inside this helper.
@@ -241,9 +249,9 @@ def _dom_row(html: str, marker: str, *, class_name: str | None = None, tag: str 
             matches_class = class_name is None or (
                 classes is not None and class_name in classes.group(1).split()
             )
-            if open_name == tag and matches_class:
+            if (tag is None or open_name == tag) and matches_class:
                 return html[open_start : m.end()]
-    raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
+    raise AssertionError(f"no <{tag or '*'} class={class_name!r}> element wraps {marker!r}")
 
 
 def _set_cross_validity(
@@ -995,8 +1003,14 @@ def test_ca_page_marks_an_expired_cross_certificate_as_not_served(
     # would leave an operator with a warning and no way to act on it.
     cross_page = client.get(f"/ca/{row_b.id}/cross/{scenario.cross}")
     assert cross_page.status_code == 200
-    assert "outside its validity window" in cross_page.text
-    assert "no action needed to fall back to the short chain" in cross_page.text
+    # Spec 0028 FR-7 moves this sentence out of the identity table and into
+    # the `.panel` banner above the facts, in one piece. The requirement is
+    # unchanged and so is what it compares; only the element it is scoped by
+    # moves. Scoped rather than searched, because `in cross_page.text` also
+    # passes on a build that renders the banner and leaves the table rows
+    # where they were -- the one thing spec 0028 AC-8 exists to rule out.
+    banner = _dom_row(cross_page.text, "outside its validity window", class_name="panel", tag=None)
+    assert "no action needed to fall back to the short chain" in banner
 
 
 # --- AC-16: dashboard warning ---------------------------------------------------

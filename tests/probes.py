@@ -104,6 +104,17 @@ window.addEventListener('load', function () {
 #: below WCAG 1.4.3's threshold -- 4.5:1, or 3:1 for large text (>= 24px, or
 #: >= 18.66px at weight >= 700). Disabled controls are exempt and skipped
 #: (FR-14). Result: ``{"bad": [...], "examined": N}``.
+#:
+#: Spec 0028 FR-13 adds ``[aria-hidden="true"]`` to that skip clause. WCAG
+#: 1.4.3 exempts text that is pure decoration, and the tree glyph the grouped
+#: list draws is decoration in ``--accent-deep`` -- 2.60:1 on the page ground,
+#: which the probe would otherwise report on every render of ``/ca``. An
+#: exemption keyed on an attribute an author writes is an exemption an author
+#: can spread, so it is **bounded** rather than trusted:
+#: ``test_the_tree_glyph_is_the_only_decoration`` (AC-14) asserts that the set
+#: of elements matching this selector, across every page in the probe's list,
+#: is exactly the tree glyphs. A second user has to be argued for in the spec
+#: that adds it rather than discovered later in a screenshot.
 CONTRAST_PROBE = """
 <script>
 window.addEventListener('load', function () {
@@ -160,7 +171,7 @@ window.addEventListener('load', function () {
       if (el.id === 'probe-result' || !ownText(el)) return;
       var r = el.getBoundingClientRect();
       if (r.width === 0 && r.height === 0) return;
-      if (el.closest(':disabled, [disabled], [aria-disabled="true"]')) return;
+      if (el.closest(':disabled, [disabled], [aria-disabled="true"], [aria-hidden="true"]')) return;
       var cs = getComputedStyle(el);
       if (cs.visibility === 'hidden' || cs.display === 'none') return;
       var fg = parse(cs.color);

@@ -31,7 +31,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cabin.acme import http as acme_http
 from cabin.app import create_app
+from cabin.ca import crl as crl_service
+from cabin.ca import leaf as leaf_mod
 from cabin.ca import service as ca_service
 from cabin.ca.service import signing_credentials
 from cabin.ca.x509 import create_intermediate, create_root
@@ -268,8 +271,12 @@ def test_ca_wizard_ui_flow(client: TestClient, cfg: Config) -> None:
     # the empty state's promise is gone once a hierarchy actually exists
     assert 'id="ca-empty"' not in resp.text
 
-    # the intermediate itself lives on the hierarchy's own detail page now,
-    # not on the /ca overview (which shows only root rows and counts).
+    # the intermediate itself lives on the hierarchy's own detail page now.
+    # (Spec 0028 FR-5 makes `/ca` a grouped list, so the parenthetical this
+    # comment used to carry -- "which shows only root rows and counts" -- is
+    # no longer true; the requirement this test protects is unchanged and no
+    # assertion in it moves. What `/ca` groups is
+    # `test_ca_list_groups_issuers_under_their_own_root`'s subject.)
     detail = client.get(f"/ca/{_by_name(cfg, 'cabin Root CA').id}")
     assert detail.status_code == 200
     assert "cabin Intermediate CA" in detail.text
@@ -362,6 +369,226 @@ def test_ca_page_lists_hierarchies(client: TestClient, cfg: Config) -> None:
     )
     assert "retired" in beta_window.lower()
     assert "retired" not in alpha_window.lower()
+
+
+# --- spec 0028 FR-5/FR-17: /ca is the grouped list -------------------------
+
+
+def _grouped_rows(html: str) -> list[tuple[list[str], str]]:
+    """Every `<tr>` in the page's `<tbody>`, as `(class tokens, outer HTML)`.
+
+    Document order is the whole point: a build that renders every issuer in
+    one block at the bottom of the table puts the same names and the same
+    links on the page and is caught by nothing else.
+    """
+    body = re.search(r"<tbody\b[^>]*>(.*?)</tbody>", html, re.S)
+    assert body is not None, "the page carries no <tbody> -- no table was rendered"
+    rows = re.findall(r"<tr\b[^>]*>.*?</tr>", body.group(1), re.S)
+    return [(_row_classes(row), row) for row in rows]
+
+
+def _row_classes(row_html: str) -> list[str]:
+    found = re.search(r'<tr\b[^>]*class="([^"]*)"', row_html)
+    return found.group(1).split() if found is not None else []
+
+
+def test_ca_list_groups_issuers_under_their_own_root(client: TestClient, cfg: Config) -> None:
+    """FR-5 supersedes spec 0026's Out of Scope clause "No change to /ca's
+    list."
+
+    `/ca` today answers "which hierarchies exist" and makes the operator open
+    a root to find out what can actually sign. Every issuance, every ACME
+    directory and every grant is named by an *issuer*, so the list names
+    both.
+
+    The children are checked by **position**, not by presence: every name and
+    every link would still be somewhere on the page if they were all rendered
+    under the wrong root, or in one block at the bottom.
+    """
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "alpha")
+    _create_ca(client, cfg, "beta")
+    # a root with no issuer at all: FR-5 gives it a row in place of the
+    # children rather than nothing, and its count column still reads 0.
+    assert (
+        client.post(
+            "/ca/create",
+            data={
+                "name": "solo Root CA",
+                "key_type": "ecdsa-p256",
+                "root_years": 20,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+
+    resp = client.get("/ca")
+    assert resp.status_code == 200
+    rows = _grouped_rows(resp.text)
+
+    expected: list[tuple[int, list[int]]] = []
+    for row in _rows(cfg):
+        if row.kind == "root":
+            expected.append((row.id, []))
+    for row in _rows(cfg):
+        if row.kind == "intermediate":
+            parent = next(group for group in expected if group[0] == row.parent_id)
+            parent[1].append(row.id)
+    assert [len(children) for _root, children in expected] == [1, 1, 0], expected
+
+    assert any("row-root" in classes for classes, _html in rows), (
+        f"no row on /ca carries .row-root, so the list is not grouped at all "
+        f"(FR-5): {[classes for classes, _html in rows]}"
+    )
+
+    grouped: list[tuple[int, list[int]]] = []
+    empty_states: dict[int, str] = {}
+    for classes, row_html in rows:
+        hrefs = re.findall(r'href="([^"]*)"', row_html)
+        if "row-root" in classes:
+            root_href = next(h for h in hrefs if re.fullmatch(r"/ca/\d+", h))
+            grouped.append((int(root_href.rsplit("/", 1)[1]), []))
+        elif "row-child" in classes:
+            assert grouped, "a child row was rendered before any root row"
+            issuer_href = next(h for h in hrefs if "/issuer/" in h)
+            root_id, issuer_id = (int(part) for part in re.findall(r"\d+", issuer_href))
+            assert root_id == grouped[-1][0], (
+                f"{issuer_href} is rendered under the root {grouped[-1][0]}, which is "
+                f"not the root it belongs to"
+            )
+            grouped[-1][1].append(issuer_id)
+            assert client.get(issuer_href).status_code == 200, issuer_href
+        else:
+            assert grouped, f"a row belongs to no group: {row_html!r}"
+            empty_states[grouped[-1][0]] = row_html
+
+    assert grouped == expected, (
+        f"the grouped list is not the hierarchy: rendered {grouped}, the database has {expected}"
+    )
+
+    solo_id = expected[-1][0]
+    assert set(empty_states) == {solo_id}, sorted(empty_states)
+    assert "This hierarchy has no issuer yet, so nothing can be signed under it." in re.sub(
+        r"\s+", " ", empty_states[solo_id]
+    ), empty_states[solo_id]
+
+    headers = re.findall(r"<th\b[^>]*>(.*?)</th>", resp.text, re.S)
+    headers = [re.sub(r"<[^>]+>", "", head).strip() for head in headers]
+    assert headers == ["Name", "Status", "Expires", "Intermediates", "Cross certificates"], headers
+    counts_column = headers.index("Intermediates")
+    status_column = headers.index("Status")
+    for (root_id, children), (classes, row_html) in zip(
+        grouped, [row for row in rows if "row-root" in row[0]], strict=True
+    ):
+        assert "row-root" in classes
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, re.S)
+        assert len(cells) == len(headers), f"root {root_id} has {len(cells)} cells: {cells}"
+        assert re.sub(r"<[^>]+>", "", cells[counts_column]).strip() == str(len(children)), (
+            f"root {root_id} counts {cells[counts_column]!r} intermediates and has "
+            f"{len(children)} rows under it"
+        )
+
+    # FR-5: a child row carries its own status, and `/ca` is where an
+    # operator looks to see what is active. Asserted by effect -- one issuer
+    # is retired through the real door and the page is read again -- and in
+    # both directions, because a build that marks every row retired and a
+    # build that marks none would each satisfy one half alone.
+    alpha_issuer = _by_name(cfg, "alpha Intermediate CA")
+    retire = client.post(
+        f"/ca/{alpha_issuer.id}/retire",
+        data={"confirm": "on", "csrf_token": _csrf(client, cfg)},
+    )
+    assert retire.status_code == 303, retire.text
+
+    after = client.get("/ca")
+    assert after.status_code == 200
+    marked: dict[int, str] = {}
+    for classes, row_html in _grouped_rows(after.text):
+        if "row-child" not in classes:
+            continue
+        issuer_href = next(h for h in re.findall(r'href="([^"]*)"', row_html) if "/issuer/" in h)
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, re.S)
+        assert len(cells) == len(headers), (
+            f"a child row has {len(cells)} cells and the table has {len(headers)} "
+            f"columns, so its Status column is not where the heading says it is: "
+            f"{row_html!r}"
+        )
+        marked[int(issuer_href.rsplit("/", 1)[1])] = cells[status_column]
+
+    assert set(marked) == {issuer for _root, issuers in expected for issuer in issuers}
+    retired_cell = marked.pop(alpha_issuer.id)
+    tags = re.findall(r'<span class="([^"]*)"[^>]*>(.*?)</span>', retired_cell, re.S)
+    assert [text.strip() for classes, text in tags if "tag-bad" in classes.split()] == [
+        "retired"
+    ], (
+        f"the retired issuer's row on /ca does not say so: {retired_cell!r}. A retired "
+        f"issuer that looks live on this page is how someone signs against the wrong "
+        f"hierarchy, or believes they cannot sign at all (FR-5)"
+    )
+    for issuer_id, cell in sorted(marked.items()):
+        assert "retired" not in re.sub(r"<[^>]+>", " ", cell).lower(), (
+            f"issuer {issuer_id} is active and its row on /ca reads {cell!r} -- the "
+            f"status is being sprayed across the list rather than read off the row"
+        )
+        assert "active" in re.sub(r"<[^>]+>", " ", cell).lower(), (
+            f"issuer {issuer_id} shows no status at all: {cell!r}"
+        )
+
+
+def test_ca_list_makes_no_per_issuer_lookups(
+    client: TestClient, cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-17: spec 0026 FR-12's work bound follows the component to `/ca`.
+
+    Measured at the call, because the markup is identical either way: the
+    obvious way to get a name, a status and an expiry for an intermediate is
+    `_row_view`, which makes three URL lookups and a constraints parse per row
+    that nothing on this page displays.
+    """
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "alpha")
+    _create_ca(client, cfg, "beta")
+    assert (
+        client.post(
+            f"/ca/{_by_name(cfg, 'alpha Root CA').id}/intermediate",
+            data={
+                "name": "alpha Second Intermediate CA",
+                "key_type": "ecdsa-p256",
+                "years": 10,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+
+    calls: dict[str, int] = {}
+
+    def spy(module: object, name: str) -> None:
+        original = getattr(module, name)
+
+        def wrapper(*args: object, **kwargs: object) -> object:
+            calls[name] = calls.get(name, 0) + 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, wrapper)
+
+    spy(crl_service, "distribution_url")
+    spy(crl_service, "ca_issuers_url")
+    spy(acme_http, "directory_url")
+    spy(leaf_mod, "constraints_of")
+
+    resp = client.get("/ca")
+    assert resp.status_code == 200
+    assert calls == {}, f"/ca did work its output does not need: {calls}"
+
+    # ...and a build that renders no children at all cannot pass by doing no
+    # work: the three issuers are on the page. Without this clause the
+    # assertion above is satisfied perfectly by the list as it stands today.
+    issuer_links = re.findall(r'href="/ca/\d+/issuer/\d+"', resp.text)
+    assert len(issuer_links) == 3, (
+        f"/ca links to {len(issuer_links)} issuers, not the three this instance has: {issuer_links}"
+    )
 
 
 # --- AC-12: create-intermediate/renew/retire need admin role + CSRF --------

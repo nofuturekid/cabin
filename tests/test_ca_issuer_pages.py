@@ -31,7 +31,9 @@ import re
 import shutil
 import subprocess
 import threading
+from collections import Counter
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -45,8 +47,15 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from fastapi.testclient import TestClient
+from jinja2 import FileSystemLoader
 from sqlalchemy.orm import Session
 
+# Spec 0027 FR-2's rule, one level up: the stylesheet parser has one
+# definition too. A second copy here would be a second thing to repair the
+# next time a selector form appears that it cannot read.
+from test_web_design_shell import css_rules, declarations
+
+from cabin import web as cabin_web
 from cabin.acme import http as acme_http
 from cabin.app import create_app
 from cabin.ca import crl as crl_service
@@ -58,9 +67,48 @@ from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.settings import ACME_ENABLED, BASE_URL, TRUE, set_setting
 from cabin.store import create_session_factory
+from cabin.web import ca_ui
 
-STATIC_DIR = Path(__file__).resolve().parents[1] / "src/cabin/web/static"
+REPO = Path(__file__).resolve().parents[1]
+STATIC_DIR = REPO / "src/cabin/web/static"
+TEMPLATES_DIR = REPO / "src/cabin/web/templates"
+CSS_PATH = STATIC_DIR / "cabin.css"
 CHROME = "/opt/google/chrome/chrome"
+
+#: The commit spec 0028 starts from. AC-16 renders each of the five pages
+#: twice -- once through the templates as they stand and once through the
+#: templates as they stood here -- against one database, so that every text
+#: node that differs differs because of markup and not because of data.
+BASELINE = "051b006"
+
+#: FR-1's five templates.
+FIVE_TEMPLATES = (
+    "ca_list.html",
+    "ca_detail.html",
+    "ca_issuer.html",
+    "ca_macros.html",
+    "cert_detail.html",
+)
+
+#: FR-10's table, as a set: every class this spec defines, and its first
+#: user's template. `.panel`/`.panel-danger` were reserved by spec 0027 and
+#: are rendered here; the other twelve are new.
+DEFINED_CLASSES = (
+    "rows",
+    "cols-hierarchies",
+    "cols-issuers",
+    "cols-crosses",
+    "facts",
+    "facts-indent",
+    "rowlink",
+    "row-root",
+    "row-child",
+    "state-active",
+    "state-retired",
+    "tree",
+    "panel",
+    "panel-danger",
+)
 
 #: The two table headings, matched as heading *text* rather than as a bare
 #: word: `>Issuers<` cannot land inside a help sentence or an attribute the
@@ -566,18 +614,347 @@ def _column_index(section_html: str, header: str) -> int:
     """The position of the `<th>` whose text is `header`, so a cell is
     addressed by the column it is actually under -- a dropped column fails
     here by name rather than shifting every later assertion silently."""
-    head = re.search(r"<thead\b[^>]*>(.*?)</thead>", section_html, re.S)
-    assert head is not None, "the section's table has no <thead>"
-    headers = [
-        unescape(re.sub(r"<[^>]+>", "", cell)).strip()
-        for cell in re.findall(r"<th\b[^>]*>(.*?)</th>", head.group(1), re.S)
-    ]
+    headers = _column_headers(section_html)
     assert header in headers, f"no {header!r} column: {headers}"
     return headers.index(header)
 
 
 def _text_of(fragment: str) -> str:
     return unescape(re.sub(r"<[^>]+>", " ", fragment)).strip()
+
+
+# --- spec 0028 helpers -----------------------------------------------------
+
+
+def _column_headers(section_html: str) -> list[str]:
+    """The `<th>` texts of the section's table head, in document order."""
+    head = re.search(r"<thead\b[^>]*>(.*?)</thead>", section_html, re.S)
+    assert head is not None, "the section's table has no <thead>"
+    return [
+        unescape(re.sub(r"<[^>]+>", "", cell)).strip()
+        for cell in re.findall(r"<th\b[^>]*>(.*?)</th>", head.group(1), re.S)
+    ]
+
+
+def _table(html: str, class_name: str) -> str:
+    """The first `<table>` whose class list carries `class_name`, outer HTML.
+
+    A table cannot nest inside a table on any of these pages, so the
+    non-greedy match to the first `</table>` is exact rather than lucky.
+    """
+    found = re.search(
+        rf'<table\b[^>]*class="[^"]*\b{class_name}\b[^"]*"[^>]*>.*?</table>', html, re.S
+    )
+    assert found is not None, f'no <table class="...{class_name}..."> on the page'
+    return found.group(0)
+
+
+def _tables_with_class(html: str, class_name: str) -> list[str]:
+    return re.findall(
+        rf'<table\b[^>]*class="[^"]*\b{class_name}\b[^"]*"[^>]*>.*?</table>', html, re.S
+    )
+
+
+def _fact_rows(table_html: str) -> list[tuple[str, str]]:
+    """A definition grid as `(label, value markup)` pairs, one per `<tr>`."""
+    pairs = []
+    for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", table_html, re.S):
+        label = re.search(r"<th\b[^>]*>(.*?)</th>", row, re.S)
+        value = re.search(r"<td\b[^>]*>(.*?)</td>", row, re.S)
+        if label is not None and value is not None:
+            pairs.append((_text_of(label.group(1)), value.group(1)))
+    return pairs
+
+
+def _classes_of(fragment: str, tag: str) -> list[str]:
+    """The class tokens on the first `<tag>` in `fragment`."""
+    found = re.search(rf'<{tag}\b[^>]*class="([^"]*)"', fragment)
+    return found.group(1).split() if found is not None else []
+
+
+def _split_tracks(value: str) -> list[str]:
+    """One `grid-template-columns` value as its tracks.
+
+    Paren-aware, because `minmax(0, 2fr)` carries a comma and a space inside
+    itself; splitting on whitespace alone would report six tracks where the
+    design has three.
+    """
+    tracks: list[str] = []
+    depth = 0
+    current = ""
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char.isspace() and depth == 0:
+            if current:
+                tracks.append(current)
+            current = ""
+            continue
+        current += char
+    if current:
+        tracks.append(current)
+    return tracks
+
+
+def _column_templates(css_text: str) -> dict[str, list[str]]:
+    """Every `.cols-*` class's declared tracks, read off the stylesheet.
+
+    FR-9 makes the `minmax(0, …)` form load-bearing rather than decorative,
+    so it is read from the file as well as from the computed style: the two
+    say different things, and only the file says which form was written.
+    """
+    templates: dict[str, list[str]] = {}
+    for selector, body in css_rules(css_text):
+        names = re.findall(r"\.(cols-[\w-]+)", selector)
+        if not names:
+            continue
+        for name, value in declarations(body):
+            if name == "grid-template-columns":
+                for cols_class in names:
+                    templates[cols_class] = _split_tracks(value)
+    return templates
+
+
+def _chrome(
+    tmp_path: Path,
+    name: str,
+    pages: dict[str, str],
+    probe: str,
+    *,
+    width: int = 1440,
+    height: int = 1150,
+    scheme: str = "dark",
+) -> dict[str, object]:
+    """Every page in `pages` under `probe`, in headless Chrome, at one size.
+
+    Delegates to `tests/probes.py` for the staging, the server and the
+    result-reading (spec 0027 FR-2): this file already carries one
+    pre-0027 copy of that plumbing in `_run_probe`, and a second one written
+    for this spec would be the third.
+    """
+    root = tmp_path / f"p28-{name}-{scheme}-{width}"
+    root.mkdir(parents=True, exist_ok=True)
+    probes.stage(root, STATIC_DIR, pages, probe, scheme)
+    httpd, port = probes.serve(root)
+    try:
+        return {
+            page: probes.run(f"http://127.0.0.1:{port}/{page}.html", width, height)
+            for page in pages
+        }
+    finally:
+        httpd.shutdown()
+
+
+#: AC-1 clause 2: whether each table fits the `.scroller` box it is in, and
+#: which cells are forbidden from wrapping.
+#:
+#: The page-level overflow probe cannot answer either question: it excuses
+#: everything inside a `.scroller`, which is right -- a scroller exists so a
+#: wide table scrolls instead of breaking the page (spec 0015 FR-4) -- and
+#: which is exactly why it reports a clean page for a table that does not
+#: fit. `scrollWidth > clientWidth` on the scroller is the table failing to
+#: fit; `white-space: nowrap` on a body cell is the usual reason (FR-9).
+_FIT_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var out = [];
+    document.querySelectorAll('.scroller').forEach(function (box, i) {
+      var table = box.querySelector('table');
+      var heads = [], nowrap = [];
+      box.querySelectorAll('thead th').forEach(function (th) {
+        heads.push(th.textContent.trim());
+      });
+      box.querySelectorAll('tbody td').forEach(function (td) {
+        var ws = getComputedStyle(td).whiteSpace;
+        if (ws === 'nowrap' || ws === 'pre') {
+          nowrap.push(td.tagName.toLowerCase() + '.' + (td.className || '')
+            + ' "' + td.textContent.trim().slice(0, 30) + '" is ' + ws);
+        }
+      });
+      var widest = null, worst = 0;
+      box.querySelectorAll('td, th').forEach(function (cell) {
+        var over = cell.scrollWidth - Math.round(cell.getBoundingClientRect().width);
+        if (over > worst) {
+          worst = over;
+          widest = cell.tagName.toLowerCase() + '.' + (cell.className || '')
+            + ' "' + cell.textContent.trim().slice(0, 30) + '" needs ' + cell.scrollWidth
+            + 'px in ' + Math.round(cell.getBoundingClientRect().width) + 'px';
+        }
+      });
+      out.push({
+        i: i, headers: heads, nowrapCells: nowrap,
+        classes: table ? (table.className || '').toString() : '',
+        clientWidth: box.clientWidth, scrollWidth: box.scrollWidth,
+        over: box.scrollWidth - box.clientWidth, worstCell: widest
+      });
+    });
+    var div = document.createElement('div');
+    div.id = 'probe-result';
+    div.textContent = JSON.stringify(out);
+    document.body.appendChild(div);
+  }, 300);
+});
+</script>
+"""
+
+#: AC-2: the stretched link's overlay against the row it is supposed to
+#: cover. `getComputedStyle(el, '::after')` resolves `width`/`height` to used
+#: pixel values in Chrome, so the overlay is measured rather than inferred
+#: from the rule that draws it.
+_STRETCH_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var out = [];
+    document.querySelectorAll('table.rows tbody tr').forEach(function (tr, i) {
+      var link = tr.querySelector('a.rowlink');
+      var box = tr.getBoundingClientRect();
+      if (!link) {
+        out.push({i: i, rowlink: false, cells: tr.children.length});
+        return;
+      }
+      var after = getComputedStyle(link, '::after');
+      out.push({
+        i: i, rowlink: true,
+        trPosition: getComputedStyle(tr).position,
+        afterContent: after.content,
+        afterPosition: after.position,
+        afterWidth: parseFloat(after.width),
+        afterHeight: parseFloat(after.height),
+        rowWidth: box.width,
+        rowHeight: box.height,
+        links: tr.querySelectorAll('a').length
+      });
+    });
+    var div = document.createElement('div');
+    div.id = 'probe-result';
+    div.textContent = JSON.stringify(out);
+    document.body.appendChild(div);
+  }, 300);
+});
+</script>
+"""
+
+#: AC-3: focus the second row's link and read what changed. The anchor's own
+#: ring is read from the same properties spec 0027's `FOCUS_PROBE` reads, so
+#: "the row is marked" and "the anchor still has its ring" are one
+#: measurement and cannot be satisfied one at a time.
+_FOCUS_ROW_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var rows = document.querySelectorAll('table.rows tbody tr');
+    var out = {rows: rows.length, focusable: 0, groupClass: null};
+    var groups = {};
+    for (var i = 0; i < rows.length; i++) {
+      if (!rows[i].querySelector('a.rowlink')) continue;
+      out.focusable++;
+      var key = (rows[i].className || '').toString();
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(rows[i]);
+    }
+    var target = null, other = null;
+    Object.keys(groups).forEach(function (key) {
+      if (other === null && groups[key].length >= 2) {
+        out.groupClass = key;
+        target = groups[key][0];
+        other = groups[key][1];
+      }
+    });
+    if (other === null) {
+      var early = document.createElement('div');
+      early.id = 'probe-result';
+      early.textContent = JSON.stringify(out);
+      document.body.appendChild(early);
+      return;
+    }
+    var link = other.querySelector('a.rowlink');
+    out.beforeFocus = getComputedStyle(other).backgroundColor;
+    link.focus();
+    out.focused = document.activeElement === link;
+    var cs = getComputedStyle(link);
+    out.outlineStyle = cs.outlineStyle;
+    out.outlineWidth = parseFloat(cs.outlineWidth);
+    out.outlineColor = cs.outlineColor;
+    out.afterFocus = getComputedStyle(other).backgroundColor;
+    out.siblingBackground = getComputedStyle(target).backgroundColor;
+    out.boxShadow = getComputedStyle(other).boxShadow;
+    var div = document.createElement('div');
+    div.id = 'probe-result';
+    div.textContent = JSON.stringify(out);
+    document.body.appendChild(div);
+  }, 300);
+});
+</script>
+"""
+
+#: AC-9/AC-7: what the browser resolved each row's column template to, and
+#: what the table it belongs to is called.
+_TRACKS_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var out = [];
+    document.querySelectorAll('table').forEach(function (table) {
+      var tr = table.querySelector('tbody tr');
+      if (!tr) return;
+      var style = getComputedStyle(tr);
+      out.push({
+        classes: (table.className || '').toString(),
+        display: style.display,
+        tracks: style.gridTemplateColumns,
+        cells: tr.children.length,
+        cellPaddingTop: getComputedStyle(tr.children[0]).paddingTop,
+        cellPaddingLeft: getComputedStyle(tr.children[0]).paddingLeft,
+        rowPaddingTop: style.paddingTop,
+        rowPaddingLeft: style.paddingLeft
+      });
+    });
+    var div = document.createElement('div');
+    div.id = 'probe-result';
+    div.textContent = JSON.stringify(out);
+    document.body.appendChild(div);
+  }, 300);
+});
+</script>
+"""
+
+#: AC-15: every row, and everything in one, that the browser is drawing at
+#: less than full opacity. The contrast probe cannot see this -- `opacity`
+#: composites the subtree *after* `getComputedStyle` has reported its
+#: `color`, which is exactly why FR-14 declines to ship it -- so it is
+#: measured directly.
+#:
+#: Scoped to the list tables rather than to `body *` on purpose: spec 0027's
+#: entry animation (`main > div { animation: cabinIn }`) begins at
+#: `opacity: 0`, and headless Chrome reports the wrapper at its first frame
+#: however long the probe waits. A page-wide reading would therefore report
+#: one offender on every page forever, which is a probe nobody can keep
+#: green and everybody learns to ignore.
+_OPACITY_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var bad = [], seen = 0;
+    document.querySelectorAll('table.rows tr, table.rows tr *').forEach(function (el) {
+      seen++;
+      var value = parseFloat(getComputedStyle(el).opacity);
+      if (value < 1) {
+        bad.push(el.tagName.toLowerCase() + '.' + (el.className || '').toString().slice(0, 24)
+          + ' is drawn at opacity ' + value);
+      }
+    });
+    var div = document.createElement('div');
+    div.id = 'probe-result';
+    div.textContent = JSON.stringify({bad: bad, examined: seen});
+    document.body.appendChild(div);
+  }, 300);
+});
+</script>
+"""
 
 
 # --- headless-Chrome plumbing, duplicated from test_ca_names_and_actions.py -
@@ -1162,10 +1539,15 @@ def test_expired_cross_is_marked_in_the_table_and_explained_on_its_page(
 
     page = client.get(f"/ca/{fix.beta_root}/cross/{fix.cross}")
     assert page.status_code == 200
-    # the full clause, which is what tells an operator no action is needed
-    assert "outside its validity window" in page.text
-    assert str(_cert_of(cfg, fix.cross).not_valid_before_utc) in page.text
-    assert "no action needed to fall back to the short chain" in page.text
+    # the full clause, which is what tells an operator no action is needed.
+    # Spec 0028 FR-7 moves it out of the identity table and into the `.panel`
+    # banner; the requirement is unchanged and so is what it compares, but a
+    # bare `in page.text` would also pass on a build that renders the banner
+    # and leaves the rows where they were, which is the one thing AC-8 exists
+    # to rule out. It is scoped to the banner instead.
+    banner = _row(page.text, "outside its validity window", class_name="panel", tag=None)
+    assert str(_cert_of(cfg, fix.cross).not_valid_before_utc) in banner
+    assert "no action needed to fall back to the short chain" in banner
 
 
 # === AC-13: per-intermediate growth is bounded ============================
@@ -1410,3 +1792,936 @@ def test_post_renew_on_a_retired_row_is_refused_server_side(
     assert _fingerprint(cfg, fix.alpha_int) == fingerprint_before, (
         "the certificate was reissued even though the row is retired"
     )
+
+
+# ==========================================================================
+# spec 0028: the detail and list pages take the design's arrangement
+# ==========================================================================
+
+
+def _issue_leaf(client: TestClient, cfg: Config, fix: Fixture) -> tuple[str, list[str]]:
+    """One certificate under alpha's constrained issuer, and its SANs.
+
+    Every name is under `PERMITTED`, because alpha's intermediate carries a
+    name constraint and an issuance outside it is refused at the door.
+    """
+    sans = [
+        f"leaf.{PERMITTED}",
+        f"alt-one.{PERMITTED}",
+        f"alt-two.{PERMITTED}",
+    ]
+    issued = client.post(
+        "/certs/issue",
+        data={
+            "subject_cn": sans[0],
+            "sans": "\n".join(sans),
+            "issuer_id": fix.alpha_int,
+            "profile": "server",
+            "key_type": "ecdsa-p256",
+            "days": 90,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert issued.status_code == 303, issued.text
+    return issued.headers["location"], sans
+
+
+# === AC-1: the Kind column exists and costs no width ======================
+
+
+def test_issuers_table_has_a_kind_column_and_still_fits_at_390(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-2 and FR-9, measured by two instruments that can each fail.
+
+    Spec 0026 FR-2 refused a fourth column because it "would cost a fourth
+    column at 390 pixels". What overturns that is not the grid -- a track
+    that shrinks under an unbreakable word does not make the word narrower
+    -- but FR-9: the widest unbreakable word on this table was a timestamp
+    cabin itself made unbreakable with `class="nowrap"`, and it comes off.
+
+    **Clause 1, the page.** The overflow probe at 390. It owns exactly one
+    question -- does anything get drawn outside the page -- and it answers
+    it well. It cannot answer anything about the table, because it excuses
+    everything inside a `.scroller`, which is what a scroller is for. It
+    reports a clean page for the three-column table shipping today, for a
+    four-column plain `<table>`, and for a four-column grid whose timestamp
+    still cannot wrap. All three were measured.
+
+    **Clause 2, each table.** Every `.rows` table's own `.scroller`:
+    `scrollWidth <= clientWidth`, i.e. the table fits without scrolling, and
+    no body cell computes `white-space: nowrap`. Measured at 390 on the
+    long-name fixture, this is what the builds come out at (issuers / cross):
+    today `0 / 76`, grid with `nowrap` kept `74 / 89`, grid with wrapping
+    `0 / 0`. The cross table's 76 is a defect spec 0026 shipped and nothing
+    caught, because the only instrument pointed at it was clause 1.
+
+    The two clauses are counter-checked against each other below, on a table
+    that is made to overflow on purpose: clause 2 must report it and clause 1
+    must not. That is the difference between them, stated as an experiment
+    rather than as a paragraph.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    html = client.get(f"/ca/{fix.alpha_root}").text
+
+    issuers = _row(html, ISSUERS_HEADING, class_name="section", tag=None)
+    assert _column_headers(issuers) == ["Name", "Kind", "Status", "Expires"]
+
+    rows = _tbody_rows(issuers)
+    assert len(rows) == 1, f"expected one issuer row, got {len(rows)}"
+    cells = _cells(rows[0])
+    assert len(cells) == 4, f"the row has {len(cells)} cells, not four: {cells}"
+    kind_cell = cells[_column_index(issuers, "Kind")]
+    tagged = [
+        _text_of(body)
+        for classes, body in re.findall(r'<span class="([^"]*)"[^>]*>(.*?)</span>', kind_cell, re.S)
+        if "tag" in classes.split()
+    ]
+    assert tagged == ["intermediate"], f"the Kind cell carries no kind tag: {kind_cell!r}"
+
+    if not Path(CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+
+    # Clause 1: the page, on both pages that carry a widened table.
+    pages = {"ca": client.get("/ca").text, "ca_detail": client.get(f"/ca/{fix.beta_root}").text}
+    for name, found in _chrome(
+        tmp_path, "kind-page", pages, probes.OVERFLOW_PROBE, width=390, height=900
+    ).items():
+        assert isinstance(found, dict)
+        assert found["bad"] == [], f"{name} draws outside the page at 390: {found['bad']}"
+        assert int(str(found["examined"])) >= 20, (
+            f"{name}: the overflow probe examined {found['examined']} elements: {found}"
+        )
+
+    # Clause 2: each table, in its own box. All three `.rows` tables -- the
+    # four-column Issuers, the five-column Cross certificates and `/ca`'s
+    # five-column grouped list.
+    def rows_tables(staged: dict[str, str], name: str) -> dict[str, dict[str, object]]:
+        measured = _chrome(tmp_path, name, staged, _FIT_PROBE, width=390, height=900)
+        found = {}
+        for page, boxes in measured.items():
+            assert isinstance(boxes, list)
+            for box in boxes:
+                classes = str(box["classes"]).split()
+                if "rows" in classes:
+                    cols = next((c for c in classes if c.startswith("cols-")), f"{page}-unnamed")
+                    found[cols] = box
+        return found
+
+    tables = rows_tables(pages, "kind-fit")
+    assert set(tables) == {"cols-hierarchies", "cols-issuers", "cols-crosses"}, (
+        f"expected the three .rows tables in their own scrollers, measured {sorted(tables)}"
+    )
+    for cols_class, box in sorted(tables.items()):
+        assert int(str(box["over"])) <= 1, (
+            f".{cols_class} does not fit its scroller at 390: it needs "
+            f"{box['scrollWidth']}px of the {box['clientWidth']}px it has, so the table "
+            f"scrolls sideways on a phone. The page-level probe reports this as clean, "
+            f"which is why it is measured here. Widest cell: {box['worstCell']}"
+        )
+        assert box["nowrapCells"] == [], (
+            f".{cols_class} has body cells that cannot wrap, which is what made the "
+            f"fourth column unaffordable (FR-9): {box['nowrapCells']}"
+        )
+
+    # The counter-check, and the demonstration that the two clauses are not
+    # the same measurement: 4000px planted *inside* the scroller is exactly
+    # where clause 1 stops looking.
+    widened = issuers.replace(
+        '<div class="scroller">', '<div class="scroller"><div style="width:4000px">x</div>', 1
+    )
+    assert widened != issuers, "the planted div was not inserted"
+    broken = {"ca_detail": html.replace(issuers, widened, 1)}
+
+    planted = rows_tables(broken, "kind-fit-planted")["cols-issuers"]
+    assert int(str(planted["over"])) > 1, (
+        f"a 4000px div inside the Issuers scroller was not reported as overflow -- "
+        f"clause 2 cannot fail and measures nothing: {planted}"
+    )
+    blind = _chrome(
+        tmp_path, "kind-page-planted", broken, probes.OVERFLOW_PROBE, width=390, height=900
+    )["ca_detail"]
+    assert isinstance(blind, dict)
+    assert blind["bad"] == [], (
+        f"the page probe reported a 4000px element inside a .scroller. That is the "
+        f"one thing it is supposed to excuse (spec 0015 FR-4), and if it no longer "
+        f"does, clause 1 and clause 2 are the same measurement and one of them "
+        f"should go: {blind['bad']}"
+    )
+
+
+# === AC-2: the whole row is the target, the name cell is still the link ====
+
+
+def test_the_row_is_the_click_target_and_the_name_is_still_the_link(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-3. Spec 0026 AC-2's assertion is re-run unmodified -- the row's
+    first cell contains an `<a>` whose `href` is the row's page and whose
+    text is the row's name -- plus the class, plus the geometry.
+
+    The geometry is the half no markup assertion can reach: an overlay drawn
+    against the page instead of against the row (`position: relative`
+    missing on the `<tr>`) covers the whole table, and the last row wins
+    every click while every string on the page stays exactly where it was.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    html = client.get(f"/ca/{fix.alpha_root}").text
+
+    issuers = _row(html, ISSUERS_HEADING, class_name="section", tag=None)
+    row_html = _tbody_rows(issuers)[0]
+    name_cell = _cells(row_html)[_column_index(issuers, "Name")]
+    assert _anchors(name_cell) == [
+        (f"/ca/{fix.alpha_root}/issuer/{fix.alpha_int}", fix.alpha_int_name)
+    ]
+    assert "rowlink" in _classes_of(name_cell, "a"), (
+        f"the name cell's link does not carry .rowlink: {name_cell!r}"
+    )
+
+    pages = {
+        "ca": client.get("/ca").text,
+        "alpha": html,
+        "beta": client.get(f"/ca/{fix.beta_root}").text,
+    }
+    crowded = {}
+    for page_name, page in pages.items():
+        for table in _tables_with_class(page, "rows"):
+            for tr in re.findall(r"<tr\b[^>]*>.*?</tr>", table, re.S):
+                links = len(re.findall(r"<a\b", tr))
+                if links > 1:
+                    crowded.setdefault(page_name, []).append(_text_of(tr))
+    assert crowded == {}, (
+        f"a stretched row's overlay covers every other link in the row, so a row "
+        f"may hold exactly one: {crowded}"
+    )
+
+    if not Path(CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+
+    measured = _chrome(tmp_path, "stretch", {"ca_detail": html}, _STRETCH_PROBE)["ca_detail"]
+    assert isinstance(measured, list)
+    assert measured, "no <tbody> row of a .rows table was rendered at all"
+    assert [entry for entry in measured if not entry["rowlink"]] == [], (
+        f"a row of a clickable table has no .rowlink in it: {measured}"
+    )
+    for entry in measured:
+        assert entry["trPosition"] == "relative", (
+            f"the <tr> is not a positioned box, so the overlay is drawn against the "
+            f"page and covers the whole table: {entry}"
+        )
+        assert entry["afterPosition"] == "absolute", entry
+        assert entry["afterWidth"] is not None and entry["afterHeight"] is not None, (
+            f".rowlink has no ::after box at all -- there is no overlay: {entry}"
+        )
+        assert abs(entry["afterWidth"] - entry["rowWidth"]) <= 1, (
+            f"the overlay is {entry['afterWidth']}px wide and the row is "
+            f"{entry['rowWidth']}px: {entry}"
+        )
+        assert abs(entry["afterHeight"] - entry["rowHeight"]) <= 1, (
+            f"the overlay is {entry['afterHeight']}px tall and the row is "
+            f"{entry['rowHeight']}px: {entry}"
+        )
+
+
+# === AC-3: focus is visible on the row, not only on the name ==============
+
+
+def test_focus_paints_on_the_row_and_on_the_link(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-3's third clause: the treatment is *additive*.
+
+    Spec 0027 FR-15 gives every focusable element a 2px accent ring, which on
+    a stretched link paints around the name text and not around the row the
+    click opens. The obvious fix -- suppress the anchor's outline and draw
+    one on the row -- is forbidden: no rule anywhere may set `outline: none`
+    or `outline: 0`. So both are asserted in one test, and the two halves
+    fail in opposite directions.
+
+    The row is compared against **another row of the same class**: a child
+    row focused and compared with a `.row-root` sibling would differ whatever
+    the focus rule does, because the root row carries a fill of its own.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    del fix
+    page = client.get("/ca").text
+
+    css = CSS_PATH.read_text()
+    suppressed = [
+        (selector, name, value)
+        for selector, body in css_rules(css)
+        for name, value in declarations(body)
+        if name == "outline" and value.strip() in {"none", "0"}
+    ]
+    assert suppressed == [], (
+        f"spec 0027 FR-15 forbids a suppressed outline anywhere, and a stretched "
+        f"row is exactly where one is tempting: {suppressed}"
+    )
+
+    if not Path(CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+
+    found = _chrome(tmp_path, "focusrow", {"ca": page}, _FOCUS_ROW_PROBE)["ca"]
+    assert isinstance(found, dict)
+    assert found.get("groupClass") is not None, (
+        f"the grouped list has no two rows of the same class carrying a .rowlink, so "
+        f"there is nothing to compare a focused row against: {found}"
+    )
+    assert found["focused"], f"the .rowlink could not take focus: {found}"
+    assert found["outlineStyle"] != "none", (
+        f"the anchor's own ring is gone; spec 0027 AC-11's probe reads exactly this "
+        f"property, and FR-3 requires the row treatment to be added to it, not to "
+        f"replace it: {found}"
+    )
+    assert float(found["outlineWidth"]) >= 2, found
+    assert found["afterFocus"] != found["beforeFocus"], (
+        f"focusing the row's link changed nothing about the row: it is drawn "
+        f"{found['afterFocus']} either way, so an operator working from the keyboard "
+        f"cannot see which row they are on: {found}"
+    )
+    assert found["afterFocus"] != found["siblingBackground"], (
+        f"the focused row is drawn the same as an unfocused row of the same class "
+        f"({found['groupClass']}): {found}"
+    )
+
+
+# === AC-4: renew and retire are last, and the tables are still above ======
+
+
+def test_renew_and_retire_is_its_own_section_and_comes_last(
+    client: TestClient, cfg: Config
+) -> None:
+    """FR-4 supersedes spec 0026 FR-1 clause 2. Spec 0026 AC-1's five-block
+    order is the first five of these six and is unchanged, which is what
+    stops "the forms moved" from becoming "the forms moved back above the
+    tables" -- the defect spec 0026 exists to fix."""
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    html = client.get(f"/ca/{fix.beta_root}").text
+
+    blocks = [
+        _row(html, f'href="/ca/{fix.beta_root}.pem"', class_name="section", tag=None),
+        _row(html, ISSUERS_HEADING, class_name="section", tag=None),
+        _row(html, CROSS_HEADING, class_name="section", tag=None),
+        _row(html, f'action="/ca/{fix.beta_root}/intermediate"', class_name="section", tag=None),
+        _row(html, f'action="/ca/{fix.beta_root}/cross-sign"', class_name="section", tag=None),
+        _row(html, f'action="/ca/{fix.beta_root}/retire"', class_name="section", tag=None),
+    ]
+    positions = [html.index(block) for block in blocks]
+    assert len(set(positions)) == 6, (
+        "the six blocks are not six distinct elements -- the retire form is still "
+        "inside one of the sections above it"
+    )
+    assert positions == sorted(positions), (
+        "root, Issuers, Cross certificates, Add intermediate, Cross-sign, "
+        "Renew and retire are out of order"
+    )
+
+    root_block, retire_block = blocks[0], blocks[-1]
+    assert "<form" not in root_block, (
+        "the root's identity section still carries a form: FR-4 moves the renew and "
+        "retire forms out of it, so that the page's one danger control is not read "
+        "beside the root's subject and fingerprint"
+    )
+    assert _headings(retire_block) == ["Renew and retire"], _headings(retire_block)
+
+    last_section = max(m.start() for m in re.finditer(r'<div class="section[^"]*"', html))
+    assert last_section == html.index(retire_block), (
+        "Renew and retire is not the last section on the page (the design's 5.8 "
+        "gives it the fifth and last slot)"
+    )
+
+    # ...and it is still gated the way the forms it holds were: a viewer sees
+    # no section at all rather than an empty heading.
+    _create_viewer(client, cfg)
+    _login(client, "vera", "whatever12345")
+    viewer_html = client.get(f"/ca/{fix.beta_root}").text
+    assert "Renew and retire" not in _headings(viewer_html), (
+        "a viewer is shown the Renew and retire section with nothing in it"
+    )
+    assert _form_actions(viewer_html) == ["/logout"]
+
+
+# === AC-7: the definition grid keeps every field and its box ==============
+
+
+def test_the_fact_grid_keeps_every_field_and_its_scroller(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-6 restyles spec 0026 FR-6's identity table; it does not replace it.
+
+    Every field is named separately, so a restyle that drops one fails by
+    name. The `.scroller` is a deliberate divergence from the design (FR-6):
+    dropping it to match the brief would mean editing
+    `test_every_table_is_wrapped_in_scroller` in the same change that
+    introduces four new tables.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    cert_path, sans = _issue_leaf(client, cfg, fix)
+
+    issuer_html = client.get(f"/ca/{fix.alpha_root}/issuer/{fix.alpha_int}").text
+    facts = _fact_rows(_table(issuer_html, "facts"))
+    labels = Counter(label for label, _value in facts)
+    assert labels == Counter(
+        ["Kind", "Status", "Valid from", "Valid until", "Subject", "Fingerprint"]
+    ), sorted(labels.items())
+    values = dict(facts)
+    assert "intermediate" in _text_of(values["Kind"])
+    assert "active" in _text_of(values["Status"])
+    assert _expiry_of(cfg, fix.alpha_int) in _text_of(values["Valid until"])
+    assert _subject_of(cfg, fix.alpha_int) in _text_of(values["Subject"])
+    assert _fingerprint(cfg, fix.alpha_int) in _text_of(values["Fingerprint"])
+
+    box = _row(issuer_html, _fingerprint(cfg, fix.alpha_int), class_name="scroller", tag="div")
+    assert "<table" in box, "the definition grid is no longer inside its .scroller (FR-6)"
+
+    cert_html = client.get(cert_path).text
+    cert_facts = _table(cert_html, "facts")
+    cert_values = dict(_fact_rows(cert_facts))
+    assert {"Serial", "Profile", "SANs", "Valid from", "Valid until"} <= set(cert_values)
+    sans_cell = cert_values["SANs"]
+    per_element = [
+        _text_of(body) for _tag, body in re.findall(r"<(\w+)\b[^>]*>(.*?)</\1>", sans_cell, re.S)
+    ]
+    assert sorted(per_element) == sorted(sans), (
+        f"the design's 5.4 renders one element per SAN; this cell renders "
+        f"{per_element!r} for {sans!r}"
+    )
+
+    if not Path(CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+
+    for name, page in (("ca_issuer", issuer_html), ("cert_detail", cert_html)):
+        measured = _chrome(tmp_path, f"facts-{name}", {name: page}, _TRACKS_PROBE)[name]
+        assert isinstance(measured, list)
+        grids = [entry for entry in measured if "facts" in entry["classes"].split()]
+        assert len(grids) == 1, f"{name}: expected one .facts table, got {len(grids)}"
+        tracks = _split_tracks(grids[0]["tracks"])
+        assert len(tracks) == 2, (
+            f"{name}: the definition grid's row resolves to {len(tracks)} tracks, not the "
+            f"design's `auto minmax(0,1fr)`: {grids[0]}"
+        )
+
+
+# === AC-8: the banner carries the signer, and the grid carries neither ====
+
+
+def test_the_cross_banner_carries_what_the_grid_lost(client: TestClient, cfg: Config) -> None:
+    """FR-7 moves two facts; both halves are asserted here, because a build
+    that renders the banner and leaves the rows in place would pass every
+    other criterion in this spec."""
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    page = client.get(f"/ca/{fix.beta_root}/cross/{fix.cross}").text
+    banner = _row(page, "in place of", class_name="panel", tag=None)
+    assert fix.alpha_root_name in _text_of(banner), (
+        f"the banner does not name the signing root: {_text_of(banner)!r}"
+    )
+    tags = [
+        _text_of(body)
+        for classes, body in re.findall(r'<span class="([^"]*)"[^>]*>(.*?)</span>', banner, re.S)
+        if "tag" in classes.split()
+    ]
+    assert tags, f"the banner carries no serving tag: {banner!r}"
+
+    labels = set(dict(_fact_rows(_table(page, "facts"))))
+    assert "Signed by" not in labels and "Serving" not in labels, (
+        f"the two facts were copied into the banner and left in the grid, which is "
+        f"what turns 'moved' into 'duplicated': {sorted(labels)}"
+    )
+
+    now = datetime.now(UTC)
+    _set_cross_validity(
+        cfg, fix.cross, not_before=now - timedelta(days=400), not_after=now - timedelta(days=1)
+    )
+    expired = client.get(f"/ca/{fix.beta_root}/cross/{fix.cross}").text
+    expired_banner = _row(expired, "outside its validity window", class_name="panel", tag=None)
+    assert str(_cert_of(cfg, fix.cross).not_valid_before_utc) in expired_banner
+    assert "no action needed to fall back to the short chain" in _text_of(expired_banner), (
+        "the full clause -- the half that tells an operator nothing needs doing -- is "
+        "not in the banner"
+    )
+
+    detail = client.get(f"/ca/{fix.beta_root}").text
+    cross_section = _row(detail, CROSS_HEADING, class_name="section", tag=None)
+    row_html = _row(cross_section, f'href="/ca/{fix.beta_root}/cross/{fix.cross}"', tag="tr")
+    serving = _text_of(_cells(row_html)[_column_index(cross_section, "Serving")])
+    assert "not served" in serving, (
+        "the short tag stayed on the hierarchy page (spec 0026 FR-3); only the full "
+        "clause moved into the banner"
+    )
+
+
+# === AC-9: the column templates are the design's =========================
+
+
+#: The brief's own ratios, per screen (sections 5.7 and 5.8).
+BRIEF_TRACKS = {
+    "cols-hierarchies": (2.0, 0.8, 1.0, 0.9, 1.1),
+    "cols-issuers": (2.0, 1.2, 0.8, 1.1),
+    "cols-crosses": (1.7, 1.3, 0.8, 0.9, 1.0),
+}
+
+
+def test_the_column_templates_are_the_designs(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-9's templates, read twice: off the file and off the browser.
+
+    They say different things. The computed style says what the columns came
+    out as at this width; only the file says which *form* was written.
+
+    What this does **not** claim is that a bare `Nfr` breaks 390. An earlier
+    draft of AC-9 did, and it was measured false: a bare `Nfr` fits at 390 on
+    cabin's content, in both the wrapping and the non-wrapping build, and
+    AC-1's probe could not have failed for that reason in any case. The
+    `minmax(0, …)` form is required because it is the design's own (brief
+    section 6.14) and because it bounds every track to the container for
+    content this fixture does not contain. Whether a table actually fits is
+    AC-1 clause 2's measurement, whatever the tracks are written as.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    declared = _column_templates(CSS_PATH.read_text())
+    assert set(declared) == set(BRIEF_TRACKS), (
+        f"the stylesheet declares column templates for {sorted(declared)}; FR-9 names "
+        f"{sorted(BRIEF_TRACKS)}"
+    )
+    for name, tracks in sorted(declared.items()):
+        expected = BRIEF_TRACKS[name]
+        assert len(tracks) == len(expected), f".{name} has {len(tracks)} tracks: {tracks}"
+        bare = [track for track in tracks if not re.fullmatch(r"minmax\(\s*0(px)?\s*,.*\)", track)]
+        assert bare == [], (
+            f".{name} has tracks that are not `minmax(0, …)`: {bare}. The form is the "
+            f"design's own and it bounds every track to the container whatever the "
+            f"cell holds; a bare `Nfr` is `minmax(auto, Nfr)`, whose minimum is the "
+            f"content's, and it happens to fit this fixture's content only"
+        )
+        ratios = [float(re.search(r"([\d.]+)fr", track).group(1)) for track in tracks]  # type: ignore[union-attr]
+        assert ratios == list(expected), f".{name} declares {ratios}, the brief has {expected}"
+
+    if not Path(CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+
+    pages = {
+        "ca": client.get("/ca").text,
+        "ca_detail": client.get(f"/ca/{fix.beta_root}").text,
+    }
+    measured = _chrome(tmp_path, "tracks", pages, _TRACKS_PROBE)
+    seen: dict[str, list[float]] = {}
+    for page_name, entries in measured.items():
+        assert isinstance(entries, list)
+        for entry in entries:
+            classes = entry["classes"].split()
+            for cols_class in BRIEF_TRACKS:
+                if cols_class not in classes:
+                    continue
+                assert entry["display"] == "grid", (
+                    f"{page_name}: a .{cols_class} row is `display: {entry['display']}`, so "
+                    f"the column template is not applied at all: {entry}"
+                )
+                widths = [float(track.rstrip("px")) for track in _split_tracks(entry["tracks"])]
+                seen[cols_class] = widths
+    missing = sorted(set(BRIEF_TRACKS) - set(seen))
+    assert missing == [], f"no row of these tables was rendered at all: {missing}"
+
+    for cols_class, widths in sorted(seen.items()):
+        expected = BRIEF_TRACKS[cols_class]
+        assert len(widths) == len(expected), (
+            f".{cols_class} resolved to {len(widths)} tracks, not {len(expected)}: {widths}"
+        )
+        total, share = sum(widths), sum(expected)
+        drift = {
+            index: (round(widths[index] / total, 4), round(expected[index] / share, 4))
+            for index in range(len(widths))
+            if abs(widths[index] / total - expected[index] / share)
+            > 0.02 * (expected[index] / share)
+        }
+        assert drift == {}, (
+            f".{cols_class} column {sorted(drift)} is not in the brief's ratio "
+            f"(measured, brief): {drift}"
+        )
+
+
+# === AC-10: every table is still a table, and still wrapped ===============
+
+
+def test_the_tables_are_still_tables(client: TestClient, cfg: Config) -> None:
+    """FR-8/AC-10. `test_every_table_is_wrapped_in_scroller` (spec 0015 FR-4)
+    is satisfied vacuously by a page with no `<table>` left to wrap, so what
+    it cannot see is asserted here: the elements are still the table
+    elements, and the design's `<div>` stack -- the brief's own explicit "do
+    not" in section 6.2 -- was not reproduced literally."""
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    with_tables = set()
+    for name in FIVE_TEMPLATES:
+        text = (TEMPLATES_DIR / name).read_text()
+        for role in ('role="table"', 'role="row"', 'role="cell"', 'role="columnheader"'):
+            assert role not in text, f"{name} reproduces the design's <div> stack: {role}"
+        if "<table" in text:
+            with_tables.add(name)
+            for element in ("<tbody", "<td"):
+                assert element in text, f"{name} has a <table> but no {element}"
+    assert with_tables == {
+        "ca_list.html",
+        "ca_detail.html",
+        "ca_issuer.html",
+        "cert_detail.html",
+    }, with_tables
+
+    declared = _column_templates(CSS_PATH.read_text())
+    pages = {
+        "ca": client.get("/ca").text,
+        "ca_detail": client.get(f"/ca/{fix.beta_root}").text,
+    }
+    checked = 0
+    for page_name, page in pages.items():
+        for table in _tables_with_class(page, "rows"):
+            classes = _classes_of(table, "table")
+            cols = [name for name in classes if name.startswith("cols-")]
+            assert len(cols) == 1, f"{page_name}: a .rows table has {cols} column templates"
+            assert cols[0] in declared, f"{page_name}: .{cols[0]} has no rule in cabin.css"
+            headers = _column_headers(table)
+            assert len(headers) == len(declared[cols[0]]), (
+                f"{page_name}: .{cols[0]} declares {len(declared[cols[0]])} tracks and its "
+                f"<thead> has {len(headers)} columns: {headers}"
+            )
+            checked += 1
+    assert checked == 3, f"expected the three .rows tables, measured {checked}"
+
+
+# === AC-15: nothing is dimmed with opacity ================================
+
+
+def _dimming_rules(css_text: str) -> list[tuple[str, str]]:
+    """Every rule of this spec's own that declares `opacity`."""
+    return [
+        (selector, value)
+        for selector, body in css_rules(css_text)
+        for name, value in declarations(body)
+        if name == "opacity"
+        and any(re.search(rf"\.{re.escape(known)}\b", selector) for known in DEFINED_CLASSES)
+    ]
+
+
+def test_no_row_is_dimmed_with_opacity(client: TestClient, cfg: Config, tmp_path: Path) -> None:
+    """FR-14, and the reason it is a requirement rather than a preference.
+
+    The design gives non-active rows `opacity: .65`. `opacity` composites the
+    whole subtree *after* `getComputedStyle` has reported its `color`, so the
+    contrast probe spec 0027 built would report 4.5:1 for text that renders
+    at roughly 3:1 -- a property that quietly defeats the check.
+
+    Which means the contrast run below cannot catch it, and saying so is the
+    point: what catches it is the stylesheet parse (with its counter-check)
+    and the rendered `opacity` reading, which looks at the property the
+    contrast probe is blind to.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    css = CSS_PATH.read_text()
+
+    defined = {
+        name
+        for selector, _body in css_rules(css)
+        for name in re.findall(r"\.([a-zA-Z][\w-]*)", selector)
+    }
+    undefined = [name for name in DEFINED_CLASSES if name not in defined]
+    assert undefined == [], (
+        f"these classes have no rule in cabin.css, so 'none of this spec's rules "
+        f"declares opacity' would be true of a stylesheet that declares nothing at "
+        f"all: {undefined}"
+    )
+    assert _dimming_rules(css) == [], (
+        f"a dimmed row passes the contrast probe while being a third less legible "
+        f"than the probe believes: {_dimming_rules(css)}"
+    )
+
+    doctored = css + "\n.row-child { opacity: .65; }\n"
+    assert _dimming_rules(doctored) != [], (
+        "the design's own `opacity: .65`, appended to the stylesheet, was not "
+        "reported -- the clause above cannot fail"
+    )
+
+    retire = client.post(
+        f"/ca/{fix.beta_int}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
+    assert retire.status_code == 303, retire.text
+    assert _status_of(cfg, fix.beta_int) == "retired"
+
+    detail = client.get(f"/ca/{fix.beta_root}").text
+    issuers = _row(detail, ISSUERS_HEADING, class_name="section", tag=None)
+    retired_row = _row(
+        issuers, f'href="/ca/{fix.beta_root}/issuer/{fix.beta_int}"', class_name=None, tag="tr"
+    )
+    status_cell = _cells(retired_row)[_column_index(issuers, "Status")]
+    tagged = [
+        (classes.split(), _text_of(body))
+        for classes, body in re.findall(
+            r'<span class="([^"]*)"[^>]*>(.*?)</span>', status_cell, re.S
+        )
+    ]
+    assert [text for classes, text in tagged if "tag-bad" in classes] == ["retired"], (
+        f"a retired row is marked the way every other retired thing in cabin is "
+        f"marked -- a `tag-bad` tag reading `retired`: {status_cell!r}"
+    )
+
+    if not Path(CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+
+    pages = {"ca": client.get("/ca").text, "ca_detail": detail}
+    dimmed = _chrome(tmp_path, "opacity", pages, _OPACITY_PROBE)
+    for name, found in dimmed.items():
+        assert isinstance(found, dict)
+        assert found["bad"] == [], (
+            f"{name}: a row is composited at less than full opacity, which the "
+            f"contrast probe reads straight through: {found['bad']}"
+        )
+        assert int(str(found["examined"])) >= 10, (
+            f"{name}: the probe found {found['examined']} elements in the list tables, "
+            f"so it is measuring nothing: {found}"
+        )
+
+    contrast = _chrome(tmp_path, "opacity-contrast", pages, probes.CONTRAST_PROBE)
+    for name, found in contrast.items():
+        assert isinstance(found, dict)
+        assert found["bad"] == [], f"{name}: {found['bad']}"
+
+
+# === AC-16: not one sentence changed ======================================
+
+
+class _TextNodes(HTMLParser):
+    """Every visible text node of a page, whitespace-collapsed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: list[str] = []
+        self._muted = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style"}:
+            self._muted += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and self._muted:
+            self._muted -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._muted:
+            return
+        text = " ".join(data.split())
+        if text:
+            self.texts.append(text)
+
+
+def _text_nodes(html: str) -> Counter[str]:
+    parser = _TextNodes()
+    parser.feed(html)
+    return Counter(parser.texts)
+
+
+def _baseline_templates(tmp_path: Path) -> Path:
+    """The templates as they stood at `BASELINE`, in a directory of their own."""
+    out = tmp_path / "templates-before"
+    out.mkdir(parents=True, exist_ok=True)
+    listed = subprocess.run(
+        ["git", "-C", str(REPO), "ls-tree", "-r", "--name-only", BASELINE, str(TEMPLATES_DIR)],
+        capture_output=True,
+        text=True,
+    )
+    assert listed.returncode == 0, listed.stderr
+    names = [line for line in listed.stdout.split() if line.endswith(".html")]
+    assert len(names) > 10, f"{BASELINE} has {len(names)} templates: {names}"
+    for name in names:
+        blob = subprocess.run(
+            ["git", "-C", str(REPO), "show", f"{BASELINE}:{name}"], capture_output=True
+        )
+        assert blob.returncode == 0, blob.stderr
+        (out / Path(name).name).write_bytes(blob.stdout)
+    return out
+
+
+@contextmanager
+def _rendering_from(directory: Path) -> Iterator[None]:
+    """Render through another set of templates, against the same database.
+
+    One environment, one instance, one set of rows: every difference between
+    the two renderings is a difference of markup, which is the only thing
+    FR-15 is about. Rendering a second instance would compare two different
+    fingerprints and two different expiry dates and prove nothing.
+    """
+    env = cabin_web.templates.env
+    original = env.loader
+    env.loader = FileSystemLoader(str(directory))
+    env.cache.clear()
+    try:
+        yield
+    finally:
+        env.loader = original
+        env.cache.clear()
+
+
+def test_no_sentence_changed_on_the_five_pages(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """FR-15/AC-16: nothing is lost, and every addition is named.
+
+    An equality would be the stronger claim and it is not available: FR-2
+    adds a `Kind` heading and a kind cell, FR-5 a row per intermediate, FR-4
+    a section heading and its help line, FR-6 splits the comma-joined SANs,
+    and FR-7 takes two labels off the cross page -- four of the five are this
+    spec's own requirements. So the comparison is exact in the direction that
+    carries FR-15 (nothing the page said before is gone) and named in the
+    other (every new string is listed, per page, from the fixture's own
+    data). A heading "improved" while the markup around it is rewritten fails
+    both halves at once: the old wording disappears and the new wording is in
+    nobody's list.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    cert_path, sans = _issue_leaf(client, cfg, fix)
+
+    paths = {
+        "ca": "/ca",
+        "ca_detail": f"/ca/{fix.beta_root}",
+        "ca_issuer": f"/ca/{fix.alpha_root}/issuer/{fix.alpha_int}",
+        "ca_cross": f"/ca/{fix.beta_root}/cross/{fix.cross}",
+        "cert_detail": cert_path,
+    }
+
+    def render() -> dict[str, str]:
+        pages = {}
+        for name, path in paths.items():
+            resp = client.get(path)
+            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+            pages[name] = resp.text
+        return pages
+
+    after = render()
+    with _rendering_from(_baseline_templates(tmp_path)):
+        before = render()
+
+    assert any(before[name] != after[name] for name in paths), (
+        f"the five pages render byte-identically through the templates of "
+        f"{BASELINE} and through today's -- either this spec has not been "
+        f"implemented, or the template loader was not actually swapped and this "
+        f"test is comparing every page with itself"
+    )
+
+    glyphs = {"├", "└"}  # the tree glyphs, named rather than matched
+    kind_words = {"root", "intermediate", "cross"}
+    statuses = {"active", "retired"}
+    row_data = {
+        fix.alpha_int_name,
+        fix.beta_int_name,
+        _expiry_of(cfg, fix.alpha_int),
+        _expiry_of(cfg, fix.beta_int),
+    }
+    additions = {
+        # FR-5: one row per intermediate under its own root.
+        "ca": glyphs | kind_words | statuses | row_data,
+        # FR-2's Kind column, and FR-4's section heading and help line, which
+        # are lifted verbatim from `ca_issuer.html` rather than written.
+        "ca_detail": {
+            "Kind",
+            "intermediate",
+            "Renew and retire",
+            "The two things that can be done to this certificate from here.",
+        },
+        "ca_issuer": set(),
+        "ca_cross": set(),
+        # FR-6: one element per SAN instead of one comma-joined string.
+        "cert_detail": set(sans),
+    }
+    removals = {
+        "ca": set(),
+        "ca_detail": set(),
+        "ca_issuer": set(),
+        # FR-7: the two labels the banner takes over. The sentences beside
+        # them move unchanged and must not show up here.
+        "ca_cross": {"Signed by", "Serving"},
+        "cert_detail": {", ".join(sans)},
+    }
+
+    for name in paths:
+        old, new = _text_nodes(before[name]), _text_nodes(after[name])
+        assert sum(old.values()) >= 20, f"{name}: the baseline page has {sum(old.values())} texts"
+        lost = old - new
+        assert set(lost) <= removals[name], (
+            f"{name}: text that was on this page before this spec is gone from it. "
+            f"FR-15 takes no exception: {sorted(set(lost) - removals[name])}"
+        )
+        gained = new - old
+        assert set(gained) <= additions[name], (
+            f"{name}: text this spec did not name appears on the page. Every "
+            f"addition is argued in an FR or it is a wording change: "
+            f"{sorted(set(gained) - additions[name])}"
+        )
+
+
+# === AC-18: the view builders return exactly what the contract says =======
+
+
+def test_child_view_and_overview_return_exactly_their_keys(client: TestClient, cfg: Config) -> None:
+    """The Interface Contract enumerates every key, including the ones inside
+    the dictionaries, because spec 0024's contract once said "gains one flag
+    … no other key changes" and that sentence produced a defect that survived
+    a green suite. Set equality, so an extra key fails as loudly as a missing
+    one -- spec 0026's contract said `_child_view` returns *exactly five*."""
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    six = {"id", "name", "kind", "status", "not_valid_after", "href"}
+    db = _db(cfg)
+    try:
+        rows = ca_service.list_cas(db)
+        by_id = {row.id: row for row in rows}
+
+        child = ca_ui._child_view(by_id[fix.alpha_int])
+        assert set(child) == six, sorted(child)
+        assert child["kind"] == by_id[fix.alpha_int].kind == "intermediate"
+
+        cross = ca_ui._child_view(by_id[fix.cross])
+        assert set(cross) == six, sorted(cross)
+        assert cross["kind"] == by_id[fix.cross].kind == "cross"
+
+        overview = ca_ui._overview(db, rows)
+        assert len(overview) == 2, overview
+        for entry in overview:
+            assert set(entry) == {
+                "id",
+                "name",
+                "status",
+                "not_valid_after",
+                "intermediate_count",
+                "cross_count",
+                "issuers",
+            }, sorted(entry)
+            issuers = entry["issuers"]
+            assert isinstance(issuers, list)
+            assert len(issuers) == entry["intermediate_count"], (
+                f"the count column and the child rows are two statements about the "
+                f"same hierarchy and they disagree: {entry}"
+            )
+            for issuer in issuers:
+                assert set(issuer) == six, sorted(issuer)
+                assert by_id[issuer["id"]].parent_id == entry["id"], (
+                    f"an issuer of another root is listed under this one: {issuer}"
+                )
+                assert issuer["href"] == f"/ca/{entry['id']}/issuer/{issuer['id']}"
+
+        group = ca_ui._group(db, rows, by_id[fix.beta_root])
+        assert [set(row) for row in group["intermediates"]] == [six]
+        assert [set(row) for row in group["cross_certificates"]] == [six | {"signed_by", "served"}]
+    finally:
+        db.close()
