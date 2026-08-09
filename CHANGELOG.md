@@ -6,6 +6,102 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
+Three specifications, 0023–0025, have landed since 0.2.0 was tagged and are
+not yet released. Together they split `/ca` into four pages, stop composing
+a name for a hierarchy cabin creates, separate creating a root from creating
+its first intermediate, and give every CA import and export its own page
+under a new "Transfer" rail group.
+
+Two things to know before upgrading an instance already running cabin.
+
+**A CA created from now on is named exactly what was typed, with no suffix
+appended.** `create_hierarchy` and `create_intermediate_under` used to build
+the subject as `f"{name} Root CA"` or `f"{name} Intermediate CA"`; both now
+sign and store `name` verbatim. Anything that relied on the old suffix — a
+script matching a CA by its composed name, an operator who typed `Acme`
+expecting the certificate to say `Acme Root CA` — sees a different name on
+every hierarchy created after this change. Existing rows are untouched:
+`name` was and remains the CN of that row's own certificate, so nothing
+already issued and nothing already in the database changes.
+
+**The CA key export is the first time cabin hands a private signing key to
+anyone.** `POST /transfer/ca-key` packages a CA's certificate and its
+unsealed private key as a password-protected PKCS#12 file. It is
+superadmin-only and writes a `ca_key_exported` audit event — but that event
+only records that an export happened, not what its holder does with the
+file afterward. Whoever receives it can issue certificates as that CA for as
+long as its certificate is valid, and cabin cannot see them doing it:
+cabin's CRL only ever covers what cabin itself issued. The one remedy left
+is retiring or distrusting the whole hierarchy, which invalidates every
+certificate under it, not only the ones the key holder made.
+
+### Added
+
+- Spec 0023 (ca-pages): `/ca` splits into four pages. `GET /ca` is now a
+  bare list — one row per hierarchy with its status, expiry and
+  intermediate/cross counts, no form and no per-hierarchy detail — linking
+  to `GET /ca/{ca_id}`, which shows one hierarchy in full (its root, every
+  intermediate with its CRL/AIA/ACME URLs, every cross certificate) plus,
+  for an admin, every action that applies to it: renew, retire, add an
+  intermediate, cross-sign. `GET /ca/new` carries the create form alone and
+  `GET /ca/import` carries both import forms; `ca_setup.html`, the wizard
+  that used to double as the create/import page, is gone. No POST path,
+  form field or guard changes — a redirect target does:
+  `/ca/{root_id}/intermediate` and `/ca/{ca_id}/cross-sign` now re-render
+  the hierarchy's own detail page on error, with what was typed still in
+  the form and its section open, instead of the removed list-with-forms
+  page and a JSON error document. A new rail group "Certificate authority"
+  holds Hierarchies / Create / Import, gated by a new `ca_admin` nav flag
+  kept deliberately distinct from `issue`. The empty state still explains
+  where to go and stays reachable on a fresh instance and on one still
+  serving a self-signed certificate.
+- Spec 0024 (ca-names-and-actions): **a CA's name is now taken verbatim** —
+  see above. A name is stripped of leading and trailing whitespace, then
+  refused on the form — not reaching cryptography's own exception as a
+  500 — if what's left is empty or exceeds 64 UTF-8 bytes, the same bound
+  `x509.NameAttribute` itself enforces. `POST /ca/create` writes a root and
+  nothing else; adding its first intermediate is a separate action on the
+  hierarchy's own detail page, so "a root with no active issuer yet" is now
+  the ordinary state of a freshly created hierarchy rather than a rare one
+  — the dashboard, the issue form and the two internal error paths
+  (`resolve_issuer`, `resolve_granted_issuer`) all say so explicitly and
+  link to where the fix is, instead of reusing the sentence for "no CA at
+  all". An intermediate is refused if its subject would come out identical
+  to its own parent root's: dropping the composed suffix made that
+  reachable, and a real chain-building bug follows from it — OpenSSL
+  resolves the issuer of a certificate under two identically-named CAs to
+  the wrong one, turning a name-constraint violation into what looks like a
+  signature failure. The two disclosure blocks (`<details>`) for adding an
+  intermediate and for cross-signing become open sections with their own
+  heading, matching every other form in cabin, and every hierarchy row
+  becomes its own section too, so the page reads down the left column
+  instead of leaving it empty. Retiring a hierarchy or an issuer now needs
+  a ticked confirmation checkbox, enforced on the server, in its own form
+  separate from renew — the same two-step pattern certificate revocation
+  already uses.
+- Spec 0025 (transfer): a new "Transfer" rail group collects everything
+  that moves material in or out of cabin, five pages in place of the two
+  import forms `/ca/import` used to carry. `Import a CA` and
+  `Import a cross certificate` move to their own pages
+  (`/transfer/ca-import`, `/transfer/cross-import`) with the same POST
+  paths, fields and guards as before. `Trust bundle`
+  (`/transfer/trust-bundle`) concatenates every active root's certificate
+  into one PEM file, or one hierarchy's root plus its active intermediates
+  with `?ca={root_id}` — open to any logged-in user, since it contains no
+  more than `/ca/{ca_id}.pem` already serves one at a time. `Inventory
+  export` (`/transfer/inventory`) writes the certificate list as CSV or
+  JSON, the whole filtered set rather than one paginated page, with the
+  same fields `/api/v1/certs` already returns. **`CA key`
+  (`/transfer/ca-key`) is the first page in cabin that hands out a CA's own
+  private key** — see above. It offers only rows cabin actually holds a
+  sealed key for (an imported root has none; an imported intermediate
+  does, because its key was uploaded), requires a password of at least 8
+  characters, refuses cleanly rather than with a 500 when the master key
+  can't unseal a row, writes nothing to disk at any point, and records a
+  `ca_key_exported` audit event without the password in it. Per-certificate
+  downloads (`/certs/{id}/download/...`) stay on the certificate's own page
+  and do not move here.
+
 ### Fixed
 
 - **Spec 0024's dashboard "no active issuer" notice was computed
