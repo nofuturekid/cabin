@@ -1234,9 +1234,15 @@ def test_no_colour_outside_the_token_blocks() -> None:
 #: `test_stylesheet_and_templates_agree_in_both_directions` fails in its
 #: reverse direction on a rule with no user. Spec 0028 renders two of them
 #: (`.panel`, `.panel-danger`) and drops `.group-row` in favour of two clearer
-#: names; these six stay reserved and undefined until the spec that first
-#: renders one.
-RESERVED = ("nav-count", "seg", "pill", "toggle", "kicker", "flash")
+#: names; these stay reserved and undefined until the spec that first renders
+#: one.
+#:
+#: Spec 0029 FR-15/AC-13 takes `.kicker` off this list -- it renders every
+#: panel heading with it -- which is what supersedes spec 0028 AC-11's second
+#: clause. The list narrows to five rather than being dropped, so the clause
+#: keeps doing its job of stopping spec 0030's components being defined
+#: "while we are in the file".
+RESERVED = ("nav-count", "seg", "pill", "toggle", "flash")
 
 #: FR-10's table: every class spec 0028 defines, each of which must have a
 #: rule *and* a literal user.
@@ -1255,6 +1261,21 @@ DEFINED_BY_0028 = (
     "tree",
     "panel",
     "panel-danger",
+)
+
+#: Spec 0029 FR-15's table: the seven classes that spec defines, each of
+#: which must have a rule *and* a literal user for the same reason the
+#: fourteen above must. `.mark-ok`/`.mark-bad` are the reason FR-15 repeats
+#: spec 0028 FR-10's "written literally, never interpolated": `mark-{{ … }}`
+#: would leave `.mark-bad` a rule with no user at all.
+DEFINED_BY_0029 = (
+    "form-split",
+    "preview",
+    "kicker",
+    "kv",
+    "checks",
+    "mark-ok",
+    "mark-bad",
 )
 
 
@@ -1276,34 +1297,49 @@ def literal_class_tokens() -> set[str]:
 
 
 def test_the_reserved_classes_are_still_reserved() -> None:
-    """AC-11: a class is defined by the spec that first renders one.
+    """AC-11, extended by spec 0029 AC-13: a class is defined by the spec
+    that first renders one.
 
-    Two directions, and the second is the one that bites today. The six names
-    spec 0027 reserved and spec 0028 does not render must still have no rule
-    -- "while we are in the file" is how a stylesheet acquires components
-    nothing uses. And each of the fourteen names spec 0028 *does* define must
+    Two directions, and the second is the one that bites today. The names
+    spec 0027 reserved and no spec since renders must still have no rule --
+    "while we are in the file" is how a stylesheet acquires components
+    nothing uses. And each name spec 0028 or spec 0029 *does* define must
     have both a rule and a literal user, because a rule whose only user is an
     interpolation has no user at all as far as
     `test_stylesheet_and_templates_agree_in_both_directions` is concerned.
+
+    Spec 0029 FR-15 supersedes this criterion's second clause by name:
+    `.kicker` leaves `RESERVED` for `DEFINED_BY_0029`, and the reserved list
+    becomes five. It is narrowed by one argued name, not dropped.
     """
     defined = class_selectors(CSS.read_text())
+    rendered_here = DEFINED_BY_0028 + DEFINED_BY_0029
+
+    assert set(RESERVED) & set(rendered_here) == set(), (
+        f"a name is both reserved and rendered: {sorted(set(RESERVED) & set(rendered_here))}"
+    )
+    assert len(RESERVED) == 5, (
+        f"spec 0029 AC-13 asserts five reserved names -- `.nav-count`, `.seg`, "
+        f"`.pill`, `.toggle`, `.flash` -- and this list holds {len(RESERVED)}: "
+        f"{RESERVED}"
+    )
 
     premature = [name for name in RESERVED if name in defined]
     assert premature == [], (
-        f"spec 0027 reserved these names and spec 0028 renders none of them, so a "
-        f"rule for one is a rule with no user: {premature}"
+        f"these names are reserved and no template renders one, so a rule for one "
+        f"is a rule with no user: {premature}"
     )
 
-    without_rule = [name for name in DEFINED_BY_0028 if name not in defined]
-    assert without_rule == [], f"rendered by spec 0028, no rule in cabin.css: {without_rule}"
+    without_rule = [name for name in rendered_here if name not in defined]
+    assert without_rule == [], f"rendered by spec 0028/0029, no rule in cabin.css: {without_rule}"
 
     literal = literal_class_tokens()
-    without_user = [name for name in DEFINED_BY_0028 if name not in literal]
+    without_user = [name for name in rendered_here if name not in literal]
     assert without_user == [], (
         f"these have a rule and no template writes them out literally. A status "
-        f"class glued to an interpolation -- `state-{{{{ row.status }}}}` -- "
-        f"contributes no name at all, which is what FR-10's branch requirement is "
-        f"for: {without_user}"
+        f"class glued to an interpolation -- `state-{{{{ row.status }}}}`, or "
+        f"`mark-{{{{ … }}}}` -- contributes no name at all, which is what FR-10's "
+        f"and FR-15's branch requirement is for: {without_user}"
     )
 
     # The exemption list the agreement test carries is for `tag-*` values that
@@ -1313,6 +1349,128 @@ def test_the_reserved_classes_are_still_reserved() -> None:
     assert 'exempt = {name for name in defined - used if re.match(r"^tag-", name)}' in agreement, (
         "the agreement test's exemption list is no longer exactly the `^tag-` names; "
         "spec 0028 adds nothing to it (AC-11)"
+    )
+
+
+#: Spec 0029 FR-2 clause 3: the closed attribute set. `hx-boost`,
+#: `hx-swap-oob`, `hx-vals`, `hx-ext`, `hx-headers`, `hx-history` and every
+#: `hx-on*` attribute are outside it -- the first turns ordinary navigation
+#: into fragment swapping across the whole application, the last is inline
+#: JavaScript by another name.
+ALLOWED_HX = frozenset(
+    {
+        "hx-get",
+        "hx-post",
+        "hx-target",
+        "hx-select",
+        "hx-swap",
+        "hx-trigger",
+        "hx-include",
+        "hx-push-url",
+    }
+)
+
+#: The five alternatives spec 0029 FR-2 requires ADR-0003 to address, each as
+#: a pattern the `## Considered Options` section has to match. This is the
+#: one clause in this file that measures prose, and it is the weakest thing
+#: here: it can tell that an option was named and cannot tell whether it was
+#: argued. It exists so that an ADR listing only the option that won fails.
+REJECTED_OPTIONS = {
+    "no htmx at all (the brief's round-trip option)": r"round[- ]trip",
+    "static description panels (the brief's option 2)": r"[Ss]tatic panels",
+    "htmx with fragment-only endpoints": r"fragment-only",
+    "<details> for the disclosure": r"`?<?details>?`?",
+    "hand-written JavaScript doing the checks client-side": r"hand-written JavaScript",
+}
+
+_HX_ATTR_RE = re.compile(r'\s(hx-[a-zA-Z][\w:-]*)\s*=\s*"')
+
+
+def test_the_htmx_attribute_set_is_closed_and_the_adr_exists() -> None:
+    """Spec 0029 AC-2: `hx-boost` "to make navigation feel faster" is the
+    single change that would make FR-2's rule meaningless.
+
+    It would turn every link and form in cabin into a fragment swap, at which
+    point "every htmx target is a URL that also works as a page" is true of
+    nothing in particular. The allowlist is asserted as a subset rather than
+    as an equality, because which of the eight a build needs is a design
+    decision and which of them it may not use is not.
+
+    **The `<script>` clause is asserted as "exactly the one that is already
+    there", not as "none".** AC-2 says no template contains `<script`;
+    `layout.html:9` has loaded htmx from a `<script>` element since spec
+    0015, which this spec's own Context paragraph cites, so the criterion as
+    written cannot be satisfied by any build. FR-2 clause 4's wording -- "no
+    template *gains* a `<script>` element" -- is what is measured here, and
+    it is the stronger of the two anyway: it pins the one script that exists
+    to its file and its src.
+    """
+    used: dict[str, set[str]] = {}
+    for path in sorted(TEMPLATES.glob("*.html")):
+        for name in _HX_ATTR_RE.findall(path.read_text()):
+            used.setdefault(name, set()).add(path.name)
+
+    outside = {name: sorted(files) for name, files in used.items() if name not in ALLOWED_HX}
+    assert outside == {}, (
+        f"an hx- attribute outside FR-2 clause 3's closed set is in use: {outside}"
+    )
+    on_handlers = [name for name in used if name.startswith("hx-on")]
+    assert on_handlers == [], f"hx-on* is inline JavaScript by another name: {on_handlers}"
+
+    # ...and the set is not empty, or this criterion passes over a build that
+    # wired no htmx at all.
+    assert {"hx-get", "hx-post"} <= set(used), (
+        f"no template carries an hx-get or hx-post attribute, so the allowlist "
+        f"above was checked against nothing: {sorted(used)}"
+    )
+
+    scripts = {
+        path.name: re.findall(r"<script\b[^>]*>", path.read_text())
+        for path in sorted(TEMPLATES.glob("*.html"))
+    }
+    with_script = {name: found for name, found in scripts.items() if found}
+    assert list(with_script) == ["layout.html"], (
+        f"a template other than layout.html carries a <script> element (FR-2 "
+        f"clause 4: no template gains one): {with_script}"
+    )
+    assert with_script["layout.html"] == ['<script src="/static/htmx.min.js">'], (
+        f"layout.html's one script element is no longer exactly htmx's: "
+        f"{with_script['layout.html']}"
+    )
+
+    linked = set()
+    for path in sorted(TEMPLATES.glob("*.html")):
+        linked.update(re.findall(r"/static/([\w.-]+\.js)", path.read_text()))
+    assert linked == {"htmx.min.js"}, (
+        f"the templates link {sorted(linked)}; htmx.min.js stays the only JavaScript "
+        f"file cabin serves to a page (FR-2 clause 4)"
+    )
+    assert (STATIC / "htmx.min.js").exists(), "htmx.min.js is not vendored"
+
+    adr = REPO / "docs/adr/0003-url-state-disclosure-and-htmx.md"
+    assert adr.exists(), f"{adr.relative_to(REPO)} does not exist (FR-2)"
+    text = adr.read_text()
+    for line in ("- Status:", "- Date:", "- Deciders:"):
+        assert re.search(rf"^{re.escape(line)}", text, re.M), (
+            f"ADR-0003 carries no {line!r} header line; docs/adr/0000-template.md does"
+        )
+    template_headings = re.findall(
+        r"^## .+$", (REPO / "docs/adr/0000-template.md").read_text(), re.M
+    )
+    assert len(template_headings) >= 5, template_headings
+    missing = [head for head in template_headings if head not in text]
+    assert missing == [], f"ADR-0003 does not follow the template's headings: {missing}"
+
+    options = re.search(r"^## Considered Options$(.*?)^## ", text, re.M | re.S)
+    assert options is not None, "ADR-0003 has no Considered Options section"
+    unaddressed = [
+        name
+        for name, pattern in REJECTED_OPTIONS.items()
+        if re.search(pattern, options.group(1)) is None
+    ]
+    assert unaddressed == [], (
+        f"ADR-0003 does not name these alternatives at all, so the decision was "
+        f"recorded without the options it was taken against (FR-2): {unaddressed}"
     )
 
 

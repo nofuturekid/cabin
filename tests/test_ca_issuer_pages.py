@@ -1197,11 +1197,25 @@ def test_empty_state_for_admin_viewer_and_keyless_root(client: TestClient, cfg: 
     admin_html = client.get(f"/ca/{solo_id}").text
     admin_note = _element(admin_html, "ca-no-intermediates")
     assert admin_note.found is True
-    assert "#add-intermediate" in admin_note.anchor_hrefs
-    # ...and that anchor exists further down the same page
-    target = _element(admin_html, "add-intermediate")
-    assert target.found is True
-    assert admin_html.index('id="ca-no-intermediates"') < admin_html.index('id="add-intermediate"')
+    # Spec 0029 FR-13 re-points this, unchanged in substance and tightened:
+    # the empty state's link must now *open* the form it points at, not
+    # scroll to a closed one. Exactly one href, still ending in the fragment
+    # the section's id provides, and now carrying the query that opens it.
+    assert len(admin_note.anchor_hrefs) == 1, admin_note.anchor_hrefs
+    assert admin_note.anchor_hrefs[0].endswith("#add-intermediate"), admin_note.anchor_hrefs
+    assert "add=intermediate" in admin_note.anchor_hrefs[0], (
+        f"the empty state's link points at {admin_note.anchor_hrefs[0]!r}, which "
+        f"scrolls to a closed panel; FR-13 gives it the query that opens one"
+    )
+    # ...and that anchor exists further down the same page, in both states.
+    for suffix in ("", "?add=intermediate"):
+        page = client.get(f"/ca/{solo_id}{suffix}")
+        assert page.status_code == 200, f"{suffix} -> {page.status_code}"
+        target = _element(page.text, "add-intermediate")
+        assert target.found is True, f"#add-intermediate is not rendered at {suffix!r}"
+        assert page.text.index('id="ca-no-intermediates"') < page.text.index(
+            'id="add-intermediate"'
+        ), f"the empty state sits below the section it points at, at {suffix!r}"
 
     _login(client, "vera", "whatever12345")
     viewer_resp = client.get(f"/ca/{solo_id}")
@@ -2561,21 +2575,27 @@ def _text_nodes(html: str) -> Counter[str]:
     return Counter(parser.texts)
 
 
-def _baseline_templates(tmp_path: Path) -> Path:
-    """The templates as they stood at `BASELINE`, in a directory of their own."""
-    out = tmp_path / "templates-before"
+def _baseline_templates(tmp_path: Path, ref: str = BASELINE) -> Path:
+    """The templates as they stood at `ref`, in a directory of their own.
+
+    `ref` is a parameter rather than a read of `BASELINE` because spec 0029
+    needs the same instrument against its own base commit
+    (`test_web_form_previews.test_no_sentence_changed_on_the_form_pages`),
+    and a second copy of it would be a second thing to repair.
+    """
+    out = tmp_path / f"templates-before-{ref}"
     out.mkdir(parents=True, exist_ok=True)
     listed = subprocess.run(
-        ["git", "-C", str(REPO), "ls-tree", "-r", "--name-only", BASELINE, str(TEMPLATES_DIR)],
+        ["git", "-C", str(REPO), "ls-tree", "-r", "--name-only", ref, str(TEMPLATES_DIR)],
         capture_output=True,
         text=True,
     )
     assert listed.returncode == 0, listed.stderr
     names = [line for line in listed.stdout.split() if line.endswith(".html")]
-    assert len(names) > 10, f"{BASELINE} has {len(names)} templates: {names}"
+    assert len(names) > 10, f"{ref} has {len(names)} templates: {names}"
     for name in names:
         blob = subprocess.run(
-            ["git", "-C", str(REPO), "show", f"{BASELINE}:{name}"], capture_output=True
+            ["git", "-C", str(REPO), "show", f"{ref}:{name}"], capture_output=True
         )
         assert blob.returncode == 0, blob.stderr
         (out / Path(name).name).write_bytes(blob.stdout)
@@ -2756,3 +2776,160 @@ def test_child_view_and_overview_return_exactly_their_keys(client: TestClient, c
         assert [set(row) for row in group["cross_certificates"]] == [six | {"signed_by", "served"}]
     finally:
         db.close()
+
+
+# === spec 0029 AC-12: the disclosure is URL state, in both directions =====
+
+
+class _AnchorAttrs(HTMLParser):
+    """Every `<a>` in a fragment as its full attribute dictionary.
+
+    `_anchors` above gives href and text, which is what spec 0026's
+    assertions needed. Spec 0029 AC-12 has to read `hx-get`, `hx-select` and
+    `hx-target` off the same element, and an anchor whose href is right and
+    whose `hx-target` points somewhere else is exactly the build the
+    criterion exists to catch.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.anchors: list[dict[str, str | None]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self.anchors.append(dict(attrs))
+
+
+def _anchor_attrs(fragment: str) -> list[dict[str, str | None]]:
+    parser = _AnchorAttrs()
+    parser.feed(fragment)
+    return parser.anchors
+
+
+def _section_with_id(html: str, element_id: str) -> str:
+    """The outer HTML of the `.section` carrying `element_id`, scoped by
+    parsing tag nesting rather than by a character window."""
+    return _row(html, f'id="{element_id}"', class_name="section", tag=None)
+
+
+def _control_names(form_html: str) -> set[str]:
+    """Every named form control in a fragment -- inputs, selects and
+    textareas alike, which `_form_block` above does not cover because spec
+    0023 only ever needed the inputs' values."""
+    names = set()
+    for match in re.finditer(r"<(input|select|textarea)\b([^>]*)>", form_html, re.I):
+        found = re.search(r'name="([^"]*)"', match.group(2))
+        if found is not None:
+            names.add(found.group(1))
+    return names
+
+
+def test_the_disclosure_is_url_state(client: TestClient, cfg: Config, tmp_path: Path) -> None:
+    """Spec 0029 AC-12: both directions, and the error re-render.
+
+    The three defects this is written against are named in the criterion. A
+    `<button>` or a `#`-only anchor has no URL and does nothing without
+    JavaScript. An id that moves with the state breaks the empty state's link
+    and the swap target at once. An error re-render landing on the closed
+    page is the defect spec 0023 AC-3 was written for and that spec 0024
+    retired along with the `<details>` it could not open.
+
+    "Every field it carries today" is read off the page as it renders at
+    `BASELINE`, where the form is unconditionally open, rather than typed out
+    here: a list of field names in a test is a second original, and this one
+    would stop tracking the form the day the form gained a field.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    action = f"/ca/{fix.alpha_root}/intermediate"
+
+    with _rendering_from(_baseline_templates(tmp_path)):
+        baseline = client.get(f"/ca/{fix.alpha_root}")
+        assert baseline.status_code == 200
+    expected_fields = _control_names(_row(baseline.text, f'action="{action}"', tag="form"))
+    assert "name" in expected_fields and "csrf_token" in expected_fields, expected_fields
+
+    # --- closed ------------------------------------------------------------
+    closed = client.get(f"/ca/{fix.alpha_root}")
+    assert closed.status_code == 200
+    section = _section_with_id(closed.text, "add-intermediate")
+    assert "Add intermediate" in _headings(section), (
+        f"the closed section lost its <h2>; FR-13 keeps the heading visible without "
+        f"opening anything: {_headings(section)}"
+    )
+    assert _count_tag(section, "form") == 0, "the closed section still renders its form"
+
+    anchors = _anchor_attrs(section)
+    assert len(anchors) == 1, f"the closed section carries {len(anchors)} anchors: {anchors}"
+    trigger = anchors[0]
+    expected_href = f"/ca/{fix.alpha_root}?add=intermediate#add-intermediate"
+    assert trigger.get("href") == expected_href, (
+        f"the trigger's href is {trigger.get('href')!r}, not {expected_href!r} -- a "
+        f"`#`-only anchor has nothing to follow without JavaScript"
+    )
+    assert trigger.get("hx-get") == expected_href.split("#")[0] or trigger.get("hx-get") == (
+        expected_href
+    ), f"the trigger's hx-get is {trigger.get('hx-get')!r}"
+    assert trigger.get("hx-select") == "#add-intermediate", trigger
+    assert trigger.get("hx-target") == "#add-intermediate", trigger
+    assert trigger.get("hx-swap") == "outerHTML", trigger
+    assert trigger.get("hx-push-url") == "true", trigger
+
+    # --- open --------------------------------------------------------------
+    opened = client.get(f"/ca/{fix.alpha_root}?add=intermediate")
+    assert opened.status_code == 200
+    open_section = _section_with_id(opened.text, "add-intermediate")
+    assert action in _form_actions(open_section), (
+        f"?add=intermediate does not open the form: {_form_actions(open_section)}"
+    )
+    assert (
+        _control_names(_row(open_section, f'action="{action}"', tag="form")) == expected_fields
+    ), "the opened form is not the form that stood here at BASELINE"
+    cross_section = _row(
+        opened.text, ">Cross-sign with another root<", class_name="section", tag=None
+    )
+    assert _count_tag(cross_section, "form") == 0, (
+        "?add=intermediate opened the cross-sign form as well; the parameter names one panel"
+    )
+
+    # --- an unrecognised value is a typo, not an error ----------------------
+    banana = client.get(f"/ca/{fix.alpha_root}?add=banana")
+    assert banana.status_code == 200, banana.status_code
+    assert _count_tag(_section_with_id(banana.text, "add-intermediate"), "form") == 0
+    assert (
+        _count_tag(
+            _row(banana.text, ">Cross-sign with another root<", class_name="section", tag=None),
+            "form",
+        )
+        == 0
+    )
+
+    # --- the error re-render lands on the open panel (spec 0023 AC-3) -------
+    rejected = client.post(
+        action,
+        data={
+            "name": "   ",
+            "key_type": "ed25519",
+            "years": 7,
+            "permitted_names": "",
+            "excluded_names": "",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert rejected.status_code == 400, rejected.status_code
+    error_section = _section_with_id(rejected.text, "add-intermediate")
+    assert action in _form_actions(error_section), (
+        "the 400 re-render came back with the panel closed, so the operator's own "
+        "input is behind a link they have to find again -- the defect spec 0023 "
+        "AC-3 was written for"
+    )
+    form_html = _row(error_section, f'action="{action}"', tag="form")
+    assert 'value="7"' in form_html, f"the submitted years are gone: {form_html}"
+    assert re.search(r'<option value="ed25519"[^>]*\bselected\b', form_html), (
+        f"the submitted key_type is not selected again: {form_html}"
+    )
+
+    # --- and no browser-held open state, in any of the four renders --------
+    for html in (closed.text, opened.text, banana.text, rejected.text):
+        assert _count_tag(html, "details") == 0, "a <details> is back (0026 FR-16's first half)"
+        assert _count_tag(html, "summary") == 0

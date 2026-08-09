@@ -267,6 +267,36 @@ criteria failing with no argument beside them.
   `MAX_SANS` entries — the panel shows that message in place of the
   marks. It is the message the POST would show, from the same call.
 
+  > **Confirmed (test-authoring):** the disagreement this requirement
+  > argues from is constructible, and it is in the suite as
+  > `test_the_panel_resolves_an_ip_common_name_the_way_the_signer_does`.
+  > It needs a hierarchy of its own — call it **ipnet** — whose
+  > intermediate permits `192.168.0.0/16` and carries **no dNSName
+  > subtree at all**. With `subject_cn = 10.0.0.5` and an empty SAN box:
+  > `resolve_sans` returns `["IP:10.0.0.5"]`, the checker evaluates it
+  > against the permitted IP subtrees, which do not cover it, and the
+  > request is **refused** — `POST /certs/issue` with the same inputs
+  > answers 400 carrying that message. The shortcut this requirement
+  > forbids, passing the empty list, makes the checker's own fallback
+  > append `DNS:10.0.0.5` and evaluate it against the permitted DNS
+  > subtrees, of which there are none, so nothing constrains it:
+  > **permitted**.
+  >
+  > **The two can only disagree in one direction, and it is the
+  > dangerous one.** For an IP common name the signer's name set is a
+  > superset of the shortcut's — `{IP:cn, DNS:cn}` against `{DNS:cn}` —
+  > so wherever they differ, the shortcut permits what the signer
+  > refuses. A panel built on it tells the operator to go ahead and the
+  > button then refuses, which is the failure FR-4 opens by calling
+  > worse than no panel. There is no fixture in which the shortcut is
+  > the stricter of the two, so nothing about this is a matter of which
+  > answer one prefers.
+  >
+  > The alpha fixture cannot show it: alpha permits `lan.example.test`,
+  > so `DNS:10.0.0.5` fails there as well and both paths refuse — the
+  > same verdict for different reasons, which is precisely the shape
+  > that hides a defect. Hence a fixture of its own.
+
 - FR-6: **The validity clamp is extracted, and it is the only
   extraction.** The five lines at `leaf.py:665-671` become
 
@@ -801,6 +831,23 @@ FR-4's verdict have a fixture.
   sends the header or asserts on the fragment, and a fragment-only
   endpoint renders perfectly in a browser with JavaScript on.
 
+  > **Correction (test-authoring):** the tenfold clause applies to the
+  > **four previews only** and cannot apply to the two `hx-get` targets
+  > FR-13 adds. FR-2 clause 2 makes those URLs pages that htmx narrows
+  > client-side with `hx-select`, and FR-3 says the previews are the
+  > only endpoints this spec adds — so `GET /ca/{id}?add=intermediate`
+  > answers the same bytes with the header and without it. Requiring a
+  > size difference there would force exactly the fragment-aware
+  > disclosure endpoint FR-2 forbids two requirements up, in the
+  > criterion written to protect that rule.
+  >
+  > The `hx-get` targets are held to the stronger statement of clause 2
+  > instead: the response with `HX-Request` and the response without it
+  > are **byte-identical**. Everything else in this criterion is
+  > unchanged and applies to all six URLs — 200, `<html`, the rail,
+  > `<main id="main">`, and the set of targets being exactly the six
+  > this spec introduces.
+
 - AC-2: **The attribute set is closed and the ADR exists.** Across all
   templates, the set of `hx-*` attribute names used is a subset of the
   eight FR-2 allows, and contains no `hx-on` prefix; no template
@@ -813,6 +860,27 @@ FR-4's verdict have a fixture.
   _Goes red if_: `hx-boost` is added to the layout "to make navigation
   feel faster", which would turn every link in cabin into a fragment
   swap and is the single change that would make this rule meaningless.
+
+  > **Correction (test-authoring), two clauses of this criterion:**
+  >
+  > **"no template contains `<script`" is false today and must stay
+  > false.** `layout.html:9` has loaded htmx from a `<script>` element
+  > since spec 0015 — the very lines this spec's own Context cites as
+  > `layout.html:8-9`. No build can satisfy the clause as written. FR-2
+  > clause 4's wording is the satisfiable one and is what is asserted:
+  > no template *gains* a `<script>` element. Pinned rather than
+  > counted, because a count alone would pass on a build that moved it —
+  > exactly one `<script>` across all templates, in `layout.html`, with
+  > `src="/static/htmx.min.js"`.
+  >
+  > **"contains exactly one `.js` file" is false read literally.**
+  > `src/cabin/web/static/` also holds `swagger-ui-bundle.js`, vendored
+  > for `api/v1.py`'s docs page. The qualifier "that any template links"
+  > is what makes the clause true, and it is the whole of the clause:
+  > the set of `/static/*.js` paths any template references is exactly
+  > `{htmx.min.js}`. Written out here rather than left for the reader to
+  > notice, because the literal reading sends an implementer looking for
+  > a vendored file to delete.
 
 - AC-3: **The panel agrees with the signer where a per-name loop
   cannot.** Both halves, one test, against alpha's constrained issuer:
@@ -856,6 +924,14 @@ FR-4's verdict have a fixture.
 
   Neither half calls `clamp_validity`. The comparison is between a
   rendered panel and a stored certificate.
+
+  **Both halves compare a moment, not a day.** `Expires` is rendered
+  from the `expires` key, which the Interface Contract makes an ISO-8601
+  string; "equals that stated expiry **exactly**" and "agree to within
+  five seconds" are both unachievable at date granularity. This is the
+  one place on these pages where the `str(datetime)` and date-only
+  formatting every other cabin page uses is the wrong reach, and it is
+  said here because here is where an implementer will be looking.
   _Goes red if_: the panel reads its own clock differently, forgets the
   issuer's own expiry, or renders the requested rather than the granted
   date. A criterion that compared the panel with `clamp_validity` a
@@ -995,6 +1071,23 @@ FR-4's verdict have a fixture.
   costs several hundred text assertions and that no other criterion here
   would see.
 
+  > **Correction (test-authoring):** "no permitted removals" holds for
+  > five of the six pages and cannot hold for `ca_detail`. FR-13 is a
+  > disclosure: on `/ca/{id}` with no `add=`, the intermediate form's
+  > five labels, its two hints and its button are deliberately not
+  > rendered, so a text node present at the base commit is absent from
+  > that URL by construction. That is the requirement working, not a
+  > wording change, and no build can have both.
+  >
+  > What FR-14 protects is that no sentence on this page was edited or
+  > dropped — and the page is now three URLs. So for `ca_detail` the
+  > multiset compared against the base commit is the **union** of the
+  > closed render, `?add=intermediate` and `?add=cross-sign`, taking the
+  > larger multiplicity of each. Nothing is weakened by it: a sentence
+  > absent from all three still fails, and every addition is still
+  > named. The other five pages are one URL each and are compared
+  > exactly as written above.
+
 - AC-15: **Nothing scrolls sideways and everything is readable, with
   the panels filled.** The overflow probe over the five form pages and
   `/ca/{root}?add=intermediate`, at 1440×1150 and 390×900, in both
@@ -1057,7 +1150,26 @@ test_no_sentence_changed_on_the_form_pages (AC-14),
 test_the_form_pages_do_not_scroll_sideways (AC-15, headless Chrome),
 test_clamp_validity_matches_what_build_leaf_did (in
 `tests/test_ca_leaf.py`, against a signed certificate, not against the
-helper)
+helper),
+test_the_panel_resolves_an_ip_common_name_the_way_the_signer_does (FR-5)
+
+That last one has no acceptance criterion of its own and is listed
+anyway. FR-5 is the only requirement in this spec argued entirely from a
+case no criterion exercises — AC-3's two halves both run against alpha,
+where the shortcut and the signer agree — so without it the rename is
+the one change here whose reason nothing measures. It is the fixture the
+correction under FR-5 describes.
+
+**AC-2's ADR half is green before any implementation, and this records
+it.** `docs/adr/0003-url-state-disclosure-and-htmx.md` was committed
+alongside this spec, so its existence, its `Status`/`Date`/`Deciders`
+lines, every `##` heading of `docs/adr/0000-template.md` and all five
+rejected options already pass at the base commit; only the attribute
+allowlist and the `<script>` clause of that test go red. A criterion
+that passes at the moment it is written is worth saying so about: it is
+measuring the record rather than the work, and nothing an implementer
+does can make it fail. It stays in the test because the record can be
+edited later, which is the only thing it can still catch.
 
 **Re-pointed** — the requirement is unchanged, the selector or the page
 it is read from moved:
@@ -1094,6 +1206,21 @@ it is read from moved:
   `[aria-hidden="true"]` skip now has a second user, and AC-15's census
   (0028 AC-14, widened by FR-15) names it. It could not previously catch
   a mark rendered in an unreadable colour, because no mark existed.
+- **`tests/probes.py` gains `STACK_PROBE`.** AC-15's last clause — the
+  aside's `offsetTop` above the form's at 390 and not at 1440 — is
+  geometry no existing probe reports, and the overflow and contrast
+  walkers cannot answer it: both are blind to source order. It follows
+  the rule FR-4 of spec 0027 set for every probe in that file and
+  reports `examined` alongside its pairs, so a page carrying no
+  `.form-split` at all is distinguishable from one that stacks
+  correctly. `tests/probes.py` is where it goes because a second copy of
+  a browser probe is what spec 0027 FR-2 exists to prevent.
+- **`tests/test_ca_issuer_pages.py`'s `_baseline_templates` gains a
+  `ref` parameter**, defaulted to the constant it reads today, so
+  AC-14's comparison uses that instrument against this spec's base
+  commit instead of a second copy of it. Spec 0028's own criterion is
+  unaffected — it passes no argument and gets the same commit it always
+  did.
 - **`tests/test_ca_leaf.py`'s clamp tests** protect spec 0017 FR-5/FR-7:
   a leaf never outlives its issuer, and `capped_from` is not
   re-derivable from the certificate. They now also exercise

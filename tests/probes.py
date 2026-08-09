@@ -302,6 +302,43 @@ window.addEventListener('load', function () {
 </script>
 """
 
+#: Spec 0029 FR-17/AC-15: where the preview aside sits relative to the form
+#: it belongs to. Below the split's breakpoint the aside stacks *after* the
+#: form in source order, so on a phone the operator meets the fields first
+#: and the verdict below them; above it the two are side by side.
+#:
+#: Reported as raw geometry -- both ``offsetTop`` values and both
+#: ``offsetLeft`` values, plus how many pairs were found -- rather than as a
+#: boolean, for the reason FR-4 gives about every other probe here: a page
+#: with no ``.form-split`` at all would answer "stacked correctly" to a
+#: boolean and there would be nothing in the result to say it looked at
+#: nothing. Result: ``{"pairs": [{"formTop": N, "asideTop": N, "formLeft": N,
+#: "asideLeft": N}], "examined": N}``.
+STACK_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var pairs = [];
+    document.querySelectorAll('.form-split').forEach(function (split) {
+      var form = split.querySelector('form');
+      var aside = split.querySelector('aside.preview');
+      if (!form || !aside) return;
+      pairs.push({
+        formTop: Math.round(form.getBoundingClientRect().top),
+        asideTop: Math.round(aside.getBoundingClientRect().top),
+        formLeft: Math.round(form.getBoundingClientRect().left),
+        asideLeft: Math.round(aside.getBoundingClientRect().left)
+      });
+    });
+    var out = document.createElement('div');
+    out.id = 'probe-result';
+    out.textContent = JSON.stringify({pairs: pairs, examined: pairs.length});
+    document.body.appendChild(out);
+  }, 300);
+});
+</script>
+"""
+
 _RESULT_RE = re.compile(r'<div id="probe-result">(.*?)</div>', re.S)
 
 _LIGHT_MEDIA = "@media (prefers-color-scheme: light)"

@@ -28,11 +28,13 @@ STATIC = Path(__file__).resolve().parents[1] / "src/cabin/web/static"
 CSS = STATIC / "cabin.css"
 
 #: Templates rendered inside the rail. login/setup are the two without one,
-#: and `ca_macros.html` (spec 0026 FR-13) is not a page at all: it is a macro
-#: library, extends nothing, defines no content block and is never rendered
-#: on its own. AC-18 asserts exactly that below, so the exemption cannot
-#: later be widened to silence a real page that forgot its `nav_current`.
-NOT_PAGES = {"layout.html", "login.html", "setup.html", "ca_macros.html"}
+#: and `ca_macros.html` (spec 0026 FR-13) and `form_macros.html` (spec 0029
+#: FR-3) are not pages at all: they are macro libraries, extend nothing,
+#: define no content block and are never rendered on their own. AC-18
+#: asserts exactly that of each below, so the exemption cannot later be
+#: widened to silence a real page that forgot its `nav_current`.
+MACRO_LIBRARIES = ("ca_macros.html", "form_macros.html")
+NOT_PAGES = {"layout.html", "login.html", "setup.html", *MACRO_LIBRARIES}
 CONTENT_TEMPLATES = sorted(p.name for p in TEMPLATES.glob("*.html") if p.name not in NOT_PAGES)
 
 
@@ -64,15 +66,22 @@ def test_every_content_template_sets_nav_current() -> None:
     ]
     assert missing == []
 
-    # spec 0026 AC-18: the one exemption this test grants is a macro library,
-    # and it is checked rather than trusted -- a real page smuggled into
+    # spec 0026 AC-18: the exemptions this test grants are macro libraries,
+    # and each is checked rather than trusted -- a real page smuggled into
     # NOT_PAGES to silence a failure is the only way this exemption can do
-    # harm. `ca_macros.html` must be no page...
-    macros_path = TEMPLATES / "ca_macros.html"
-    assert macros_path.exists(), "ca_macros.html is missing (spec 0026 FR-13)"
-    macros = macros_path.read_text()
-    assert "{% extends" not in macros
-    assert "{% block content %}" not in macros
+    # harm. Spec 0029 adds `form_macros.html` to the set and turns the
+    # literal check into a loop over both, so the second one is exempted on
+    # the same terms as the first rather than on trust. Each must be no page...
+    for name in MACRO_LIBRARIES:
+        macros_path = TEMPLATES / name
+        assert macros_path.exists(), f"{name} is missing"
+        macros = macros_path.read_text()
+        assert "{% extends" not in macros, f"{name} extends a template, so it is a page"
+        assert "{% block content %}" not in macros, f"{name} defines a content block"
+        assert "{% macro " in macros, (
+            f"{name} is exempted from naming itself to the rail as a macro library "
+            f"and defines no macro at all"
+        )
 
     # ...and everything this test does check must be one: a template that
     # extends nothing cannot be marked by the rail whatever it sets.

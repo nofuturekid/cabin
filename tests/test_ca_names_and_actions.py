@@ -663,7 +663,11 @@ def test_create_writes_only_a_root(client: TestClient, cfg: Config) -> None:
     finally:
         db.close()
 
-    detail = client.get(f"/ca/{root_id}")
+    # spec 0029 FR-13 re-points this at the URL the form now stands open at.
+    # What it asserts about the form is unchanged: a root created on its own
+    # offers the second step. The disclosure is URL state, so the closed page
+    # carries the heading and the open one carries the form.
+    detail = client.get(f"/ca/{root_id}?add=intermediate")
     assert detail.status_code == 200
     assert f"/ca/{root_id}/intermediate" in _form_actions(detail.text)
 
@@ -706,7 +710,10 @@ def test_ca_new_has_no_intermediate_fields(client: TestClient, cfg: Config) -> N
     assert "permitted_names" not in field_names
     assert "excluded_names" not in field_names
 
-    detail = client.get(f"/ca/{root_id}").text
+    # spec 0029 FR-13: same requirement -- the two constraint textareas are on
+    # the intermediate form and not on `/ca/new` -- read at the URL that form
+    # now stands open at.
+    detail = client.get(f"/ca/{root_id}?add=intermediate").text
     block = _form_block(detail, f"/ca/{root_id}/intermediate")
     assert block.found_form is True
     assert "permitted_names" in block.textarea_values
@@ -1022,15 +1029,26 @@ def test_detail_page_has_no_details_and_no_empty_column(
         db.close()
 
     html = client.get(f"/ca/{root_a}").text
-    assert _count_tag(html, "details") == 0
-    assert _count_tag(html, "summary") == 0
+    # spec 0029: the `<details>`/`<summary>` absence is NOT re-pointed and must
+    # hold on the closed page and on both open ones -- 0026 FR-16's first half
+    # is re-asserted by FR-13, not superseded by it.
+    open_intermediate = client.get(f"/ca/{root_a}?add=intermediate").text
+    open_cross = client.get(f"/ca/{root_a}?add=cross-sign").text
+    for state in (html, open_intermediate, open_cross):
+        assert _count_tag(state, "details") == 0
+        assert _count_tag(state, "summary") == 0
 
+    # ...and the two action sections are still headed `.section`s, read at the
+    # URL each form now stands open at (FR-13). What is asserted about each is
+    # unchanged.
     intermediate_action = f"/ca/{root_a}/intermediate"
-    intermediate_block = _row(html, intermediate_action, class_name="section", tag=None)
+    intermediate_block = _row(
+        open_intermediate, intermediate_action, class_name="section", tag=None
+    )
     assert "<h2" in intermediate_block
 
     cross_action = f"/ca/{root_a}/cross-sign"
-    cross_block = _row(html, cross_action, class_name="section", tag=None)
+    cross_block = _row(open_cross, cross_action, class_name="section", tag=None)
     assert "<h2" in cross_block
 
     # spec 0026: the third block used to be located by a `chain.pem` link,
@@ -1042,10 +1060,16 @@ def test_detail_page_has_no_details_and_no_empty_column(
     # `chain.pem` block is itself a headed section -- follows the link to the
     # issuer page, which joins the section probe in
     # `test_ca_issuer_pages.py::test_section_and_danger_probes_cover_all_three_pages`.
-    issuers_block = _row(html, ">Issuers<", class_name="section", tag=None)
+    # Read out of `open_intermediate` rather than `html`, so that the four
+    # blocks below are four blocks of ONE document and their distinctness
+    # still says what it was written to say. `cross_block` is the exception
+    # and is checked against the same render immediately after.
+    issuers_block = _row(open_intermediate, ">Issuers<", class_name="section", tag=None)
     assert "<h2" in issuers_block
 
-    cross_table_block = _row(html, ">Cross certificates<", class_name="section", tag=None)
+    cross_table_block = _row(
+        open_intermediate, ">Cross certificates<", class_name="section", tag=None
+    )
     assert "<h2" in cross_table_block
 
     assert f"/ca/{intermediate_a_id}/chain.pem" not in html
@@ -1055,8 +1079,15 @@ def test_detail_page_has_no_details_and_no_empty_column(
     # the above are literally the same string, and an "h2 appears somewhere
     # before the marker" check would pass on that shared wrapper by
     # accident. Distinctness is what actually proves the split happened.
-    blocks = [intermediate_block, cross_block, issuers_block, cross_table_block]
+    closed_cross_block = _row(
+        open_intermediate, ">Cross-sign with another root<", class_name="section", tag=None
+    )
+    blocks = [intermediate_block, closed_cross_block, issuers_block, cross_table_block]
     assert len(set(blocks)) == len(blocks)
+    assert cross_action not in closed_cross_block, (
+        "?add=intermediate opened the cross-sign form too; the parameter names one "
+        "panel (spec 0029 FR-13)"
+    )
 
     if Path(CHROME).exists():
         bad = _run_probe(html, _SECTION_PROBE, tmp_path, "ca_detail_sections")

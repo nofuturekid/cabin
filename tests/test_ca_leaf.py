@@ -653,6 +653,100 @@ def test_capped_from_none_when_request_fits(issuer: Issuer) -> None:
     assert csr_cert.not_valid_after_utc < issuer_cert.not_valid_after_utc
 
 
+# --- spec 0029 FR-6/AC-4: the validity clamp, extracted ---------------------
+
+
+def test_clamp_validity_matches_what_build_leaf_did() -> None:
+    """FR-6: the extraction is measured against a certificate that was
+    actually issued, never against the helper a second time.
+
+    A criterion that called `clamp_validity` to check `clamp_validity` cannot
+    fail for the defect it exists to catch -- that both call sites are wrong
+    in the same way is precisely the failure mode of an extraction. So the
+    oracle here is `issue_certificate`'s own output: whatever the helper says
+    the granted expiry is, that is the `notAfter` the signed certificate
+    carries.
+
+    `now` is required and takes no default (the Interface Contract), and the
+    counter-check for that is in the test rather than in the signature: two
+    different pinned instants have to produce two different answers. A helper
+    that read its own clock would return the same `not_after` for both and
+    every assertion above it would still pass.
+    """
+    import inspect
+
+    from cabin.ca import leaf as leaf_mod
+
+    clamp = getattr(leaf_mod, "clamp_validity", None)
+    assert clamp is not None, "cabin.ca.leaf has no clamp_validity (FR-6)"
+    parameters = list(inspect.signature(clamp).parameters.values())
+    assert [p.name for p in parameters] == ["issuer_cert", "days", "now"], parameters
+    assert parameters[2].default is inspect.Parameter.empty, (
+        "clamp_validity's `now` has a default: a helper that reads its own clock is "
+        "a helper the panel and the signer can disagree through, and a test cannot "
+        "pin (FR-6)"
+    )
+
+    root_cert, root_key = create_root("Extract Root CA", "ecdsa-p256", years=2)
+    issuer_cert, issuer_key = create_intermediate(
+        root_cert, root_key, "Extract Intermediate CA", "ecdsa-p256", years=1
+    )
+
+    # 1. Clamped: the helper's answer is the issuer's own expiry, and it is
+    #    the expiry the certificate that was then signed actually carries.
+    before = datetime.now(UTC)
+    not_after, capped_from = clamp(issuer_cert, 3000, before)
+    cert, _key, issued_capped = issue_certificate(
+        issuer_cert, issuer_key, Profile.server, "extract.lan", ["DNS:extract.lan"], days=3000
+    )
+    assert cert.not_valid_after_utc == not_after, (
+        f"the helper grants {not_after.isoformat()} and the certificate _build_leaf "
+        f"then signed expires {cert.not_valid_after_utc.isoformat()}"
+    )
+    assert not_after == issuer_cert.not_valid_after_utc, "this half is not measuring a clamp at all"
+    assert capped_from is not None and issued_capped is not None
+    assert abs((capped_from - issued_capped).total_seconds()) < 60, (
+        f"the helper reports {capped_from.isoformat()} as the requested instant and "
+        f"issuance reports {issued_capped.isoformat()}"
+    )
+
+    # 2. Not clamped: the same agreement, and no cap reported on either side.
+    pinned = datetime.now(UTC)
+    granted, uncapped = clamp(issuer_cert, 30, pinned)
+    assert uncapped is None, f"a 30-day request under a one-year issuer reports {uncapped}"
+    fits, _fits_key, fits_capped = issue_certificate(
+        issuer_cert, issuer_key, Profile.server, "fits.lan", ["DNS:fits.lan"], days=30
+    )
+    assert fits_capped is None
+    assert abs((fits.not_valid_after_utc - granted).total_seconds()) < 5, (
+        f"the helper grants {granted.isoformat()} and the certificate expires "
+        f"{fits.not_valid_after_utc.isoformat()}"
+    )
+
+    # 3. The clock is the caller's. Two pinned instants, two answers.
+    far = pinned + timedelta(days=100)
+    later, _later_capped = clamp(issuer_cert, 30, far)
+    assert later - granted == timedelta(days=100), (
+        f"clamp_validity({far.isoformat()}) and clamp_validity({pinned.isoformat()}) "
+        f"differ by {later - granted}, not by the 100 days between them -- the "
+        f"helper is reading its own clock and ignoring the `now` it was passed"
+    )
+
+    # 4. The refusal is the same refusal, with the same sentence.
+    expired_cert, expired_key = _custom_intermediate(
+        not_after=datetime.now(UTC) - timedelta(days=1)
+    )
+    with pytest.raises(IssueError) as from_helper:
+        clamp(expired_cert, 30, datetime.now(UTC))
+    with pytest.raises(IssueError) as from_issuance:
+        issue_certificate(expired_cert, expired_key, Profile.server, "gone.lan", ["DNS:gone.lan"])
+    assert str(from_helper.value) == "the signing CA certificate has expired"
+    assert str(from_helper.value) == str(from_issuance.value), (
+        f"the helper says {str(from_helper.value)!r} and issuance says "
+        f"{str(from_issuance.value)!r}; FR-6 moves the raise, it does not reword it"
+    )
+
+
 # --- spec 0017 FR-11/FR-12: AIA caIssuers + http-only CDP/AIA URLs -----------
 #
 # FR-12 says the scheme-forcing helper lives "beside crl.distribution_url"
