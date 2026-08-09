@@ -14,18 +14,13 @@ This branch is red by design: none of `/transfer/*` exists yet, the five
 both import forms on one page.
 """
 
-import json
 import re
-import shutil
-import subprocess
-import threading
 from collections.abc import Iterator
-from functools import partial
 from html.parser import HTMLParser
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import ca_fixtures
+import probes
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -395,7 +390,8 @@ RAIL_PROBE = """
 <script>
 window.addEventListener('load', function () {
   setTimeout(function () {
-    window.scrollTo(0, document.body.scrollHeight);
+    var main = document.querySelector('#main');
+    if (main) main.scrollTop = main.scrollHeight;
     setTimeout(function () {
       var button = document.querySelector('.rail-foot button');
       var nav = document.querySelector('.rail nav');
@@ -404,6 +400,8 @@ window.addEventListener('load', function () {
       out.id = 'probe-result';
       out.textContent = JSON.stringify({
         found: !!button,
+        mainFound: !!main,
+        scrolled: main ? Math.round(main.scrollTop) : null,
         top: r ? Math.round(r.top) : null,
         bottom: r ? Math.round(r.bottom) : null,
         viewport: document.documentElement.clientHeight,
@@ -416,37 +414,6 @@ window.addEventListener('load', function () {
 });
 </script>
 """
-
-
-def _serve(root: Path) -> tuple[ThreadingHTTPServer, int]:
-    handler = partial(SimpleHTTPRequestHandler, directory=str(root))
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, httpd.server_address[1]
-
-
-def _probe(url: str, width: int, height: int) -> dict[str, object]:
-    dom = subprocess.run(
-        [
-            CHROME,
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            f"--window-size={width},{height}",
-            "--virtual-time-budget=6000",
-            "--dump-dom",
-            url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    ).stdout
-    found = re.search(r'<div id="probe-result">(.*?)</div>', dom, re.S)
-    assert found is not None, "probe did not run -- Chrome rendered nothing"
-    result: dict[str, object] = json.loads(
-        found.group(1).replace("&quot;", '"').replace("&amp;", "&")
-    )
-    return result
 
 
 @pytest.mark.skipif(not Path(CHROME).exists(), reason="headless Chrome not installed")
@@ -479,22 +446,26 @@ def test_rail_stays_in_view_with_sixteen_entries(
 
     root = tmp_path / "sixteen"
     root.mkdir()
-    shutil.copytree(STATIC, root / "static")
     page = client.get(cert_path)
     assert page.status_code == 200
     # Tie the test's own name to real evidence: this must be the sixteen-
     # entry rail, not today's twelve, which already scrolls at this height
     # and would let this test pass without spec 0025 in place at all.
     assert len(_nav_hrefs(page.text)) == 16
-    (root / "cert.html").write_text(page.text.replace("</body>", RAIL_PROBE + "</body>"))
+    probes.stage(root, STATIC, {"cert": page.text}, RAIL_PROBE)
 
-    httpd, port = _serve(root)
+    httpd, port = probes.serve(root)
     try:
-        result = _probe(f"http://127.0.0.1:{port}/cert.html", 1440, 700)
+        result = probes.run(f"http://127.0.0.1:{port}/cert.html", 1440, 700)
     finally:
         httpd.shutdown()
 
+    assert result["mainFound"], f"the page has no #main to scroll (spec 0027 FR-23): {result}"
     assert result["found"], "the rail has no logout button"
+    assert isinstance(result["scrolled"], int) and result["scrolled"] > 400, (
+        f"main was not long enough to test -- the criterion is about a page "
+        f"taller than the viewport: {result}"
+    )
     assert result["top"] >= 0 and result["bottom"] <= result["viewport"], (
         f"logout button left the viewport: {result}"
     )

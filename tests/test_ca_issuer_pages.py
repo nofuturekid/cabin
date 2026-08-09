@@ -40,6 +40,7 @@ from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import probes
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -658,34 +659,21 @@ window.addEventListener('load', function () {
 </script>
 """
 
-#: AC-14: every button.danger has a confirm checkbox inside its own <form>.
-_DANGER_PROBE = """
-<script>
-window.addEventListener('load', function () {
-  setTimeout(function () {
-    var bad = [];
-    document.querySelectorAll('button.danger').forEach(function (btn, i) {
-      var form = btn.closest('form');
-      var ok = form && form.querySelector('input[name="confirm"]');
-      if (!ok) bad.push('danger button ' + i + ' has no confirm checkbox in its form');
-    });
-    var out = document.createElement('div');
-    out.id = 'probe-result';
-    out.textContent = JSON.stringify(bad);
-    document.body.appendChild(out);
-  }, 300);
-});
-</script>
-"""
-
-#: AC-13: the rendered height of the whole document, as one number.
+#: AC-13: the rendered height of the scrolling content, as one number.
+#:
+#: spec 0027 FR-23 re-points this from `document.body` to `#main`. With the
+#: shell at `height:100vh` the body's scrollHeight is the viewport height on
+#: every page, so `(h4 - h1) / 3 < 80` would compute `0 < 80` and pass while
+#: measuring nothing at all. `<main>` is the element that scrolls now, so it
+#: is the element whose height an intermediate can grow.
 _HEIGHT_PROBE = """
 <script>
 window.addEventListener('load', function () {
   setTimeout(function () {
+    var main = document.querySelector('#main');
     var out = document.createElement('div');
     out.id = 'probe-result';
-    out.textContent = JSON.stringify([document.body.scrollHeight]);
+    out.textContent = JSON.stringify([main ? main.scrollHeight : null]);
     document.body.appendChild(out);
   }, 300);
 });
@@ -1216,6 +1204,9 @@ def test_per_intermediate_growth_stays_bounded(
     four_html = client.get(f"/ca/{root_id}").text
 
     results = _run_probe({"one": one_html, "four": four_html}, _HEIGHT_PROBE, tmp_path, "ca_growth")
+    assert results["one"][0] is not None and results["four"][0] is not None, (
+        f"the height probe found no #main to measure (spec 0027 FR-23): {results}"
+    )
     h1 = int(results["one"][0])
     h4 = int(results["four"][0])
 
@@ -1234,28 +1225,74 @@ def test_section_and_danger_probes_cover_all_three_pages(
     """After the split the root page has exactly one danger button, so a
     probe still pointed only at it would cover none of the moved ones. Each
     page carries its own "at least one danger button here" assertion, so it
-    cannot pass by having nothing to check."""
+    cannot pass by having nothing to check.
+
+    spec 0027: the section probe's page list grows from the three CA pages to
+    every page that carries a `.section`, because `.section`'s geometry
+    changes under it -- it becomes the design's `250px minmax(0,1fr)` row
+    with a `border-top`, and an empty left column is invisible in a
+    screenshot and obvious to this probe. Each page asserts it actually has a
+    section, so a page that stops rendering one fails rather than quietly
+    contributing nothing.
+    """
     if not Path(CHROME).exists():
         pytest.skip("headless Chrome not installed")
 
     _setup_superadmin(client)
     fix = _seed(cfg)
 
-    pages = {
+    danger_pages = {
         "root": client.get(f"/ca/{fix.beta_root}").text,
         "issuer": client.get(f"/ca/{fix.beta_root}/issuer/{fix.beta_int}").text,
         "cross": client.get(f"/ca/{fix.beta_root}/cross/{fix.cross}").text,
     }
-    for name, html in pages.items():
+    for name, html in danger_pages.items():
         assert _count_danger_buttons(html) >= 1, f"{name} page has no danger button to check"
         assert _count_tag(html, "details") == 0, f"{name} page reintroduced <details>"
         assert _count_tag(html, "summary") == 0, f"{name} page reintroduced <summary>"
 
-    sections = _run_probe(pages, _SECTION_PROBE, tmp_path, "ca_sections")
-    assert sections == {name: [] for name in pages}, sections
+    issued = client.post(
+        "/certs/issue",
+        data={
+            "subject_cn": f"leaf.{PERMITTED}",
+            "issuer_id": fix.alpha_int,
+            "profile": "server",
+            "key_type": "ecdsa-p256",
+            "days": 90,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert issued.status_code == 303, issued.text
 
-    danger = _run_probe(pages, _DANGER_PROBE, tmp_path, "ca_danger")
-    assert danger == {name: [] for name in pages}, danger
+    section_paths = {
+        "dashboard": "/",
+        "ca_new": "/ca/new",
+        "ca_detail": f"/ca/{fix.beta_root}",
+        "ca_issuer": f"/ca/{fix.beta_root}/issuer/{fix.beta_int}",
+        "ca_cross": f"/ca/{fix.beta_root}/cross/{fix.cross}",
+        "cert_detail": issued.headers["location"],
+        "certs_new": "/certs/new",
+        "certs_sign": "/certs/sign",
+        "transfer_ca_import": "/transfer/ca-import",
+        "transfer_cross_import": "/transfer/cross-import",
+        "transfer_ca_key": "/transfer/ca-key",
+        "acme": "/acme/admin",
+        "tokens": "/tokens",
+        "users": "/users",
+        "settings": "/settings",
+    }
+    section_pages = {}
+    for name, path in section_paths.items():
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        assert 'class="section' in resp.text, f"{name} carries no .section to probe"
+        section_pages[name] = resp.text
+
+    sections = _run_probe(section_pages, _SECTION_PROBE, tmp_path, "ca_sections")
+    assert sections == {name: [] for name in section_pages}, sections
+
+    danger = _run_probe(danger_pages, probes.DANGER_PROBE, tmp_path, "ca_danger")
+    assert danger == {name: [] for name in danger_pages}, danger
 
 
 # === bugfix: a retired row's page offers no renew form =====================

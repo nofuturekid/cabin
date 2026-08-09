@@ -7,16 +7,11 @@ drawn outside its container (AC-1..AC-3) — the defect this spec exists for is
 geometric, and only a browser can see it.
 """
 
-import json
 import re
-import shutil
-import subprocess
-import threading
 from collections.abc import Iterator
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import probes
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -49,9 +44,15 @@ CONTENT_TEMPLATES = sorted(p.name for p in TEMPLATES.glob("*.html") if p.name no
 def test_layout_has_rail_and_main() -> None:
     layout = (TEMPLATES / "layout.html").read_text()
     assert '<aside class="rail">' in layout
-    assert "<main>" in layout
     # The rail only exists for a signed-in user; login/setup render without it.
     assert '<body class="{% if user %}with-rail{% endif %}">' in layout
+
+    # spec 0027 FR-6: the rail and the content move inside one shell, and
+    # `<main>` gains the id `_HEIGHT_PROBE` measures (FR-23). Both names are
+    # scoped by tests and by the stylesheet, so they are asserted here rather
+    # than left to a rendered page to imply.
+    assert '<div class="shell">' in layout
+    assert '<main id="main">' in layout
 
 
 def test_every_content_template_sets_nav_current() -> None:
@@ -124,27 +125,183 @@ def test_css_has_no_external_urls() -> None:
     assert re.findall(r"url\(\s*['\"]?https?://", CSS.read_text()) == []
 
 
+_TOKEN_RE = re.compile(r"(--[\w-]+)\s*:\s*([^;{}]+);?")
+
+_LIGHT_MEDIA = "@media (prefers-color-scheme: light)"
+
+
+def _brace_block(text: str, start: int) -> str:
+    """The balanced ``{...}`` body that begins at or after ``start``."""
+    open_brace = text.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace + 1 : i]
+    raise AssertionError("unbalanced braces in cabin.css")
+
+
+def _default_root(text: str) -> str:
+    at = text.find(":root")
+    assert at != -1, "cabin.css declares no :root block"
+    light = text.find(_LIGHT_MEDIA)
+    assert light == -1 or at < light, "the default :root must precede the light override (FR-8)"
+    return _brace_block(text, at)
+
+
+def _light_root(text: str) -> str:
+    at = text.find(_LIGHT_MEDIA)
+    assert at != -1, f"cabin.css has no {_LIGHT_MEDIA} block (spec 0027 FR-8)"
+    media = _brace_block(text, at)
+    inner = media.find(":root")
+    assert inner != -1, "the light media block contains no :root rule (FR-8)"
+    return _brace_block(media, inner)
+
+
+def _tokens(block: str) -> dict[str, str]:
+    return {name: " ".join(value.split()).lower() for name, value in _TOKEN_RE.findall(block)}
+
+
+def _is_colour(value: str) -> bool:
+    """FR-13.1: a colour is not only a hex literal.
+
+    The design's two dividers are ``rgba(233,233,237,.08)`` and
+    ``rgba(233,233,237,.07)`` -- the border between every section and every
+    list row on every page. The old filter was ``startswith("#")``, so both
+    would have dropped out of the set being checked entirely.
+    """
+    return value.startswith(("#", "rgb(", "rgba(", "hsl(", "hsla(", "color(", "lab(", "oklch("))
+
+
+def _scheme_defects(text: str) -> list[str]:
+    """Every way the two schemes can fail to be each other's counterpart."""
+    defaults = _tokens(_default_root(text))
+    overrides = _tokens(_light_root(text))
+    coloured = {name: value for name, value in defaults.items() if _is_colour(value)}
+    defects = [
+        f"{name} has no light counterpart" for name in sorted(set(coloured) - set(overrides))
+    ]
+    defects += [
+        f"{name} is overridden but has no default"
+        for name in sorted(set(overrides) - set(defaults))
+    ]
+    defects += [
+        f"{name}'s light override repeats its default ({value})"
+        for name, value in sorted(overrides.items())
+        if defaults.get(name) == value
+    ]
+    return defects
+
+
 def test_css_defines_dark_counterpart_for_every_token() -> None:
-    """FR-8: a token defined only in one scheme is unreadable in the other."""
+    """Spec 0015 FR-8, re-pointed by spec 0027 FR-8/FR-13.
+
+    The requirement has not changed: a token defined in only one scheme is
+    unreadable in the other. Only the block it reads has moved -- the dark
+    values are now the defaults and the override block is
+    ``prefers-color-scheme: light``.
+
+    Three strengthenings (FR-13). It accepts ``rgba()`` and not only ``#``;
+    it runs in both directions, because an override for a token that has no
+    default is dead CSS and is what a half-finished rename leaves behind; and
+    it rejects an override that merely repeats its default. The last clause
+    is the one that matters most: copying the dark value into the light block
+    satisfies "a counterpart exists" while being exactly the defect this test
+    was written for -- the light scheme would then paint dark-scheme greys on
+    a white ground. The old test passed against that build.
+    """
     text = CSS.read_text()
-    root = re.search(r":root\s*{(.*?)}", text, re.S)
-    dark = re.search(r"prefers-color-scheme:\s*dark\s*\)\s*{\s*:root\s*{(.*?)}", text, re.S)
-    assert root and dark
-    colours = {
-        name
-        for name, value in re.findall(r"(--[\w-]+):\s*([^;]+);", root.group(1))
-        if value.strip().startswith("#")
-    }
-    dark_tokens = set(re.findall(r"(--[\w-]+):", dark.group(1)))
-    assert colours - dark_tokens == set()
+    assert _scheme_defects(text) == []
+
+    # AC-9's counter-check: the third clause has to be able to bite. Replace
+    # one light override with its own default and the test must go red -- a
+    # clause that cannot fail is not a clause.
+    overrides = _tokens(_light_root(text))
+    defaults = _tokens(_default_root(text))
+    victim = next(name for name in overrides if name in defaults)
+    light = _light_root(text)
+    doctored = text.replace(
+        light, re.sub(rf"{victim}\s*:\s*[^;]+;", f"{victim}: {defaults[victim]};", light, count=1)
+    )
+    assert doctored != text, "the counter-check did not change the stylesheet"
+    assert _scheme_defects(doctored) != [], (
+        "a light override replaced by its own default was not rejected -- "
+        "the clause that catches a copied-across value does not bite"
+    )
+
+
+def test_light_block_holds_nothing_but_token_overrides() -> None:
+    """FR-8/AC-9: the shape FR-14's scheme-forcing depends on.
+
+    ``probes.light_stylesheet`` makes the light scheme unconditional by
+    deleting the media wrapper. That is only faithful if the block holds one
+    ``:root`` rule and nothing else; anything else in it would be promoted to
+    unconditional too, and the light contrast run would be measuring a page
+    the browser never draws.
+    """
+    text = CSS.read_text()
+    at = text.find(_LIGHT_MEDIA)
+    assert at != -1, f"cabin.css has no {_LIGHT_MEDIA} block (spec 0027 FR-8)"
+    assert text.find(_LIGHT_MEDIA, at + 1) == -1, "more than one light media block"
+
+    media = _brace_block(text, at)
+    inner = media.find(":root")
+    assert inner != -1, "the light media block contains no :root rule"
+    root = _brace_block(media, inner)
+    remainder = media.replace(f"{{{root}}}", "", 1).replace(":root", "", 1)
+    assert remainder.strip() == "", (
+        f"the light media block holds more than one :root rule: {remainder.strip()!r}"
+    )
+
+    declarations = [part.strip() for part in root.split(";") if part.strip()]
+    strays = [part for part in declarations if not part.startswith("--")]
+    assert strays == [], f"the light :root declares more than custom properties: {strays}"
 
 
 def test_fonts_are_vendored_with_their_licences() -> None:
+    """Spec 0015 FR-7's requirement, re-pointed by spec 0027 FR-17/AC-20.
+
+    The requirement is unchanged: both faces live in the repository with
+    their SIL OFL 1.1 licence text beside them and nothing is fetched from a
+    CDN. Only the filenames move -- Public Sans retires and Inter takes its
+    place. AC-20 adds what the old test did not carry at all: the retired
+    face and its licence are gone and nothing references them, so Inter
+    cannot simply be added on top of 27 KB of dead weight.
+    """
     fonts = STATIC / "fonts"
-    for name in ("PublicSans.woff2", "IBMPlexMono.woff2"):
-        assert (fonts / name).read_bytes()[:4] == b"wOF2"
-    assert (fonts / "LICENSE-PublicSans.txt").exists()
-    assert (fonts / "LICENSE-IBMPlexMono.txt").exists()
+    for name in ("Inter.woff2", "IBMPlexMono.woff2"):
+        assert (fonts / name).read_bytes()[:4] == b"wOF2", f"{name} is not a woff2 file"
+    for licence in ("LICENSE-Inter.txt", "LICENSE-IBMPlexMono.txt"):
+        assert (fonts / licence).read_text().strip() != "", f"{licence} is missing or empty"
+
+    assert not (fonts / "PublicSans.woff2").exists(), "the retired face is still in the repository"
+    assert not (fonts / "LICENSE-PublicSans.txt").exists()
+
+    text = CSS.read_text()
+    assert re.findall(r"url\(\s*['\"]?https?://", text) == []
+    referenced = set(re.findall(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", text))
+    assert {name for name in referenced if "fonts/" in name} == {
+        "/static/fonts/Inter.woff2",
+        "/static/fonts/IBMPlexMono.woff2",
+    }, referenced
+
+    repo = Path(__file__).resolve().parents[1]
+    still = [
+        path.relative_to(repo).as_posix()
+        for path in (repo / "src").rglob("*")
+        if path.is_file() and "PublicSans" in path.read_bytes().decode("utf-8", "ignore")
+    ]
+    assert still == [], f"PublicSans is still referenced by {still}"
+
+    # FR-17's deliberate divergence from brief section 2: cabin's monospace
+    # carries fingerprints and PEM bodies, which a bare system stack renders
+    # at a different advance width on every platform.
+    mono = _tokens(_default_root(text))["--mono"]
+    assert mono.startswith('"ibm plex mono"'), mono
+    assert "ui-monospace" in mono, mono
 
 
 # --------------------------------------------------------------------------
@@ -515,97 +672,41 @@ def test_signing_is_its_own_page(client: TestClient, cfg: Config) -> None:
 
 
 def test_fonts_served_with_woff2_content_type(client: TestClient, cfg: Config) -> None:
-    for name in ("PublicSans", "IBMPlexMono"):
+    """Spec 0015 FR-7: cabin serves the faces itself, with the right type.
+
+    Re-pointed by spec 0027 FR-17 -- two filenames change, the assertion
+    shape does not. AC-20's other half: the retired face is not served
+    either, so "Inter was added" cannot be mistaken for "Public Sans went".
+    """
+    for name in ("Inter", "IBMPlexMono"):
         resp = client.get(f"/static/fonts/{name}.woff2")
-        assert resp.status_code == 200
+        assert resp.status_code == 200, f"{name}.woff2 -> {resp.status_code}"
         assert resp.headers["content-type"] == "font/woff2"
+        assert resp.content[:4] == b"wOF2"
+    assert client.get("/static/fonts/PublicSans.woff2").status_code == 404
 
 
 # --------------------------------------------------------------------------
-# geometry (AC-1..AC-3)
+# geometry (AC-1..AC-3, and spec 0027 AC-3/AC-13)
 # --------------------------------------------------------------------------
 
-CHROME = "/opt/google/chrome/chrome"
-
-#: Injected into a rendered page; reports every element drawn past the viewport
-#: or past its own container. Elements inside a scroll container are skipped —
-#: clipping there is the point of .scroller.
-PROBE = """
+#: Injected into a long page; scrolls `#main` to its end and reports whether
+#: the rail's logout button is still inside the viewport.
+#:
+#: spec 0027 FR-23: the window can no longer scroll -- the shell is
+#: `height:100vh; overflow:hidden` -- so `window.scrollTo(...)` leaves
+#: `scrollY` at 0 and the old assertion `scrolled > 400` would go red without
+#: the requirement having changed at all. The scroll target becomes `#main`.
+#: The nav guard below is kept verbatim: it is the half that makes the
+#: criterion non-vacuous, and the shell does not make it redundant, because
+#: the rail's footer is still pushed out of a 100vh column and clipped by
+#: `overflow:hidden` if `nav` does not scroll on its own.
+RAIL_PROBE = """
 <script>
 window.addEventListener('load', function () {
   setTimeout(function () {
-    function scrollable(el) {
-      for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
-        var ox = getComputedStyle(p).overflowX;
-        if (ox === 'auto' || ox === 'scroll' || ox === 'hidden') return true;
-      }
-      return false;
-    }
-    function container(el) {
-      for (var p = el.parentElement; p && p !== document.documentElement; p = p.parentElement) {
-        if (getComputedStyle(p).display !== 'inline' && p.getBoundingClientRect().width > 0) {
-          return p;
-        }
-      }
-      return null;
-    }
-    var vw = document.documentElement.clientWidth, bad = [];
-    document.querySelectorAll('body *').forEach(function (el) {
-      var r = el.getBoundingClientRect();
-      if ((r.width === 0 && r.height === 0) || scrollable(el)) return;
-      var c = container(el);
-      var label = el.tagName.toLowerCase() + '.' + (el.className || '').toString().slice(0, 30);
-      if (r.right > vw + 1) bad.push(label + ' past viewport by ' + Math.round(r.right - vw));
-      else if (c) {
-        var over = Math.round(r.right - c.getBoundingClientRect().right);
-        if (over > 1) bad.push(label + ' out of container by ' + over);
-      }
-    });
-    var out = document.createElement('div');
-    out.id = 'probe-result';
-    out.textContent = JSON.stringify(bad);
-    document.body.appendChild(out);
-  }, 300);
-});
-</script>
-"""
-
-
-def _serve(root: Path) -> tuple[ThreadingHTTPServer, int]:
-    handler = partial(SimpleHTTPRequestHandler, directory=str(root))
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, httpd.server_address[1]
-
-
-def _overflow(url: str, width: int, height: int) -> list[str]:
-    dom = subprocess.run(
-        [
-            CHROME,
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            f"--window-size={width},{height}",
-            "--virtual-time-budget=4000",
-            "--dump-dom",
-            url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    ).stdout
-    found = re.search(r'<div id="probe-result">(.*?)</div>', dom, re.S)
-    assert found is not None, "probe did not run — Chrome rendered nothing"
-    return json.loads(found.group(1).replace("&quot;", '"').replace("&amp;", "&"))
-
-
-#: Injected into a long page; scrolls to the bottom and reports whether the
-#: rail's logout button is still inside the viewport.
-STICKY_PROBE = """
-<script>
-window.addEventListener('load', function () {
-  setTimeout(function () {
-    window.scrollTo(0, document.body.scrollHeight);
+    var main = document.querySelector('#main');
+    if (main) main.scrollTop = main.scrollHeight;
     setTimeout(function () {
       var button = document.querySelector('.rail-foot button');
       var nav = document.querySelector('.rail nav');
@@ -614,7 +715,8 @@ window.addEventListener('load', function () {
       out.id = 'probe-result';
       out.textContent = JSON.stringify({
         found: !!button,
-        scrolled: Math.round(window.scrollY),
+        mainFound: !!main,
+        scrolled: main ? Math.round(main.scrollTop) : null,
         top: r ? Math.round(r.top) : null,
         bottom: r ? Math.round(r.bottom) : null,
         viewport: document.documentElement.clientHeight,
@@ -629,28 +731,52 @@ window.addEventListener('load', function () {
 """
 
 
-def _probe(url: str, width: int, height: int) -> dict:
-    dom = subprocess.run(
-        [
-            CHROME,
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            f"--window-size={width},{height}",
-            "--virtual-time-budget=6000",
-            "--dump-dom",
-            url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    ).stdout
-    found = re.search(r'<div id="probe-result">(.*?)</div>', dom, re.S)
-    assert found is not None, "probe did not run — Chrome rendered nothing"
-    return json.loads(found.group(1).replace("&quot;", '"').replace("&amp;", "&"))
+def page_paths(cfg: Config, cert_path: str) -> dict[str, str]:
+    """The nineteen screens the overflow probe covers.
+
+    Lifted out of ``test_no_horizontal_overflow`` so that spec 0027's
+    contrast, focus and stylesheet-agreement checks run over the same list
+    rather than over a second one that drifts away from it (FR-20).
+    """
+    return {
+        "dashboard": "/",
+        "ca": "/ca",
+        "ca_new": "/ca/new",
+        "ca_detail": f"/ca/{_root_id(cfg)}",
+        "ca_issuer": f"/ca/{_root_id(cfg)}/issuer/{_first_intermediate_id(cfg)}",
+        "ca_cross": f"/ca/{_root_id(cfg)}/cross/{_cross_id(cfg)}",
+        "transfer_ca_import": "/transfer/ca-import",
+        "transfer_cross_import": "/transfer/cross-import",
+        "transfer_trust_bundle": "/transfer/trust-bundle",
+        "transfer_ca_key": "/transfer/ca-key",
+        "transfer_inventory": "/transfer/inventory",
+        "certs": "/certs",
+        "certs_new": "/certs/new",
+        "certs_sign": "/certs/sign",
+        "cert_detail": cert_path,
+        "users": "/users",
+        "audit": "/audit",
+        "settings": "/settings",
+        "acme": "/acme/admin",
+        "tokens": "/tokens",
+    }
 
 
-@pytest.mark.skipif(not Path(CHROME).exists(), reason="headless Chrome not installed")
+def render_pages(client: TestClient, paths: dict[str, str]) -> dict[str, str]:
+    """Fetch every page, asserting each one is actually a page.
+
+    A route that moves and starts 404ing or 405ing would otherwise drop out
+    of every probe below while contributing nothing and failing nothing.
+    """
+    rendered = {}
+    for name, path in paths.items():
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        rendered[name] = resp.text
+    return rendered
+
+
+@pytest.mark.skipif(not Path(probes.CHROME).exists(), reason="headless Chrome not installed")
 def test_rail_stays_in_view_on_a_long_page(client: TestClient, cfg: Config, tmp_path: Path) -> None:
     """The rail is the only way out of a page, so it may not scroll away.
 
@@ -661,26 +787,30 @@ def test_rail_stays_in_view_on_a_long_page(client: TestClient, cfg: Config, tmp_
     ``_populate`` sets up and stays logged in as the superadmin, so this is
     already the sixteen-entry rail (spec 0025 AC-13). The logout button
     staying on screen is not enough on its own — a viewport the rail merely
-    fits into would pass that without the rail's own internal scroll
-    (``cabin.css:143-152``) ever engaging — so this also asserts the
-    ``<nav>`` itself is actually taller than its own box.
+    fits into would pass that without the rail's own internal scroll ever
+    engaging — so this also asserts the ``<nav>`` itself is actually taller
+    than its own box.
+
+    spec 0027 FR-23 re-points the scroll from the window to ``#main`` and
+    keeps the nav guard verbatim. The requirement is spec 0015 FR-1's and is
+    unchanged; only the element that scrolls has moved.
     """
     cert_path = _populate(client, cfg)
     root = tmp_path / "sticky"
     root.mkdir()
-    shutil.copytree(STATIC, root / "static")
     page = client.get(cert_path)
     assert page.status_code == 200
-    (root / "cert.html").write_text(page.text.replace("</body>", STICKY_PROBE + "</body>"))
+    probes.stage(root, STATIC, {"cert": page.text}, RAIL_PROBE)
 
-    httpd, port = _serve(root)
+    httpd, port = probes.serve(root)
     try:
-        result = _probe(f"http://127.0.0.1:{port}/cert.html", 1440, 700)
+        result = probes.run(f"http://127.0.0.1:{port}/cert.html", 1440, 700)
     finally:
         httpd.shutdown()
 
+    assert result["mainFound"], f"the page has no #main to scroll (spec 0027 FR-23): {result}"
     assert result["found"], "the rail has no logout button"
-    assert result["scrolled"] > 400, f"page was not long enough to test: {result}"
+    assert result["scrolled"] > 400, f"main was not long enough to test: {result}"
     assert result["top"] >= 0 and result["bottom"] <= result["viewport"], (
         f"logout button left the viewport after scrolling: {result}"
     )
@@ -691,9 +821,10 @@ def test_rail_stays_in_view_on_a_long_page(client: TestClient, cfg: Config, tmp_
     )
 
 
-@pytest.mark.skipif(not Path(CHROME).exists(), reason="headless Chrome not installed")
+@pytest.mark.skipif(not Path(probes.CHROME).exists(), reason="headless Chrome not installed")
+@pytest.mark.parametrize("scheme", ["dark", "light"])
 @pytest.mark.parametrize("width,height", [(1440, 1150), (390, 900)])
-def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int) -> None:
+def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int, scheme: str) -> None:
     """AC-1/AC-2: with real data, nothing is drawn outside its container at
     either a desktop or a phone width.
 
@@ -710,49 +841,40 @@ def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int) -> None
     ``Config`` and calls ``_populate(..., second_issuer=True)`` rather than
     using the file's shared ``cfg``/``client`` fixtures, which stay
     single-issuer, TLS-off for every other test here.
+
+    spec 0027 AC-3: the probe is the repaired one from ``tests/probes.py``,
+    it is run in both schemes, and every page must report having examined at
+    least twenty elements (FR-4). What that floor guards against is a walker
+    that excuses the page, not a page that is small: once the shell lands the
+    pre-repair walker leaves exactly one element examined, because every
+    element has an ``overflow:hidden`` ancestor and the shell is the only one
+    it cannot excuse. Twenty is twenty times that and two-thirds of the
+    thinnest real page (``/ca``, 30 examined at 390).
     """
     data_dir = tmp_path / "data"
     cfg = Config(port=8080, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db", tls=True)
     with TestClient(create_app(cfg), follow_redirects=False) as client:
         cert_path = _populate(client, cfg, second_issuer=True)
-        root = tmp_path / "pages"
-        root.mkdir()
-        shutil.copytree(STATIC, root / "static")
+        pages = page_paths(cfg, cert_path)
+        rendered = render_pages(client, pages)
 
-        pages = {
-            "dashboard": "/",
-            "ca": "/ca",
-            "ca_new": "/ca/new",
-            "ca_detail": f"/ca/{_root_id(cfg)}",
-            "ca_issuer": f"/ca/{_root_id(cfg)}/issuer/{_first_intermediate_id(cfg)}",
-            "ca_cross": f"/ca/{_root_id(cfg)}/cross/{_cross_id(cfg)}",
-            "transfer_ca_import": "/transfer/ca-import",
-            "transfer_cross_import": "/transfer/cross-import",
-            "transfer_trust_bundle": "/transfer/trust-bundle",
-            "transfer_ca_key": "/transfer/ca-key",
-            "transfer_inventory": "/transfer/inventory",
-            "certs": "/certs",
-            "certs_new": "/certs/new",
-            "certs_sign": "/certs/sign",
-            "cert_detail": cert_path,
-            "users": "/users",
-            "audit": "/audit",
-            "settings": "/settings",
-            "acme": "/acme/admin",
-            "tokens": "/tokens",
-        }
-        for name, path in pages.items():
-            resp = client.get(path)
-            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-            (root / f"{name}.html").write_text(resp.text.replace("</body>", PROBE + "</body>"))
+    root = tmp_path / f"pages-{scheme}"
+    root.mkdir()
+    probes.stage(root, STATIC, rendered, probes.OVERFLOW_PROBE, scheme)
 
-    httpd, port = _serve(root)
+    httpd, port = probes.serve(root)
     try:
-        offenders = {
-            name: bad
+        results = {
+            name: probes.overflow(f"http://127.0.0.1:{port}/{name}.html", width, height)
             for name in pages
-            if (bad := _overflow(f"http://127.0.0.1:{port}/{name}.html", width, height))
         }
     finally:
         httpd.shutdown()
+
+    offenders = {name: found["bad"] for name, found in results.items() if found["bad"]}
     assert offenders == {}
+    thin = {name: found for name, found in results.items() if int(str(found["examined"])) < 20}
+    assert thin == {}, (
+        f"the probe examined almost nothing on {sorted(thin)} -- a green run that "
+        f"measured no page is the failure spec 0027 FR-4 exists to catch: {thin}"
+    )

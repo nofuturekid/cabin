@@ -21,25 +21,22 @@ project's other web test files already do (there is no conftest.py and
 each file owns its own client/session/csrf/HTML-scoping plumbing).
 """
 
-import json
 import re
-import shutil
-import subprocess
-import threading
 from collections.abc import Iterator
-from functools import partial
 from html import unescape
 from html.parser import HTMLParser
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import ca_fixtures
+import probes
 import pytest
 from cryptography import x509
 from fastapi.testclient import TestClient
 from httpx2 import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from test_web_design_shell import class_selectors
+from test_web_layout import _populate, page_paths, render_pages
 
 from cabin import audit
 from cabin.api_tokens import create_token
@@ -474,51 +471,18 @@ def _field_names(html: str) -> set[str]:
     return set(_FIELD_NAME_RE.findall(html))
 
 
-# --- headless-Chrome plumbing, duplicated from test_web_layout.py ----------
-
-
-def _serve(root: Path) -> tuple[ThreadingHTTPServer, int]:
-    handler = partial(SimpleHTTPRequestHandler, directory=str(root))
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, httpd.server_address[1]
-
-
-def _dump_dom(url: str, width: int, height: int) -> str:
-    return subprocess.run(
-        [
-            CHROME,
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            f"--window-size={width},{height}",
-            "--virtual-time-budget=4000",
-            "--dump-dom",
-            url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    ).stdout
-
-
-def _probe_result(dom: str) -> list[str]:
-    found = re.search(r'<div id="probe-result">(.*?)</div>', dom, re.S)
-    assert found is not None, "probe did not run -- Chrome rendered nothing"
-    result: list[str] = json.loads(found.group(1).replace("&quot;", '"').replace("&amp;", "&"))
-    return result
+# --- headless-Chrome plumbing (spec 0027 FR-2: one definition, in probes) ---
 
 
 def _run_probe(html: str, probe: str, tmp_path: Path, name: str) -> list[str]:
     root = tmp_path / f"probe-{name}"
     root.mkdir(parents=True, exist_ok=True)
-    (root / f"{name}.html").write_text(html.replace("</body>", probe + "</body>"))
-    httpd, port = _serve(root)
+    probes.stage(root, STATIC_DIR, {name: html}, probe)
+    httpd, port = probes.serve(root)
     try:
-        dom = _dump_dom(f"http://127.0.0.1:{port}/{name}.html", 1440, 1150)
+        return list(probes.run(f"http://127.0.0.1:{port}/{name}.html", 1440, 1150))
     finally:
         httpd.shutdown()
-    return _probe_result(dom)
 
 
 #: AC-9's second half: every `.section` element's first child has visible text.
@@ -541,73 +505,6 @@ window.addEventListener('load', function () {
 });
 </script>
 """
-
-#: AC-11: every button.danger has a confirm checkbox inside its own <form>.
-_DANGER_PROBE = """
-<script>
-window.addEventListener('load', function () {
-  setTimeout(function () {
-    var bad = [];
-    document.querySelectorAll('button.danger').forEach(function (btn, i) {
-      var form = btn.closest('form');
-      var ok = form && form.querySelector('input[name="confirm"]');
-      if (!ok) bad.push('danger button ' + i + ' has no confirm checkbox in its form');
-    });
-    var out = document.createElement('div');
-    out.id = 'probe-result';
-    out.textContent = JSON.stringify(bad);
-    document.body.appendChild(out);
-  }, 300);
-});
-</script>
-"""
-
-#: AC-17: 0015's overflow probe, duplicated so this file can re-run it over
-#: the CA pages whose grid-row count FR-8's section split multiplies.
-_OVERFLOW_PROBE = """
-<script>
-window.addEventListener('load', function () {
-  setTimeout(function () {
-    function scrollable(el) {
-      for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
-        var ox = getComputedStyle(p).overflowX;
-        if (ox === 'auto' || ox === 'scroll' || ox === 'hidden') return true;
-      }
-      return false;
-    }
-    function container(el) {
-      for (var p = el.parentElement; p && p !== document.documentElement; p = p.parentElement) {
-        if (getComputedStyle(p).display !== 'inline' && p.getBoundingClientRect().width > 0) {
-          return p;
-        }
-      }
-      return null;
-    }
-    var vw = document.documentElement.clientWidth, bad = [];
-    document.querySelectorAll('body *').forEach(function (el) {
-      var r = el.getBoundingClientRect();
-      if ((r.width === 0 && r.height === 0) || scrollable(el)) return;
-      var c = container(el);
-      var label = el.tagName.toLowerCase() + '.' + (el.className || '').toString().slice(0, 30);
-      if (r.right > vw + 1) bad.push(label + ' past viewport by ' + Math.round(r.right - vw));
-      else if (c) {
-        var over = Math.round(r.right - c.getBoundingClientRect().right);
-        if (over > 1) bad.push(label + ' out of container by ' + over);
-      }
-    });
-    var out = document.createElement('div');
-    out.id = 'probe-result';
-    out.textContent = JSON.stringify(bad);
-    document.body.appendChild(out);
-  }, 300);
-});
-</script>
-"""
-
-
-def _overflow(url: str, width: int, height: int) -> list[str]:
-    return _probe_result(_dump_dom(url, width, height))
-
 
 # === FR-1/AC-1: a name is stored and signed exactly as it was typed ========
 
@@ -1255,7 +1152,7 @@ def test_every_danger_button_has_a_confirmation(
         assert resp.status_code == 200, f"{path} -> {resp.status_code}"
         html = resp.text
         assert _count_danger_buttons(html) >= 1, f"{path} carries no danger button at all"
-        bad = _run_probe(html, _DANGER_PROBE, tmp_path, name)
+        bad = _run_probe(html, probes.DANGER_PROBE, tmp_path, name)
         assert bad == [], (path, bad)
 
 
@@ -1263,71 +1160,89 @@ def test_every_danger_button_has_a_confirmation(
 
 
 def test_stylesheet_and_templates_agree_in_both_directions(client: TestClient, cfg: Config) -> None:
+    r"""Spec 0024 AC-12, widened by spec 0027 FR-20/AC-15.
+
+    The requirement is unchanged: no class used in the markup without a rule,
+    no rule without a user, and no `<details>` anywhere. What was too narrow
+    was the evidence. The forward direction looked at 7 of the 19 screens,
+    which is how `.tile-label` (`dashboard.html`) and `.warning`
+    (`acme.html`) have been used with no rule at all; the reverse direction
+    was three hard-coded string checks rather than a `defined - used`
+    assertion.
+
+    The reverse direction is computed from real class *selectors* rather than
+    from `re.findall(r"\.([a-zA-Z][\w-]*)")` over the whole file, because
+    that pattern matches `woff2` inside `url("…/Inter.woff2")` and would
+    report a font filename as an unused class forever.
+
+    The three string checks stay exactly as they are: they are cheap and they
+    forbid specific things by name.
+    """
     css_text = CSS_PATH.read_text()
     assert "details" not in css_text
     assert ".inline-form" not in css_text
     assert ".ca-row" not in css_text
 
-    for path in TEMPLATES_DIR.glob("*.html"):
-        text = path.read_text()
-        assert "<details" not in text, f"{path.name} still uses <details>"
-        assert "ca-row" not in text, f"{path.name} still uses .ca-row"
-        assert "inline-form" not in text, f"{path.name} still uses .inline-form"
+    templates = {path.name: path.read_text() for path in TEMPLATES_DIR.glob("*.html")}
+    for name, text in templates.items():
+        assert "<details" not in text, f"{name} still uses <details>"
+        assert "ca-row" not in text, f"{name} still uses .ca-row"
+        assert "inline-form" not in text, f"{name} still uses .inline-form"
 
-    # 0023 AC-11's forward direction, re-run over the pages this spec
-    # touches: every class used in the rendered markup has a rule.
-    _setup_superadmin(client)
-    assert _create_root(client, cfg, name="Acme Root CA", path_length=2).status_code == 303
-    root_a = _last_root_id(cfg)
-    assert _create_intermediate(client, cfg, root_a, name="Acme Issuing CA").status_code == 303
-    assert _create_root(client, cfg, name="Beta Root CA").status_code == 303
-    root_b = _last_root_id(cfg)
-    assert _create_intermediate(client, cfg, root_b, name="Beta Issuing CA").status_code == 303
-    cross_resp = client.post(
-        f"/ca/{root_b}/cross-sign",
-        data={"signing_root_id": root_a, "years": 5, "csrf_token": _csrf(client, cfg)},
-    )
-    assert cross_resp.status_code == 303
+    cert_path = _populate(client, cfg, second_issuer=True)
+    pages = render_pages(client, page_paths(cfg, cert_path))
+    assert len(pages) >= 19, f"the agreement test is looking at {len(pages)} screens"
 
-    db = _db(cfg)
-    try:
-        intermediate_b = db.scalars(
-            select(CACertificate).where(
-                CACertificate.kind == "intermediate", CACertificate.parent_id == root_b
-            )
-        ).one()
-        intermediate_b_id = intermediate_b.id
-        cross_id = db.scalars(select(CACertificate).where(CACertificate.kind == "cross")).one().id
-    finally:
-        db.close()
-
-    # spec 0025 moved CA import from `/ca/import` to `/transfer/ca-import`;
-    # the old path now 405s with a JSON body, which carries no markup and no
-    # classes, so it would silently drop out of this check. Every page is
-    # fetched through the same loop and its status asserted, so a page that
-    # moves again fails loudly here instead of quietly contributing nothing.
-    page_paths = [
-        "/ca",
-        "/ca/new",
-        "/transfer/ca-import",
-        f"/ca/{root_a}",
-        f"/ca/{root_b}",
-        f"/ca/{root_b}/issuer/{intermediate_b_id}",
-        f"/ca/{root_b}/cross/{cross_id}",
-    ]
-    pages = []
-    for path in page_paths:
-        resp = client.get(path)
-        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-        pages.append(resp.text)
-
-    defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", css_text))
-    used: set[str] = set()
-    for html in pages:
+    defined = class_selectors(css_text)
+    rendered: set[str] = set()
+    for html in pages.values():
         for classes in _CLASS_RE.findall(html):
-            used.update(classes.split())
-    missing = used - defined
-    assert missing == set(), missing
+            rendered.update(classes.split())
+
+    missing = rendered - defined
+    assert missing == set(), f"used in the markup, no rule in cabin.css: {sorted(missing)}"
+    for name in ("tile-label", "warning"):
+        assert name in defined, f".{name} is used by a template and has no rule (FR-20)"
+
+    # FR-20 defines "used" once, for both directions: the union of the class
+    # names on the 19 rendered pages and the names the templates carry
+    # *literally*. A class rendered only in a state this fixture cannot reach
+    # -- `card-narrow` on the two pages that have no rail, `error` on a
+    # rejected form, `constraints` on an issuer that has them, `callout` on
+    # the one-time token banner -- has a user; it is just not on screen in
+    # this run, and deleting its rule would break the page nobody's fixture
+    # visits. What the direction has to catch is a rule written for a
+    # component *nothing* renders (FR-18), and such a component is in neither
+    # half of the union.
+    #
+    # "Literally" is the static tokens only. A `{{ ... }}` or `{% ... %}`
+    # fragment contributes no name, so `class="tag-{{ kind }}"` contributes
+    # nothing at all -- the fragment is replaced by a non-space marker first,
+    # so that the token it is glued to falls out with it rather than leaving
+    # a stub like `tag-` behind. That is what keeps the interpolated `tag-*`
+    # values out of the set and the reverse direction's residue equal to the
+    # exemption list.
+    literal: set[str] = set()
+    for text in templates.values():
+        for classes in _CLASS_RE.findall(text):
+            marked = re.sub(r"{{.*?}}|{%.*?%}", "\x00", classes, flags=re.S)
+            literal.update(name for name in marked.split() if "\x00" not in name)
+    used = rendered | literal
+
+    # One exemption list, for the `tag-*` values that only ever exist as a
+    # `tag-{{ ... }}` interpolation. Each entry must match `^tag-` and there
+    # must be such an interpolation to produce it; any other name in the list
+    # fails, so the list cannot be used to park an ordinary unused class.
+    interpolating = [name for name, text in templates.items() if re.search(r"tag-(?:{{|{%)", text)]
+    assert interpolating, "no template interpolates a tag-* value; the exemption has no basis"
+    exempt = {name for name in defined - used if re.match(r"^tag-", name)}
+
+    unused = defined - used - exempt
+    assert unused == set(), (
+        f"a rule with no user: 0027 defines no class that has no user, and the "
+        f"design's new components are defined by the spec that first renders "
+        f"one: {sorted(unused)}"
+    )
 
 
 # === FR-5/AC-13: the TLS swap happens when an issuer appears, not before ===
@@ -1527,14 +1442,23 @@ def test_intermediate_cannot_carry_the_root_own_exact_subject(
 # === AC-17 (0015, re-run): no page scrolls sideways =========================
 
 
-@pytest.mark.skipif(not Path(CHROME).exists(), reason="headless Chrome not installed")
+@pytest.mark.skipif(not Path(probes.CHROME).exists(), reason="headless Chrome not installed")
+@pytest.mark.parametrize("scheme", ["dark", "light"])
 @pytest.mark.parametrize("width,height", [(1440, 1150), (390, 900)])
 def test_no_horizontal_overflow(
-    client: TestClient, cfg: Config, tmp_path: Path, width: int, height: int
+    client: TestClient, cfg: Config, tmp_path: Path, width: int, height: int, scheme: str
 ) -> None:
     """0015 AC-1/AC-2 re-run over the CA pages: FR-8's section split
     multiplies the number of grid rows on the detail page, which is
-    exactly the change that has broken this before."""
+    exactly the change that has broken this before.
+
+    spec 0027: the probe is imported from `tests/probes.py` rather than
+    copied. This file held the second, character-for-character copy of the
+    walker; repairing only the one in `test_web_layout.py` would have left
+    these nine pages vacuously green under the new shell, which is the same
+    defect the spec exists to fix one level up. Both schemes are run and
+    every page has to report having examined at least twenty elements (FR-4).
+    """
     _setup_superadmin(client)
     assert _create_root(client, cfg, name="Acme Root CA", path_length=2).status_code == 303
     root_a = _last_root_id(cfg)
@@ -1558,10 +1482,7 @@ def test_no_horizontal_overflow(
     )
     assert cross_resp.status_code == 303
 
-    root = tmp_path / "pages"
-    root.mkdir()
-    shutil.copytree(STATIC_DIR, root / "static")
-    pages = {
+    paths = {
         "ca": "/ca",
         "ca_new": "/ca/new",
         "ca_detail_a": f"/ca/{root_a}",
@@ -1572,20 +1493,29 @@ def test_no_horizontal_overflow(
         "transfer_ca_key": "/transfer/ca-key",
         "transfer_inventory": "/transfer/inventory",
     }
-    for name, path in pages.items():
+    pages = {}
+    for name, path in paths.items():
         resp = client.get(path)
         assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-        (root / f"{name}.html").write_text(
-            resp.text.replace("</body>", _OVERFLOW_PROBE + "</body>")
-        )
+        pages[name] = resp.text
 
-    httpd, port = _serve(root)
+    root = tmp_path / f"pages-{scheme}"
+    root.mkdir()
+    probes.stage(root, STATIC_DIR, pages, probes.OVERFLOW_PROBE, scheme)
+
+    httpd, port = probes.serve(root)
     try:
-        offenders = {
-            name: bad
+        results = {
+            name: probes.overflow(f"http://127.0.0.1:{port}/{name}.html", width, height)
             for name in pages
-            if (bad := _overflow(f"http://127.0.0.1:{port}/{name}.html", width, height))
         }
     finally:
         httpd.shutdown()
+
+    offenders = {name: found["bad"] for name, found in results.items() if found["bad"]}
     assert offenders == {}
+    thin = {name: found for name, found in results.items() if int(str(found["examined"])) < 20}
+    assert thin == {}, (
+        f"the probe examined almost nothing on {sorted(thin)} -- a green run "
+        f"that measured no page is the failure FR-4 exists to catch: {thin}"
+    )
