@@ -35,3 +35,4 @@ Out of Scope.
 | 0026 | hierarchy-pages      | Issuer tables on the hierarchy page, row detail pages                 |
 | 0027 | shell-and-tokens     | Design shell, token layer, component vocabulary, probes repaired      |
 | 0028 | detail-pages         | Grouped list, grid tables, row detail pages follow the design         |
+| 0029 | forms-and-previews   | Form pages, live preview panels, htmx under one URL rule             |
