@@ -34,3 +34,4 @@ Out of Scope.
 | 0025 | transfer             | Import/export rail group: trust bundle, inventory, CA key export      |
 | 0026 | hierarchy-pages      | Issuer tables on the hierarchy page, row detail pages                 |
 | 0027 | shell-and-tokens     | Design shell, token layer, component vocabulary, probes repaired      |
+| 0028 | detail-pages         | Grouped list, grid tables, row detail pages follow the design         |
