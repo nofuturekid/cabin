@@ -236,10 +236,22 @@ def _san_from_cn(subject_cn: str) -> str | None:
     return None
 
 
-def _resolve_sans(
+def resolve_sans(
     explicit: Sequence[str], csr_sans: Sequence[str], subject_cn: str | None
 ) -> list[str]:
     """FR-3's ladder: explicit SANs win, then the CSR's, then the CN.
+
+    Public since spec 0029 FR-5, with its body unchanged: the issue form's
+    preview panel has to check the names the *signer* would check, and two of
+    the rungs below cannot be approximated from outside. An empty SAN box
+    falls back to the common name, and that fallback is ``IP:`` for a CN that
+    parses as an address and ``DNS:`` for one that does not
+    (:func:`_san_from_cn`). Handing :func:`check_name_constraints` an empty
+    SAN list instead makes *its* own fallback append ``DNS:<cn>`` -- a dotted
+    quad matches ``_HOSTNAME_RE`` -- and evaluate it against the permitted
+    **DNS** subtrees, while issuance evaluates ``IP:<cn>`` against the
+    permitted **IP** subtrees. Those are different questions, and wherever
+    they differ the shortcut is the more permissive of the two.
 
     The winning rung is de-duplicated here, so "nas.lan" and "dns:nas.lan"
     in one request produce a single SAN entry -- otherwise the certificate
@@ -626,6 +638,31 @@ def check_name_constraints(
             )
 
 
+def clamp_validity(
+    issuer_cert: x509.Certificate, days: int, now: datetime
+) -> tuple[datetime, datetime | None]:
+    """The five lines spec 0017 FR-5/FR-7 put at the top of
+    :func:`_build_leaf`, extracted by spec 0029 FR-6 so the issue form's
+    preview panel can state the expiry the certificate will actually get
+    rather than the one that was asked for.
+
+    Returns ``(not_after, capped_from)``: ``not_after`` is
+    ``min(now + days, issuer_cert.not_valid_after_utc)`` -- a leaf must never
+    outlive the CA that signed it -- and ``capped_from`` is the ``not_after``
+    that was requested but not granted, or ``None`` when the full request was
+    met. Raises ``IssueError`` when nothing is left to grant.
+
+    ``now`` is required and takes no default. A helper that read its own
+    clock would be a helper the panel and the signer can disagree through,
+    and one a test could not pin.
+    """
+    requested_not_after = now + timedelta(days=days)
+    not_after = min(requested_not_after, issuer_cert.not_valid_after_utc)
+    if not_after <= now:
+        raise IssueError("the signing CA certificate has expired")
+    return not_after, (requested_not_after if requested_not_after > not_after else None)
+
+
 def _build_leaf(
     issuer_cert: x509.Certificate,
     issuer_key: CertificateIssuerPrivateKeyTypes,
@@ -662,13 +699,11 @@ def _build_leaf(
     would silently go wrong the moment the issuer itself is renewed to a
     later expiry (spec 0017 FR-5).
     """
+    # This function keeps its own clock -- it needs `now` for
+    # `not_valid_before` as well -- and passes it into the clamp (spec 0029
+    # FR-6), so the panel and the signer measure against the same instant.
     now = datetime.now(UTC)
-    requested_not_after = now + timedelta(days=days)
-    # FR-4: a leaf must never outlive the CA that signed it.
-    not_after = min(requested_not_after, issuer_cert.not_valid_after_utc)
-    if not_after <= now:
-        raise IssueError("the signing CA certificate has expired")
-    capped_from = requested_not_after if requested_not_after > not_after else None
+    not_after, capped_from = clamp_validity(issuer_cert, days, now)
 
     # Spec 0020 FR-4: beside the SAN validation this function already does,
     # and before anything is signed. Takes no parameter of its own --
@@ -727,7 +762,7 @@ def issue_certificate(
     _validate_days(days)
     if key_type not in KEY_TYPES:
         raise IssueError(f"unsupported key type: {key_type!r}")
-    resolved = _resolve_sans([_normalize_san(san) for san in sans], [], cn)
+    resolved = resolve_sans([_normalize_san(san) for san in sans], [], cn)
     key = generate_key(key_type)
     cert, capped_from = _build_leaf(
         issuer_cert,
@@ -763,7 +798,7 @@ def self_signed_server_certificate(
     caller's decision (FR-4), not this pure function's.
     """
     cn = _validate_cn(subject_cn)
-    resolved = _resolve_sans([_normalize_san(san) for san in sans], [], cn)
+    resolved = resolve_sans([_normalize_san(san) for san in sans], [], cn)
     key = generate_key(key_type)
     now = datetime.now(UTC)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
@@ -844,7 +879,7 @@ def sign_csr(
         cn = _validate_cn(raw_cn)
 
     explicit = [_normalize_san(san) for san in sans_override] if sans_override else []
-    resolved = _resolve_sans(explicit, _csr_sans(csr), cn)
+    resolved = resolve_sans(explicit, _csr_sans(csr), cn)
     return _build_leaf(
         issuer_cert,
         issuer_key,

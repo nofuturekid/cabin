@@ -687,7 +687,13 @@ def resolve_sans(
 
 ```python
 def _issue_preview(
-    db: Session, principal: Principal, *, subject_cn: str, sans: str, issuer_id: int | None, days: int
+    db: Session,
+    principal: Principal,
+    *,
+    subject_cn: str,
+    sans: str,
+    issuer_id: int | None,
+    days: int,
 ) -> dict[str, object]: ...
 
 
@@ -736,7 +742,9 @@ def _detail_page(
 ) -> Response: ...
 
 
-def _create_preview(*, name: str, key_type: str, root_years: int, path_length: int) -> dict[str, object]: ...
+def _create_preview(
+    *, name: str, key_type: str, root_years: int, path_length: int
+) -> dict[str, object]: ...
 ```
 
 - **`_detail_page` regains `open_form`** (FR-13), keyword-only, default
@@ -908,6 +916,24 @@ FR-4's verdict have a fixture.
   succeeds), or if the check is re-implemented in the web layer (the
   spy sees no calls at all).
 
+  > **Correction (test-authoring):** the spy is read **before** the
+  > `POST /certs/issue` this criterion also asks for, and the count is of
+  > the preview's calls alone. `_build_leaf` calls the same function, so
+  > a list read after the issuance holds issuance's whole-set call as
+  > well — three entries for one name — and `calls[:-1]` then ends on the
+  > *preview's* whole-set call, whose second argument is the common name
+  > and not `None`. The only build that satisfies the criterion read that
+  > way is one that makes a per-name call and no whole-set call at all,
+  > which is precisely what FR-4 forbids and what the IP case under FR-5
+  > proves wrong. Written as it stood, this criterion argued for the
+  > defect the requirement above it exists to prevent.
+  >
+  > The snapshot is taken immediately after the preview responds, and the
+  > counter-check that the window is the right one is that the list has
+  > grown by the time the issuance returns: if it has not, either the spy
+  > stopped recording or `check_name_constraints` left `_build_leaf`, and
+  > either way the count above is measuring nothing.
+
 - AC-4: **The stated expiry is the granted expiry, measured against a
   certificate that was actually issued.** Two halves, one test:
   1. **Clamped.** Against an issuer whose own `not_valid_after` is
@@ -974,6 +1000,18 @@ FR-4's verdict have a fixture.
   drifts from the page's — the substring assertion is what makes "one
   code path" a measurement rather than a claim.
 
+  > **Correction (test-authoring):** "every field re-filled with what was
+  > submitted" is compared on a textarea's body **verbatim except for one
+  > leading newline**, which is what a browser does with it — HTML parses
+  > away a single `\n` immediately after the open tag and no other
+  > whitespace. Trimming instead is wrong in the direction that matters
+  > on these four pages: a PEM ends in a newline, that newline is part of
+  > what was submitted and what the browser would resubmit, and a
+  > comparison that stripped both sides would report a textarea as
+  > re-filled when a trailing line had been eaten. Three of the four
+  > pages carry a textarea and two of those carry PEM, so this is the
+  > common case here rather than an edge of one.
+
 - AC-8: **No page silently does nothing with JavaScript off.** For each
   of `/certs/new`, `/certs/sign`, `/ca/new` and `/transfer/ca-import`:
   the page contains exactly one `<button type="submit">` whose
@@ -1005,6 +1043,22 @@ FR-4's verdict have a fixture.
   "so the panel can show the key type too" — clause 1 catches it, and
   clauses 2 and 3 are what stop the endpoint growing a parameter that
   would make the widening tempting.
+
+  > **Correction (test-authoring):** clause 2's handler is reached by
+  > walking the route tree, not by scanning `app.routes`. In the FastAPI
+  > this project pins, every `include_router` leaves a single
+  > `_IncludedRouter` object whose own `path` is `None` and whose members
+  > hang off `original_router`; a flat scan therefore finds no route for
+  > **any** included path — not only for the four this spec adds — so the
+  > clause written that way reports "no such endpoint" whatever the code
+  > does. An assertion that answers the same thing for a correct build
+  > and a broken one is the failure mode this spec's own AC-1 paragraph
+  > is about, met in the criterion written to prevent it.
+  >
+  > The walker recurses, and it proves it can find anything by locating
+  > the pre-existing `POST /ca/import` first: a zero for
+  > `POST /ca/import/preview` only means something once a route that has
+  > existed since spec 0011 has been found by the same code.
 
 - AC-10: **The sign panel parses, and says so when it cannot.** On
   `POST /certs/sign/preview` with a real CSR, the panel's `Subject`
@@ -1101,6 +1155,25 @@ FR-4's verdict have a fixture.
   pushes the page out — the one thing a two-column form adds — or if the
   design's `#5a5d6b` is shipped for the dim values after all.
 
+  > **Correction (test-authoring):** "`#5a5d6b` is not in `cabin.css`"
+  > contradicts AC-16 and no build can satisfy both. That hex is spec
+  > 0027's `--disabled` token: it is in the brief's own palette, AC-16
+  > requires `test_the_palette_equals_the_checked_in_brief` to pass
+  > unmodified, and removing the declaration fails it. FR-10 never asked
+  > for its removal — it says the dim state **is `--text-muted`, not**
+  > that hex, which is a statement about which token the dim values
+  > reach for.
+  >
+  > That is what is asserted, twice and in two registers. Statically:
+  > every rule selecting the unparsed state declares
+  > `color: var(--text-muted)` and mentions neither `--disabled` nor the
+  > literal. As effect: the import page is staged for the contrast run a
+  > **second** time, from a preview of input that does not parse, so the
+  > dim values are actually in front of the probe. Without that second
+  > render this criterion named "the dim unparsed values of FR-10" while
+  > measuring a panel in which every value had parsed — the filled render
+  > shows none of them — and the whole clause would have been decoration.
+
 - AC-16: **The design's numbers and the palette are untouched.**
   `test_the_twelve_numbers`, `test_the_palette_equals_the_checked_in_brief`
   and `test_no_colour_outside_the_token_blocks` pass unmodified, and the
@@ -1125,6 +1198,25 @@ FR-4's verdict have a fixture.
   unmodified against the extracted `clamp_validity` and the renamed
   `resolve_sans`. The only test changes are the ones the Test list
   names.
+
+  > **Correction (implementation):** this criterion predicted the
+  > behaviour of tests it does not own, and the prediction was wrong.
+  > Seven tests outside this spec's Test list read the intermediate form,
+  > the cross-sign `<select>` or a section scoped by one of their form
+  > actions off `GET /ca/{id}` with no query — which is exactly the state
+  > AC-12 now requires to carry no form. There is no build satisfying
+  > both, so "the 0003–0028 suite passes unmodified" was never available
+  > and this criterion asserted it anyway.
+  >
+  > What was actually true, and is what the criterion now claims: no
+  > **requirement** outside this spec changes. Each of the seven is
+  > re-pointed at the URL its form now stands at, or scoped by the
+  > section `id` FR-13 pins as stable, with the requirement it protects
+  > named at the call site; all seven are in the Re-pointed list. A
+  > criterion that predicts other tests' behaviour is a claim like any
+  > other and is worth writing down when it turns out false, because the
+  > cost of it was hidden until the implementation existed — which is the
+  > one thing a spec-first suite is supposed to surface earlier.
 
 ## Test list
 
@@ -1199,6 +1291,54 @@ it is read from moved:
   each asserts about the form is unchanged. The `<details>`/`<summary>`
   absence assertions at `:1079` and `:1237` are **not** re-pointed and
   must pass on both states.
+
+**Seven more, found by implementing.** They are in the same category as
+the four above — the requirement is unchanged and the URL it is read
+from moved — and they are listed separately only because AC-18 predicted
+they would need no change at all. Each names, at its call site, the
+requirement it protects.
+
+- **`tests/test_ca_issuer_pages.py`'s `test_tables_sit_above_both_forms`
+  and `test_renew_and_retire_is_its_own_section_and_comes_last`** protect
+  spec 0026 AC-1 and spec 0028 FR-4: the tables sit above both action
+  sections, and `Renew and retire` is last. Both scoped the two action
+  blocks by their form's `action`. They are re-pointed at the section
+  `id`s FR-13 pins as stable — `#add-intermediate` and `#cross-sign` —
+  rather than at `?add=`, because these are assertions about *order* in
+  one document and no single URL has both forms open. The requirement is
+  unchanged; the marker moved from the form to the section around it.
+- **`tests/test_ca_issuer_pages.py`'s
+  `test_no_sentence_changed_on_the_five_pages`** protects spec 0028
+  FR-15/AC-16. It gains the same three-URL pooling this spec's AC-14
+  needs, and spec 0028's own criterion is corrected in its own file.
+- **`tests/test_web_ca.py`'s
+  `test_ca_page_hides_unavailable_actions_for_imported_root`** protects
+  spec 0024 FR-3/AC-11: a root cabin holds a key for offers the
+  intermediate form; an imported one does not. The positive half reads
+  `?add=intermediate`; the negative half stays on the plain page, where
+  the whole section is omitted, **and gains the open URL too** — with
+  `open_form` coming from the query string, "the section is omitted" has
+  to hold at the URL that would open it.
+- **`tests/test_web_ca_pages.py`'s
+  `test_viewer_reads_the_detail_page_and_sees_no_form`** protects spec
+  0023 FR-6: a viewer is offered no form on this page. The admin half
+  reads `?add=intermediate`; the viewer half gains both `?add=` URLs,
+  which is the one hole URL state opens that a server-decided boolean
+  did not.
+- **`tests/test_web_ca_pages.py`'s
+  `test_cross_sign_candidates_come_from_every_row`** protects spec 0021
+  FR-13: the candidate list is drawn from every eligible root, and a
+  root with none is told why. **Both** halves move to `?add=cross-sign`,
+  and the negative one is why it matters: on the closed page
+  `found is False` is true of every root on the instance, so left where
+  it was this test would have gone on passing while measuring the
+  disclosure instead of the candidate list.
+- **`tests/test_web_name_constraints.py`'s
+  `test_import_form_offers_no_constraint_field`** protects spec 0020
+  FR-1: `permitted_names`/`excluded_names` are on the intermediate-add
+  form and on no other. Its counter-proof — that the parser finds those
+  fields where they do live — is what makes the two absences scoped
+  rather than vacuous, and it now reads `?add=intermediate`.
 
 **Strengthened** — the requirement grows:
 

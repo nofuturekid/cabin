@@ -1075,6 +1075,38 @@ certificate for beta's root signed by alpha's root, and a base URL set.
     issuer names and expiries FR-5's rows carry, and FR-4's heading and
     help line. An addition that is not in the list fails.
 
+  > **Correction (spec 0029 FR-13):** `/ca/{root}` is no longer one URL,
+  > and this criterion's "with the same multiplicity" cannot survive that
+  > unamended. Spec 0029 turns the `Add intermediate` and `Cross-sign
+  > with another root` forms into URL state: the closed page renders
+  > neither form's fields, and the two are never open at once. So a text
+  > node this spec's base commit had is absent from the closed URL by
+  > construction, and `Validity (years)` — which **both** forms carried —
+  > cannot appear twice at any URL again, whatever is pooled.
+  >
+  > The comparison for that one page therefore reads the union of
+  > `/ca/{root}`, `?add=intermediate` and `?add=cross-sign`, and on it
+  > both directions are compared as **sets**: a sentence absent from all
+  > three still fails, and a sentence that merely appears at a second URL
+  > is not an addition. The other four pages are one URL each and keep
+  > the exact multiset this criterion has always asked for. What is given
+  > up is narrow and worth naming: on `/ca/{root}` alone, a duplicated
+  > row dropped to a single row would no longer be caught here — the two
+  > tables on that page are rendered identically in all three states, and
+  > spec 0026 AC-2's row assertions cover them directly.
+  >
+  > Two strings join the addition list with it: `Add an intermediate` and
+  > `Cross-sign with another root`, the closed states' trigger anchors.
+  > Spec 0029 FR-14 takes both from copy that already existed — the empty
+  > state's link text and the section's own `<h2>` — so neither is new
+  > wording, but on a root that has an issuer the empty state does not
+  > render, and the first is a string this page did not carry.
+  >
+  > The correction is recorded here rather than only in spec 0029,
+  > because this is the criterion that makes the claim about these five
+  > pages, and a criterion corrected somewhere else is a criterion whose
+  > next reader will implement the version in front of them.
+
   Both SAN lists — the joined string that goes and the elements that
   arrive — are **`cert.sans`'s own values**, prefix included (AC-7).
   Naming them in any other form makes this criterion unsatisfiable

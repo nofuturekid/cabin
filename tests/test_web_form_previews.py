@@ -83,6 +83,7 @@ from test_ca_issuer_pages import (
     _text_nodes,
     _text_of,
 )
+from test_web_design_shell import css_rules, declarations
 
 from cabin import audit
 from cabin.app import create_app
@@ -143,9 +144,15 @@ VERDICT_UNCONSTRAINED = (
     "This issuer sets no name constraints, so any name it is asked for is permitted."
 )
 
-#: The design's dim hex, which FR-10 refuses. Named here so AC-15's clause
-#: about it reads as a value and not as a colour somebody remembered.
+#: The design's dim hex, which FR-10 refuses **for the unparsed values**.
+#: It is not refused from the file: it is spec 0027's `--disabled` token,
+#: named in the brief and pinned by AC-16's palette test, so "it is not in
+#: cabin.css" would fail a build that is correct. What FR-10 states is that
+#: the dim state is `--text-muted`, and that is what is asserted -- once as
+#: the declaration the dim rule carries, and once as effect, by putting the
+#: unparsed state in front of the contrast probe.
 REFUSED_DIM = "#5a5d6b"
+REFUSED_DIM_TOKEN = "--disabled"
 
 
 # --- fixtures and plumbing, duplicated as every web test file here does ----
@@ -743,6 +750,14 @@ def test_the_constraint_panel_agrees_with_the_signer(
     refused_form = _issue_form(fix, cfg, client, subject_cn=EXCLUDED_DNS, sans="10.0.0.5")
     calls = _spy(monkeypatch, leaf_mod, "check_name_constraints")
     preview = client.post("/certs/issue/preview", data=dict(refused_form))
+    # Snapshotted here, before anything else in this test reaches the signer.
+    # `_build_leaf` calls the same function, so a list read after the
+    # `POST /certs/issue` below holds issuance's own whole-set call as well --
+    # and `preview_calls[:-1]` would then end on the preview's whole-set call,
+    # whose second argument is the common name. The only build passing that
+    # arrangement is one that makes a per-name call and no whole-set call,
+    # which is exactly what FR-4 forbids and what the IP case proves wrong.
+    preview_calls = list(calls)
     assert preview.status_code == 200, preview.text
     panel = _panel(preview.text, "Name constraints — checked before signing")
 
@@ -751,6 +766,31 @@ def test_the_constraint_panel_agrees_with_the_signer(
     ok, line = marks[0]
     assert ok is True, f"10.0.0.5 is inside {PERMITTED_NET} and the panel marks it refused: {line}"
     assert "10.0.0.5" in line, line
+
+    # The spy: once per name, then once over the whole set, in that order --
+    # asserted on the snapshot, above the issuance that would pollute it.
+    resolve = getattr(leaf_mod, "resolve_sans", None)
+    assert resolve is not None, "leaf.resolve_sans does not exist (FR-5: _resolve_sans renamed)"
+    resolved = resolve([leaf_mod._normalize_san("10.0.0.5")], [], EXCLUDED_DNS)
+    issuer_cert = _cert_of(cfg, fix.alpha_int)
+    assert len(preview_calls) == len(resolved) + 1, (
+        f"the preview called check_name_constraints {len(preview_calls)} times for "
+        f"{len(resolved)} name(s). FR-4 asks for one call per name plus one over "
+        f"the whole set; zero calls means the check was re-implemented in the web "
+        f"layer: {preview_calls}"
+    )
+    for call in preview_calls[:-1]:
+        assert call[1] is None, (
+            f"a per-name call passed subject_cn={call[1]!r}; FR-4 requires None so "
+            f"the common-name rule cannot fire inside a single-name call"
+        )
+    last = preview_calls[-1]
+    assert last[0] == issuer_cert, "the whole-set call was made against another certificate"
+    assert last[1] == EXCLUDED_DNS, f"the whole-set call passed subject_cn={last[1]!r}"
+    assert list(last[2]) == list(resolved), (
+        f"the whole-set call was made over {list(last[2])}, not over resolve_sans's "
+        f"own output {list(resolved)} -- FR-5's whole point"
+    )
 
     issued = client.post(
         "/certs/issue",
@@ -774,28 +814,12 @@ def test_the_constraint_panel_agrees_with_the_signer(
     )
     assert _count(cfg, Certificate) == before, "a refused issuance wrote a row"
 
-    # The spy: once per name, then once over the whole set, in that order.
-    resolve = getattr(leaf_mod, "resolve_sans", None)
-    assert resolve is not None, "leaf.resolve_sans does not exist (FR-5: _resolve_sans renamed)"
-    resolved = resolve([leaf_mod._normalize_san("10.0.0.5")], [], EXCLUDED_DNS)
-    issuer_cert = _cert_of(cfg, fix.alpha_int)
-    assert len(calls) == len(resolved) + 1, (
-        f"the preview called check_name_constraints {len(calls)} times for "
-        f"{len(resolved)} name(s). FR-4 asks for one call per name plus one over "
-        f"the whole set; zero calls means the check was re-implemented in the web "
-        f"layer: {calls}"
-    )
-    for call in calls[:-1]:
-        assert call[1] is None, (
-            f"a per-name call passed subject_cn={call[1]!r}; FR-4 requires None so "
-            f"the common-name rule cannot fire inside a single-name call"
-        )
-    last = calls[-1]
-    assert last[0] == issuer_cert, "the whole-set call was made against another certificate"
-    assert last[1] == EXCLUDED_DNS, f"the whole-set call passed subject_cn={last[1]!r}"
-    assert list(last[2]) == list(resolved), (
-        f"the whole-set call was made over {list(last[2])}, not over resolve_sans's "
-        f"own output {list(resolved)} -- FR-5's whole point"
+    # ...and the counter-check that the snapshot above was taken at the right
+    # moment: the signer calls the same function, so the list has grown.
+    assert len(calls) > len(preview_calls), (
+        "POST /certs/issue made no check_name_constraints call of its own, so "
+        "either the spy stopped recording or the check left _build_leaf -- and "
+        "the snapshot above is measuring a window that no longer means anything"
     )
 
     # 2. The same excluded CN, this time with a DNS SAN. The CN is no longer
@@ -1197,7 +1221,17 @@ def test_one_macro_two_envelopes(client: TestClient, cfg: Config) -> None:
 
 class _SubmittedValues(HTMLParser):
     """Every form control's current value, by name: `value=` for an input,
-    the selected `<option>` for a select, the body for a textarea."""
+    the selected `<option>` for a select, the body for a textarea.
+
+    A textarea's body is taken **verbatim except for one leading newline**,
+    which is what a browser does with it (HTML parses away a single `\\n`
+    immediately after the open tag and no other whitespace). Stripping it
+    instead is wrong in the direction that matters here: a PEM ends in a
+    newline, that newline is part of what was submitted, and a helper that
+    trimmed it would report a re-filled textarea as lost on every one of
+    these four pages. Trailing whitespace a browser would resubmit is
+    therefore preserved and compared.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -1227,7 +1261,8 @@ class _SubmittedValues(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "textarea" and self._textarea is not None:
-            self.values[self._textarea] = self._buffer.strip()
+            body = self._buffer
+            self.values[self._textarea] = body[1:] if body.startswith("\n") else body
             self._textarea = None
         elif tag == "select":
             self._select = None
@@ -1343,12 +1378,47 @@ def test_the_forms_work_with_javascript_off(client: TestClient, cfg: Config) -> 
 # --- AC-9 ------------------------------------------------------------------
 
 
+def _routed(app: Any) -> list[Any]:
+    """Every routed endpoint reachable from `app`, whatever it is wrapped in.
+
+    `app.routes` is not the route table in this FastAPI: every
+    `include_router` leaves one `_IncludedRouter` object whose own `path` is
+    `None` and whose members live on `original_router`. A flat scan of
+    `app.routes` therefore finds **no** route for any included path -- not
+    only for the four this spec adds -- so the version of AC-9 clause 2 that
+    did one reported "no such route" whatever the code did. That is the
+    failure mode this whole file is written against, so the walker recurses
+    and `_route_handler` proves on a route that already existed that it can
+    find anything at all.
+    """
+    seen: set[int] = set()
+    found: list[Any] = []
+
+    def walk(obj: Any) -> None:
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        for route in getattr(obj, "routes", []):
+            if getattr(route, "path", None) is not None and getattr(route, "methods", None):
+                found.append(route)
+            walk(route)
+            inner = getattr(route, "original_router", None)
+            if inner is not None:
+                walk(inner)
+
+    walk(app)
+    return found
+
+
 def _route_handler(client: TestClient, path: str, method: str) -> Callable[..., Any]:
-    matches = [
-        route
-        for route in client.app.routes  # type: ignore[attr-defined]
-        if getattr(route, "path", None) == path and method in getattr(route, "methods", set())
-    ]
+    routes = _routed(client.app)
+    control = [r for r in routes if r.path == "/ca/import" and "POST" in r.methods]
+    assert len(control) == 1, (
+        f"the route walker found {len(control)} routes for the pre-existing "
+        f"POST /ca/import, so it cannot find anything and a zero below would say "
+        f"nothing about the endpoint under test"
+    )
+    matches = [r for r in routes if r.path == path and method in r.methods]
     assert len(matches) == 1, f"expected one {method} {path} route, found {len(matches)}"
     return matches[0].endpoint  # type: ignore[no-any-return]
 
@@ -1629,15 +1699,34 @@ def test_no_sentence_changed_on_the_form_pages(
         "ca_detail": {"Add an intermediate", "Cross-sign with another root"},
     }
 
+    # The pooling actually pooled something, or the union is one render under
+    # another name and the correction below is measuring nothing.
+    assert after_pooled["ca_detail"] != _text_nodes(after["ca_detail"]), (
+        "the three ca_detail URLs pool to exactly the closed render, so either "
+        "`?add=` renders nothing extra or the states above were not fetched"
+    )
+
     for name in paths:
         old, new = before_pooled[name], after_pooled[name]
         assert sum(old.values()) >= 20, f"{name}: the baseline page has {sum(old.values())} texts"
-        lost = set(old - new)
+        # A disclosure can reduce how often a sentence appears on one URL; it
+        # may never remove one from the page. `Add intermediate` and
+        # `Cross-sign with another root` both carried a `Validity (years)`
+        # label at the base commit and can never be open at once again, so no
+        # number of pooled URLs prints it twice -- multiplicity is not
+        # comparable across states and the claim for that page is the set.
+        # Stated as a rule rather than as that one label, because whether the
+        # second form renders at all depends on the fixture's cross-sign
+        # candidates, and a hard-coded exception would pass or fail on that
+        # rather than on the markup.
+        lost = (set(old) - set(new)) if name in states else set(old - new)
         assert lost == set(), (
             f"{name}: text that was on this page before this spec is gone from it. "
-            f"FR-14 takes no exception and permits no removal: {sorted(lost)}"
+            f"FR-14 permits no removal: {sorted(lost)}"
         )
-        gained = set(new - old) - additions[name]
+        # Symmetrical with `lost` above, for the same reason.
+        gained_all = (set(new) - set(old)) if name in states else set(new - old)
+        gained = gained_all - additions[name]
         assert gained == set(), (
             f"{name}: text this spec did not name appears on the page. Every "
             f"addition is in FR-14's table or it is a wording change: "
@@ -1678,6 +1767,21 @@ def _filled_pages(client: TestClient, cfg: Config, fix: Fixture) -> dict[str, st
         resp = client.post(url, data=dict(body))
         assert resp.status_code == 200, f"{url} -> {resp.status_code}"
         pages[name] = resp.text
+    # ...and the import page a second time with nothing that parses, because
+    # AC-15's contrast clause names "the dim unparsed values of FR-10" and the
+    # filled render above shows none of them. Without this page the contrast
+    # run never sees the state FR-10 is entirely about.
+    dim = client.post(
+        "/ca/import/preview",
+        data=_import_form(cfg, client, cert_pem="not a pem", chain_pem=""),
+    )
+    assert dim.status_code == 200, f"/ca/import/preview (unparsed) -> {dim.status_code}"
+    assert "data-dim" in dim.text, (
+        "the import preview renders no dim value for input that does not parse, so "
+        "the contrast run below cannot measure FR-10's dim state"
+    )
+    pages["transfer_ca_import_dim"] = dim.text
+
     for name, path in (
         ("transfer_cross_import", "/transfer/cross-import"),
         ("ca_detail_open", f"/ca/{fix.alpha_root}?add=intermediate"),
@@ -1705,10 +1809,26 @@ def test_the_form_pages_do_not_scroll_sideways(
     fix = _seed(cfg)
     pages = _filled_pages(client, cfg, fix)
 
-    assert REFUSED_DIM not in (STATIC_DIR / "cabin.css").read_text(), (
-        f"{REFUSED_DIM} is in cabin.css; FR-10 refuses the design's dim hex because "
-        f"it is 2.4:1 on --surface and the contrast probe would report it"
+    # FR-10: the dim state is `--text-muted`, not the design's `#5a5d6b`.
+    # Asserted as which token the dim rule reaches for, never as the hex being
+    # absent from the file -- `#5a5d6b` is spec 0027's `--disabled`, it is in
+    # the brief, and AC-16's palette test fails if it is removed.
+    css = (STATIC_DIR / "cabin.css").read_text()
+    dim_rules = [(selector, body) for selector, body in css_rules(css) if "[data-dim]" in selector]
+    assert dim_rules, (
+        "no rule in cabin.css selects the unparsed state, so FR-10's dim values are "
+        "either not rendered or not styled at all"
     )
+    for selector, body in dim_rules:
+        colour = dict(declarations(body)).get("color")
+        assert colour == "var(--text-muted)", (
+            f"`{selector}` sets color: {colour} for FR-10's dim values. One step "
+            f"less faint is `--text-muted`; `{REFUSED_DIM_TOKEN}` ({REFUSED_DIM}) is "
+            f"2.4:1 on --surface and these are values an operator is meant to read"
+        )
+        assert REFUSED_DIM not in body and REFUSED_DIM_TOKEN not in body, (
+            f"`{selector}` reaches for {REFUSED_DIM_TOKEN}/{REFUSED_DIM}: {body!r}"
+        )
 
     for scheme in ("dark", "light"):
         for width, height in ((1440, 1150), (390, 900)):
@@ -1753,13 +1873,19 @@ def test_the_form_pages_do_not_scroll_sideways(
     finally:
         httpd.shutdown()
 
+    # Keyed on the page rather than on the render: `transfer_ca_import` is
+    # staged twice, filled and unparsed, and both carry the split. FR-16's
+    # claim is about which *pages* have an aside, and the two that must not
+    # are named on the other side so the assertion fails in both directions.
     split_pages = [name for name in pages if wide[name]["examined"]]
-    assert sorted(split_pages) == [
-        "ca_new",
-        "certs_new",
-        "certs_sign",
-        "transfer_ca_import",
-    ], f"the .form-split/aside pair was found on {sorted(split_pages)} (FR-16: not on cross-import)"
+    expected_split = {"ca_new", "certs_new", "certs_sign", "transfer_ca_import"}
+    assert {name.removesuffix("_dim") for name in split_pages} == expected_split, (
+        f"the .form-split/aside pair was found on {sorted(split_pages)}; FR-16 gives "
+        f"the cross-import page no aside and FR-13 gives the hierarchy page none"
+    )
+    assert {"transfer_cross_import", "ca_detail_open"} & set(split_pages) == set(), (
+        f"a page FR-16 draws as one column carries a preview aside: {sorted(split_pages)}"
+    )
 
     for name in split_pages:
         for pair in narrow[name]["pairs"]:

@@ -680,7 +680,15 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     # spec 0024 FR-8: "Add intermediate" is its own headed section now, a
     # sibling of the root's rather than nested inside it -- scoped to that
     # section on its own, not to the root's.
-    generated_create_window = _row(generated_html, "Add intermediate", class_name="section")
+    # spec 0029 FR-13 re-points this one window. The requirement is unchanged
+    # -- a root cabin holds a key for offers the intermediate form, an
+    # imported one does not -- but the form now stands at `?add=intermediate`,
+    # so the positive half is read there. The negative half below stays on the
+    # plain page and is *stronger* for it: `can_create_intermediate` is false
+    # for an imported root, so its whole section is omitted in both states,
+    # and the heading's absence is what proves it rather than the form's.
+    generated_open = client.get(f"/ca/{generated_root.id}?add=intermediate").text
+    generated_create_window = _row(generated_open, "Add intermediate", class_name="section")
     # spec 0028 FR-4: the root's renew and retire forms are their own headed
     # section, last on the page, rather than the tail of the root's identity
     # block. The requirement here has not moved -- an imported root offers no
@@ -704,6 +712,12 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     # included -- is omitted rather than merely emptied.
     assert "Add intermediate" not in imported_html
     assert blocked_create_url not in imported_html
+    # ...and asking for it by URL does not conjure it either (spec 0029
+    # FR-13): `open_form` comes from the query string now, so "the section is
+    # omitted" has to hold at the URL that opens it as well.
+    imported_open = client.get(f"/ca/{imported_root.id}?add=intermediate").text
+    assert "Add intermediate" not in imported_open
+    assert blocked_create_url not in imported_open
     assert blocked_renew_url not in imported_renew_window
     # ...and nowhere else on the page either: the section moved, so an
     # absence scoped to one block no longer says much on its own.

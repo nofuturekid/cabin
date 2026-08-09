@@ -49,6 +49,8 @@ from cabin.web.deps import (
     current_actor,
     get_current_user,
     get_db,
+    is_htmx,
+    preview_fragment,
     require_admin,
     require_superadmin,
     verify_csrf,
@@ -94,13 +96,65 @@ def _subject(row: CACertificate) -> str:
 
 
 def _ca_import_page(
-    request: Request, user: User, error: str | None, status_code: int = 200
+    request: Request,
+    user: User,
+    error: str | None,
+    status_code: int = 200,
+    *,
+    values: dict[str, object] | None = None,
 ) -> Response:
+    """``values`` is spec 0029's one addition, keyword-only and empty by
+    default: `POST /ca/import/preview` answers this same page with the
+    ``Parsed`` panel filled and the two certificate textareas re-filled
+    (FR-3). It carries only what that endpoint declares -- the two
+    certificates -- so the private key and its passphrase have nowhere here
+    to come back from either (FR-11)."""
     context = base_context(request, user)
     context["error"] = error
+    context["values"] = values or {}
     return templates.TemplateResponse(
         request, "transfer_ca_import.html", context, status_code=status_code
     )
+
+
+def _import_preview(cert_pem: str, chain_pem: str) -> dict[str, object]:
+    """Spec 0029 FR-10: the two pasted certificates, read.
+
+    Two parameters and four keys, and no parameter anywhere on this path for
+    a private key or a passphrase: this form carries both, and a handler that
+    debounces on keystrokes must ship neither to an endpoint that echoes what
+    it parses. What cannot be named cannot be echoed.
+
+    An unparsable paste is reported rather than raised, for the reason
+    `certs_ui._sign_preview` gives: half a PEM block is what every keystroke
+    of a paste looks like.
+    """
+    subject: str | None = None
+    parent: str | None = None
+    key: str | None = None
+    error: str | None = None
+
+    text = cert_pem.strip()
+    if text:
+        try:
+            cert = x509.load_pem_x509_certificate(text.encode("utf-8"))
+        except ValueError as exc:
+            error = f"the signing CA certificate does not parse: {exc}"
+        else:
+            subject = cert.subject.rfc4514_string()
+            # The one spelling of a key-type label this project has.
+            key = ca_x509._key_type_label(cert.public_key())
+
+    chain = chain_pem.strip()
+    if chain:
+        try:
+            parent_cert = x509.load_pem_x509_certificate(chain.encode("utf-8"))
+        except ValueError as exc:
+            error = error or f"the parent/root certificate does not parse: {exc}"
+        else:
+            parent = parent_cert.subject.rfc4514_string()
+
+    return {"subject": subject, "parent": parent, "key": key, "error": error}
 
 
 def _cross_import_page(
@@ -121,6 +175,40 @@ def ca_import_page(request: Request, user: User = Depends(require_admin)) -> Res
 @router.get("/cross-import")
 def cross_import_page(request: Request, user: User = Depends(require_admin)) -> Response:
     return _cross_import_page(request, user, None)
+
+
+@ca_router.post("/import/preview")
+def ca_import_preview(
+    request: Request,
+    cert_pem: str = Form(""),
+    chain_pem: str = Form(""),
+    user: User = Depends(require_admin),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """FR-3/FR-11: guarded exactly like `POST /ca/import`, and declaring
+    exactly the two fields the panel reads plus the token ``verify_csrf``
+    takes.
+
+    There is no ``key_pem`` and no ``key_passphrase`` parameter, so no code
+    path exists that could echo one, and a hand-built request carrying them
+    is answered by a page containing neither string. That is what makes the
+    no-JavaScript path safe as well: the round-trip `Check` button is a
+    `<button formaction>` inside the form, so the browser posts every field
+    including the key and its passphrase -- one deliberate submit, to the same
+    origin the mutation posts to, where they land in no parameter, are read by
+    nothing, are written to no log and appear in no response. What FR-11
+    forbids is a keystroke stream carrying a passphrase, and the template's
+    `hx-trigger` is what forbids it.
+    """
+    preview = _import_preview(cert_pem, chain_pem)
+    if is_htmx(request):
+        return preview_fragment("import_panel", preview)
+    values: dict[str, object] = {
+        "cert_pem": cert_pem,
+        "chain_pem": chain_pem,
+        "preview": preview,
+    }
+    return _ca_import_page(request, user, None, values=values)
 
 
 @ca_router.post("/import")

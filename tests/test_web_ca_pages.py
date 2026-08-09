@@ -668,7 +668,12 @@ def test_viewer_reads_the_detail_page_and_sees_no_form(client: TestClient, cfg: 
         db.close()
     _create_viewer(client, cfg)
 
-    admin_page = client.get(f"/ca/{alpha_root}")
+    # spec 0029 FR-13 re-points the admin half. The requirement is unchanged
+    # -- an admin is offered the forms a viewer is not -- but the intermediate
+    # form now stands at `?add=intermediate`. The renew form did not move and
+    # is still read off the plain page, which is also what keeps this half
+    # from becoming "everything is behind a query string now".
+    admin_page = client.get(f"/ca/{alpha_root}?add=intermediate")
     assert admin_page.status_code == 200
     admin_actions = _form_actions(admin_page.text)
     assert f"/ca/{alpha_root}/intermediate" in admin_actions
@@ -679,6 +684,17 @@ def test_viewer_reads_the_detail_page_and_sees_no_form(client: TestClient, cfg: 
     assert viewer_page.status_code == 200
     assert "alpha" in viewer_page.text
     assert _form_actions(viewer_page.text) == ["/logout"]
+
+    # ...and the query string spec 0029 FR-13 adds is not a way past that.
+    # `open_form` is read from the URL, so a viewer who types the admin's own
+    # URL must still be given no form -- the one hole a URL-state disclosure
+    # opens that a server-decided boolean did not.
+    for opened in ("intermediate", "cross-sign"):
+        forced = client.get(f"/ca/{alpha_root}?add={opened}")
+        assert forced.status_code == 200
+        assert _form_actions(forced.text) == ["/logout"], (
+            f"?add={opened} rendered a form for a viewer: {_form_actions(forced.text)}"
+        )
 
     # spec 0026: "a viewer can read the hierarchy in full" was measured on
     # the CRL URL, which is no longer on the root page (FR-2) -- it moved,
@@ -713,12 +729,19 @@ def test_cross_sign_candidates_come_from_every_row(client: TestClient, cfg: Conf
     _setup_superadmin(client)
     alpha_root, _alpha_int, beta_root, _beta_int = _seed_two_hierarchies(cfg)
 
-    beta_page = client.get(f"/ca/{beta_root}").text
+    # spec 0029 FR-13 re-points both halves to `?add=cross-sign`. The
+    # requirement is unchanged -- the candidate list comes from every root
+    # with a stored key and enough path_length, and a root with none is told
+    # so -- but it has to be read at the URL the form now stands open at, and
+    # the *negative* half is why: on the closed page `found is False` would be
+    # true of every root on the instance, so this test would go on passing
+    # while measuring the disclosure instead of the candidate list.
+    beta_page = client.get(f"/ca/{beta_root}?add=cross-sign").text
     beta_select = _select(beta_page, "signing_root_id")
     assert beta_select.found is True
     assert str(alpha_root) in beta_select.option_values
 
-    alpha_page = client.get(f"/ca/{alpha_root}").text
+    alpha_page = client.get(f"/ca/{alpha_root}?add=cross-sign").text
     alpha_select = _select(alpha_page, "signing_root_id")
     assert alpha_select.found is False
     # the explanatory note is on the page, scoped to the .note primitive --

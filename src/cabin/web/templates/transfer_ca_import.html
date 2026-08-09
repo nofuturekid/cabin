@@ -2,6 +2,7 @@
 {% set nav_current = "transfer_ca_import" %}
 {% block title %}Import a CA — cabin{% endblock %}
 {% block content %}
+{% from "form_macros.html" import import_panel %}
 <div class="page-head">
   <div>
     <h1>Import a CA</h1>
@@ -22,12 +23,12 @@
       passphrase-protected), plus its parent/root certificate.
     </p>
   </div>
-  <div>
-    <form method="post" action="/ca/import">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <div class="form-split">
+    <form id="ca-import-form" method="post" action="/ca/import">
+      <input id="csrf-ca-import" type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
         <label for="cert_pem">Signing CA certificate (PEM)</label>
-        <textarea id="cert_pem" name="cert_pem" rows="8" required></textarea>
+        <textarea id="cert_pem" name="cert_pem" rows="8" required>{{ values.get('cert_pem', '') }}</textarea>
       </div>
       <div class="field">
         <label for="key_pem">Signing CA private key (PEM)</label>
@@ -39,10 +40,11 @@
       </div>
       <div class="field">
         <label for="chain_pem">Parent/root certificate (PEM)</label>
-        <textarea id="chain_pem" name="chain_pem" rows="8" required></textarea>
+        <textarea id="chain_pem" name="chain_pem" rows="8" required>{{ values.get('chain_pem', '') }}</textarea>
       </div>
-      <div class="actions"><button type="submit" class="primary">Import CA</button></div>
+      <div class="actions"><button type="submit" class="primary">Import CA</button> <button type="submit" formaction="/ca/import/preview" formmethod="post">Check</button></div>
     </form>
+    <aside class="preview" id="preview" hx-post="/ca/import/preview" hx-target="#preview" hx-swap="innerHTML" hx-trigger="keyup changed delay:400ms from:#cert_pem, keyup changed delay:400ms from:#chain_pem" hx-include="#csrf-ca-import, #cert_pem, #chain_pem">{{ import_panel(values.get('preview')) }}</aside>
   </div>
 </div>
 {% endblock %}

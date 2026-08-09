@@ -7,8 +7,10 @@ to /login (or /setup while there are zero users) — see FR-5/FR-6.
 
 import hmac
 from collections.abc import Callable, Generator
+from typing import cast
 
 from fastapi import Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import Response
 
@@ -44,6 +46,38 @@ def set_session_cookie(response: Response, request: Request, token: str) -> None
         max_age=int(SESSION_LIFETIME.total_seconds()),
         path="/",
     )
+
+
+def is_htmx(request: Request) -> bool:
+    """Whether htmx made this request (spec 0029 FR-3).
+
+    The only thing that decides which of a preview's two envelopes goes back:
+    the panel stack alone for htmx, the whole form page with that same panel
+    stack in it for a browser that ran no JavaScript. Never a guard, never a
+    route, never anything a client can gain access with by sending it.
+    """
+    return request.headers.get("HX-Request") is not None
+
+
+def preview_fragment(macro: str, preview: dict[str, object]) -> Response:
+    """Render one of ``form_macros.html``'s macros on its own (spec 0029 FR-3).
+
+    This is the other half of "one macro, two envelopes": the page template
+    calls ``{{ macro(preview) }}`` and this calls the *same* macro with the
+    same argument through the environment's own module access, so the
+    fragment htmx swaps in is the markup a navigation would have produced,
+    byte for byte (AC-7). A second template for the fragment is the thing
+    this exists instead of.
+
+    Lives here rather than in one of the three UI routers that need it for
+    the reason every shared helper in this package lives here: three copies
+    of it would be three things to repair.
+    """
+    from cabin.web import templates
+
+    module = templates.env.get_template("form_macros.html").module
+    render = cast(Callable[[dict[str, object]], object], getattr(module, macro))
+    return HTMLResponse(str(render(preview)))
 
 
 def base_context(request: Request, user: User) -> dict[str, object]:

@@ -1076,12 +1076,17 @@ def test_tables_sit_above_both_forms(client: TestClient, cfg: Config) -> None:
     root_block = _row(html, f'href="/ca/{fix.beta_root}.pem"', class_name="section", tag=None)
     issuers_block = _row(html, ISSUERS_HEADING, class_name="section", tag=None)
     cross_block = _row(html, CROSS_HEADING, class_name="section", tag=None)
-    add_block = _row(
-        html, f'action="/ca/{fix.beta_root}/intermediate"', class_name="section", tag=None
-    )
-    sign_block = _row(
-        html, f'action="/ca/{fix.beta_root}/cross-sign"', class_name="section", tag=None
-    )
+    # spec 0029 FR-13 re-points the two action blocks from their form's
+    # `action` to their section's `id`. The requirement is unchanged and is
+    # about *order*: the tables sit above both action sections, which is the
+    # operator complaint spec 0026 exists for. The form is what moved behind a
+    # URL; the section, its `<h2>` and its `id` are rendered in both states,
+    # and FR-13 pins them as stable precisely so that they can still be found.
+    # Scoping by id also keeps this read on the page an operator lands on --
+    # asking for `?add=intermediate` would close the cross-sign panel and
+    # there would be no single document left in which to compare positions.
+    add_block = _row(html, 'id="add-intermediate"', class_name="section", tag=None)
+    sign_block = _row(html, 'id="cross-sign"', class_name="section", tag=None)
 
     blocks = [root_block, issuers_block, cross_block, add_block, sign_block]
     positions = [html.index(block) for block in blocks]
@@ -2152,8 +2157,13 @@ def test_renew_and_retire_is_its_own_section_and_comes_last(
         _row(html, f'href="/ca/{fix.beta_root}.pem"', class_name="section", tag=None),
         _row(html, ISSUERS_HEADING, class_name="section", tag=None),
         _row(html, CROSS_HEADING, class_name="section", tag=None),
-        _row(html, f'action="/ca/{fix.beta_root}/intermediate"', class_name="section", tag=None),
-        _row(html, f'action="/ca/{fix.beta_root}/cross-sign"', class_name="section", tag=None),
+        # spec 0029 FR-13: the two action sections are found by the ids it
+        # pins as stable across both states rather than by the form action
+        # that is now behind a URL. The requirement -- six distinct sections,
+        # in this order, with Renew and retire last -- is unchanged, and the
+        # retire form did not move, so it is still scoped by its own action.
+        _row(html, 'id="add-intermediate"', class_name="section", tag=None),
+        _row(html, 'id="cross-sign"', class_name="section", tag=None),
         _row(html, f'action="/ca/{fix.beta_root}/retire"', class_name="section", tag=None),
     ]
     positions = [html.index(block) for block in blocks]
@@ -2650,6 +2660,23 @@ def test_no_sentence_changed_on_the_five_pages(
         "cert_detail": cert_path,
     }
 
+    #: spec 0029 FR-13 turns `ca_detail`'s two action forms into URL state, so
+    #: the closed page deliberately renders neither form's labels. This
+    #: criterion's "nothing is lost" is about the page, and the page is now
+    #: three URLs; the multiset it is compared against is their union, at the
+    #: larger multiplicity of each. Nothing is weakened -- a sentence absent
+    #: from all three still fails -- and the other four pages are one URL
+    #: each, exactly as before. Spec 0029's own AC-14 carries the same
+    #: correction for the same reason; this is where the claim about *these*
+    #: five pages lives, so it is corrected here too.
+    states = {
+        "ca_detail": (
+            f"/ca/{fix.beta_root}",
+            f"/ca/{fix.beta_root}?add=intermediate",
+            f"/ca/{fix.beta_root}?add=cross-sign",
+        )
+    }
+
     def render() -> dict[str, str]:
         pages = {}
         for name, path in paths.items():
@@ -2658,9 +2685,19 @@ def test_no_sentence_changed_on_the_five_pages(
             pages[name] = resp.text
         return pages
 
+    def pooled(name: str) -> Counter[str]:
+        found: Counter[str] = Counter()
+        for path in states.get(name, (paths[name],)):
+            resp = client.get(path)
+            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+            found |= _text_nodes(resp.text)
+        return found
+
     after = render()
+    after_pooled = {name: pooled(name) for name in paths}
     with _rendering_from(_baseline_templates(tmp_path)):
         before = render()
+        before_pooled = {name: pooled(name) for name in paths}
 
     assert any(before[name] != after[name] for name in paths), (
         f"the five pages render byte-identically through the templates of "
@@ -2688,6 +2725,13 @@ def test_no_sentence_changed_on_the_five_pages(
             "intermediate",
             "Renew and retire",
             "The two things that can be done to this certificate from here.",
+            # spec 0029 FR-13/FR-14: the two closed states' trigger anchors.
+            # Their text is taken from the existing empty-state link and the
+            # existing `<h2>`, so neither is new copy -- but on this fixture's
+            # root the empty state does not render, so the first is a string
+            # the page did not carry before and is named here.
+            "Add an intermediate",
+            "Cross-sign with another root",
         },
         "ca_issuer": set(),
         "ca_cross": set(),
@@ -2704,19 +2748,35 @@ def test_no_sentence_changed_on_the_five_pages(
         "cert_detail": {", ".join(sans)},
     }
 
+    # The pooling actually pooled something, or the union is one render under
+    # another name and the clause below is measuring nothing.
+    assert after_pooled["ca_detail"] != _text_nodes(after["ca_detail"]), (
+        "the three ca_detail URLs pool to exactly the closed render, so either "
+        "`?add=` renders nothing extra or the states above were not fetched"
+    )
+
     for name in paths:
-        old, new = _text_nodes(before[name]), _text_nodes(after[name])
+        old, new = before_pooled[name], after_pooled[name]
         assert sum(old.values()) >= 20, f"{name}: the baseline page has {sum(old.values())} texts"
-        lost = old - new
-        assert set(lost) <= removals[name], (
+        # spec 0029 FR-13: a disclosure can reduce how often a sentence
+        # appears on one URL and may never remove one from the page. The two
+        # action forms both carried a `Validity (years)` label and can never
+        # be open at once again, so multiplicity is not comparable across
+        # states for this page and the claim is the set; every other page here
+        # keeps the exact multiset it always had.
+        lost = (set(old) - set(new)) if name in states else set(old - new)
+        assert lost <= removals[name], (
             f"{name}: text that was on this page before this spec is gone from it. "
-            f"FR-15 takes no exception: {sorted(set(lost) - removals[name])}"
+            f"FR-15 takes no exception: {sorted(lost - removals[name])}"
         )
-        gained = new - old
-        assert set(gained) <= additions[name], (
+        # Symmetrical with `lost` above: on the pooled page a string that
+        # appears more often than before is not a new sentence, it is the same
+        # sentence at a second URL, so both directions are the set there.
+        gained = (set(new) - set(old)) if name in states else set(new - old)
+        assert gained <= additions[name], (
             f"{name}: text this spec did not name appears on the page. Every "
             f"addition is argued in an FR or it is a wording change: "
-            f"{sorted(set(gained) - additions[name])}"
+            f"{sorted(gained - additions[name])}"
         )
 
 

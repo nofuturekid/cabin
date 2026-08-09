@@ -1,0 +1,88 @@
+{# Spec 0029 FR-3: one macro per previewed page, called from the page
+   template as `{{ macro(preview) }}` and from the preview handler through the
+   environment's own module access (`web/deps.py:preview_fragment`). Both
+   envelopes therefore render the *same* markup -- AC-7 asserts the fragment
+   appears verbatim inside the page -- which is what makes "one code path" a
+   fact rather than a resemblance.
+
+   Each macro takes exactly one argument, the preview dictionary its handler
+   built, and reads nothing from the surrounding template context: that is
+   what lets `.module` render it at all, and it is why nothing here is
+   imported `with context`.
+
+   `preview` is None on a first GET, before anything has been typed. Every
+   macro folds that into an empty mapping first, so the panel shows the
+   design's dashes rather than a blank column, and what it shows stays a pure
+   function of its one argument rather than of a second code path.
+
+   `data-dim` is the unparsed state of a value (FR-10): --text-muted rather
+   than the design's #5a5d6b, which is 2.4:1 on --surface and would be
+   reported by the contrast probe. An attribute and not a class, because
+   FR-15 closes the set of classes this spec defines at seven and a rule for
+   an eighth would have no argument beside it.
+
+   This is a macro library and not a page: it extends nothing, defines no
+   `content` block and sets no `nav_current`, which is why
+   `test_every_content_template_sets_nav_current` exempts it -- and asserts
+   exactly those absences, so the exemption cannot be widened to silence a
+   real page. #}
+
+{% macro issue_panel(preview) %}{% set p = preview or {} %}
+<div class="panel">
+  <p class="kicker">Name constraints — checked before signing</p>
+  {% if p.get('names') %}
+  <ul class="checks">
+    {% for entry in p.get('names') %}
+    <li>{% if entry.ok %}<span class="mark-ok" aria-hidden="true">✓</span>{% else %}<span class="mark-bad" aria-hidden="true">✕</span>{% endif %} <span class="mono">{{ entry.name }}</span>{% if entry.note %} <span class="help">{{ entry.note }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if p.get('verdict') %}<p>{{ p.get('verdict') }}</p>{% else %}<p data-dim>—</p>{% endif %}
+</div>
+<div class="panel">
+  <p class="kicker">Result</p>
+  <dl class="kv">
+    <dt>Expires</dt>{% if p.get('expires') %}<dd><span class="mono">{{ p.get('expires') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Chain</dt>{% if p.get('chain') %}<dd>{{ p.get('chain') }}</dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Key held by</dt>{% if p.get('issuer') %}<dd>cabin, encrypted at rest</dd>{% else %}<dd data-dim>—</dd>{% endif %}
+  </dl>
+</div>
+{% if p.get('capped_from') %}<div class="callout warning">Requested {{ p.get('days') }} days; the issuing CA's own expiry is sooner, so this certificate would be valid only until {{ p.get('expires') }}.</div>{% endif %}
+{% endmacro %}
+
+{% macro sign_panel(preview) %}{% set p = preview or {} %}
+<div class="panel">
+  <p class="kicker">Parsed request</p>
+  <dl class="kv">
+    <dt>Subject</dt>{% if p.get('subject') %}<dd><span class="mono">{{ p.get('subject') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>SANs</dt>{% if p.get('sans') %}<dd>{% for san in p.get('sans') %}<span class="mono">{{ san }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Key</dt>{% if p.get('key') %}<dd><span class="mono">{{ p.get('key') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+  </dl>
+  {% if p.get('error') %}<p>{{ p.get('error') }}</p>{% endif %}
+</div>
+{% if p %}<p class="note">Name constraints are re-checked against the issuer that signs the certificate.</p>{% endif %}
+{% endmacro %}
+
+{% macro create_panel(preview) %}{% set p = preview or {} %}
+<div class="panel">
+  <p class="kicker">What gets created</p>
+  <dl class="kv">
+    <dt>Root</dt>{% if p.get('root') %}<dd>{{ p.get('root') }}</dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Expires</dt>{% if p.get('expires') %}<dd><span class="mono">{{ p.get('expires') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Issuers</dt>{% if p.get('issuers') %}<dd>{{ p.get('issuers') }}</dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Key</dt>{% if p.get('key') %}<dd><span class="mono">{{ p.get('key') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+  </dl>
+</div>
+{% endmacro %}
+
+{% macro import_panel(preview) %}{% set p = preview or {} %}
+<div class="panel">
+  <p class="kicker">Parsed</p>
+  <dl class="kv">
+    <dt>Subject</dt>{% if p.get('subject') %}<dd><span class="mono">{{ p.get('subject') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Parent</dt>{% if p.get('parent') %}<dd><span class="mono">{{ p.get('parent') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+    <dt>Key</dt>{% if p.get('key') %}<dd><span class="mono">{{ p.get('key') }}</span></dd>{% else %}<dd data-dim>—</dd>{% endif %}
+  </dl>
+  {% if p.get('error') %}<p>{{ p.get('error') }}</p>{% endif %}
+</div>
+{% endmacro %}

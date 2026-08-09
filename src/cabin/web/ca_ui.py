@@ -10,6 +10,8 @@ The import page and both import POSTs moved to :mod:`cabin.web.transfer_ui`
 still, but this module no longer owns them.
 """
 
+from datetime import UTC, datetime, timedelta
+
 from cryptography import x509
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -43,6 +45,8 @@ from cabin.web.deps import (
     current_actor,
     get_current_user,
     get_db,
+    is_htmx,
+    preview_fragment,
     require_admin,
     verify_csrf,
 )
@@ -55,6 +59,15 @@ _MAX_YEARS = 50
 #: bound is a sanity cap, not an X.509 invariant.
 _MIN_PATH_LENGTH = 1
 _MAX_PATH_LENGTH = 4
+#: Spec 0029 FR-13: the two values `GET /ca/{ca_id}` recognises for its
+#: optional `add` parameter, and the only two `_detail_page` opens a panel
+#: for. Anything else is a typo, not an error -- the rule `certs_list`'s own
+#: `?status=` already follows.
+_OPEN_FORMS = ("intermediate", "cross-sign")
+#: What `ca_x509.create_root` measures a year as (`ca/x509.py:24`). The
+#: create preview has to state the expiry that function will actually produce,
+#: so it counts the same way rather than in calendar years.
+_DAYS_PER_YEAR = 365
 #: FR-2: not cabin's own policy -- what `x509.NameAttribute` enforces on
 #: `NameOID.COMMON_NAME` (cryptography 49.0.0), measured as UTF-8 bytes, not
 #: characters.
@@ -521,14 +534,21 @@ def _detail_page(
     *,
     values: dict[str, object] | None = None,
     status_code: int = 200,
+    open_form: str | None = None,
 ) -> Response:
     """The one renderer for ``ca_detail.html``, used by the GET and by every
     POST that re-renders it (create-intermediate, cross-sign, retire without
     its confirmation). Loads every row, not just ``root``'s group, for the
     reason ``_group``'s docstring gives.
 
-    No longer takes ``open_form`` (FR-8): every action is its own `<details>`-
-    free `.section` now, so there is nothing left to open.
+    ``open_form`` is back (spec 0029 FR-13), and it is not the boolean spec
+    0024 removed. It names which of the two action panels stands open --
+    ``"intermediate"``, ``"cross-sign"`` or neither -- and the GET reads it
+    off the query string rather than deciding it, so the open form has an
+    address that can be linked to, bookmarked and landed back on when a
+    rejected POST re-renders the page. The heading and the help line of both
+    sections are rendered in either state, which is what spec 0024 was
+    actually defending when it removed `<details>`.
 
     Spec 0026: no longer reads ``ACME_ENABLED`` either -- the only ACME
     directory URL this page ever showed belonged to an intermediate, and an
@@ -540,6 +560,7 @@ def _detail_page(
     context["error"] = error
     context["group"] = _group(db, rows, root)
     context["values"] = values or {}
+    context["open_form"] = open_form
     return templates.TemplateResponse(request, "ca_detail.html", context, status_code=status_code)
 
 
@@ -595,9 +616,23 @@ def _issuer_page(
     return templates.TemplateResponse(request, "ca_issuer.html", context, status_code=status_code)
 
 
-def _new_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
+def _new_page(
+    request: Request,
+    user: User,
+    error: str | None,
+    status_code: int = 200,
+    *,
+    values: dict[str, object] | None = None,
+) -> Response:
+    """``values`` is spec 0029's one addition here, keyword-only and empty by
+    default: `POST /ca/create/preview` answers this same page with the panel
+    filled and every submitted field re-filled (FR-3), and it carries the
+    preview dictionary the aside's macro renders under ``values["preview"]``
+    rather than as a context key of its own -- the macro reads its one
+    argument and nothing else, and a first GET hands it nothing."""
     context = base_context(request, user)
     context["error"] = error
+    context["values"] = values or {}
     return templates.TemplateResponse(request, "ca_new.html", context, status_code=status_code)
 
 
@@ -626,6 +661,7 @@ def ca_new_page(request: Request, user: User = Depends(require_admin)) -> Respon
 def ca_detail(
     ca_id: int,
     request: Request,
+    add: str = "",
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
@@ -647,7 +683,9 @@ def ca_detail(
         raise HTTPException(
             status_code=404, detail="a hierarchy is named by its root, not by this id"
         )
-    return _detail_page(request, db, user, row, None)
+    # Spec 0029 FR-13: an `add` this page does not recognise renders both
+    # panels closed at 200 -- an unknown parameter is a typo, not an error.
+    return _detail_page(request, db, user, row, None, open_form=add if add in _OPEN_FORMS else None)
 
 
 @router.get("/{root_id:int}/issuer/{issuer_id:int}")
@@ -770,6 +808,66 @@ def ca_create(
     return RedirectResponse("/ca", status_code=303)
 
 
+def _create_preview(
+    *, name: str, key_type: str, root_years: int, path_length: int
+) -> dict[str, object]:
+    """Spec 0029 FR-9: what `POST /ca/create` would produce, and nothing more.
+
+    Touches no database: everything on this panel is a restatement of the
+    form. ``expires`` counts years the way ``ca_x509.create_root`` does, so
+    the panel and the certificate agree; it is ``None`` outside the bounds
+    ``_years_error`` enforces, because a preview of a request the mutation
+    would refuse has no expiry to state.
+
+    ``issuers`` is spec 0024 FR-3's behaviour said where the operator is
+    about to rely on it: a create makes a root and stops.
+    """
+    expires = None
+    if _MIN_YEARS <= root_years <= _MAX_YEARS:
+        # Whole seconds, for the reason `certs_ui._issue_preview` gives.
+        now = datetime.now(UTC).replace(microsecond=0)
+        expires = (now + timedelta(days=_DAYS_PER_YEAR * root_years)).isoformat()
+    return {
+        "root": name.strip() or None,
+        "expires": expires,
+        "issuers": (
+            "None yet: a root is created on its own, and an issuer is added on "
+            "this hierarchy's own page."
+        ),
+        "key": key_type,
+        "path_length": path_length,
+    }
+
+
+@router.post("/create/preview")
+def ca_create_preview(
+    request: Request,
+    name: str = Form(""),
+    key_type: str = Form("ecdsa-p256"),
+    root_years: int = Form(20),
+    path_length: int = Form(1),
+    user: User = Depends(require_admin),
+    _csrf: None = Depends(verify_csrf),
+) -> Response:
+    """FR-3: guarded exactly like `POST /ca/create` -- same dependencies, in
+    the same order -- and two envelopes over one macro: the panel stack alone
+    for htmx, this page with that same panel stack in it for everybody else.
+    Writes nothing; there is nothing here that could."""
+    values: dict[str, object] = {
+        "name": name,
+        "key_type": key_type,
+        "root_years": root_years,
+        "path_length": path_length,
+    }
+    preview = _create_preview(
+        name=name, key_type=key_type, root_years=root_years, path_length=path_length
+    )
+    if is_htmx(request):
+        return preview_fragment("create_panel", preview)
+    values["preview"] = preview
+    return _new_page(request, user, None, values=values)
+
+
 @router.post("/{root_id}/intermediate")
 def ca_create_intermediate(
     root_id: int,
@@ -818,7 +916,16 @@ def ca_create_intermediate(
     if form_error is None:
         form_error = constraints_error
     if form_error is not None:
-        return _detail_page(request, db, user, root, form_error, values=values, status_code=400)
+        return _detail_page(
+            request,
+            db,
+            user,
+            root,
+            form_error,
+            values=values,
+            status_code=400,
+            open_form="intermediate",
+        )
     assert constraints is not None  # form_error is None only when parsing succeeded
     try:
         row = ca_service.create_intermediate_under(
@@ -833,7 +940,16 @@ def ca_create_intermediate(
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (CANotConfiguredError, ValueError) as exc:
-        return _detail_page(request, db, user, root, str(exc), values=values, status_code=400)
+        return _detail_page(
+            request,
+            db,
+            user,
+            root,
+            str(exc),
+            values=values,
+            status_code=400,
+            open_form="intermediate",
+        )
     # Spec 0018 FR-8: whoever creates the intermediate is granted it
     # immediately -- written even for a superadmin, so a later demotion does
     # not take it away from them. Spec 0024 FR-5: the only call site on this
@@ -898,7 +1014,9 @@ def ca_cross_sign(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     form_error = _year_bounds_error(years, "years")
     if form_error is not None:
-        return _detail_page(request, db, user, root, form_error, status_code=400)
+        return _detail_page(
+            request, db, user, root, form_error, status_code=400, open_form="cross-sign"
+        )
     try:
         row = ca_service.cross_sign_root(
             db, request.app.state.secrets, ca_id, signing_root_id, years
@@ -906,7 +1024,9 @@ def ca_cross_sign(
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (ValueError, CANotConfiguredError, CrossSignError) as exc:
-        return _detail_page(request, db, user, root, str(exc), status_code=400)
+        return _detail_page(
+            request, db, user, root, str(exc), status_code=400, open_form="cross-sign"
+        )
     produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     audit.record(
         db,

@@ -58,7 +58,7 @@
     {% elif nav.ca_admin and root.can_create_intermediate %}
     <p id="ca-no-intermediates" class="note">
       This hierarchy has no issuer yet, so nothing can be signed under it.
-      <a href="#add-intermediate">Add an intermediate</a> further down this page to start issuing.
+      <a href="/ca/{{ root.id }}?add=intermediate#add-intermediate">Add an intermediate</a> further down this page to start issuing.
     </p>
     {% elif nav.ca_admin %}
     <p id="ca-no-intermediates" class="note">
@@ -117,6 +117,7 @@
     <p class="help">A further issuer under this root, active immediately, alongside whatever intermediates it already has.</p>
   </div>
   <div>
+    {% if open_form == "intermediate" %}
     <form method="post" action="/ca/{{ root.id }}/intermediate">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
@@ -150,18 +151,23 @@
       </div>
       <div class="actions"><button type="submit" class="primary">Create intermediate</button></div>
     </form>
+    {% else %}
+    <p><a href="/ca/{{ root.id }}?add=intermediate#add-intermediate" hx-get="/ca/{{ root.id }}?add=intermediate" hx-select="#add-intermediate" hx-target="#add-intermediate" hx-swap="outerHTML" hx-push-url="true">Add an intermediate</a></p>
+    {% endif %}
   </div>
 </div>
 {% endif %}
 
 {% if nav.ca_admin %}
-<div class="section">
+<div class="section" id="cross-sign">
   <div>
     <h2>Cross-sign with another root</h2>
     <p class="help">Creates a second certificate for this root, signed by the chosen one, so relying parties that trust only the older root can still build a path to this one. Two hierarchies side by side is the better transition; this is for devices whose trust store cannot be reached.</p>
   </div>
   <div>
-    {% if group.cross_sign_candidates %}
+    {% if open_form != "cross-sign" %}
+    <p><a href="/ca/{{ root.id }}?add=cross-sign#cross-sign" hx-get="/ca/{{ root.id }}?add=cross-sign" hx-select="#cross-sign" hx-target="#cross-sign" hx-swap="outerHTML" hx-push-url="true">Cross-sign with another root</a></p>
+    {% elif group.cross_sign_candidates %}
     <form method="post" action="/ca/{{ root.id }}/cross-sign">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">

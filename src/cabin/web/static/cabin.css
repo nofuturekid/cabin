@@ -1056,6 +1056,98 @@ footer {
   padding: 22px 0 0;
 }
 
+/* ---- the two-column form and its preview aside (spec 0029) ---- */
+
+/* The design's form pages are `minmax(0,1fr) 380px` (brief sections 5.5,
+   5.6, 5.10, 5.11). It replaces the plain `<div>` that was the value column
+   of the section, so the section's own 250px label column is untouched. */
+.form-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 28px;
+  align-items: start;
+}
+
+/* Without this a grid item is at least as wide as its content, and one long
+   SAN or PEM subject in the aside pushes the whole page sideways. */
+.form-split > * {
+  min-width: 0;
+}
+
+/* A grid rather than a stack of margins: the aside's own top edge has to
+   line up with the form's at the wide width (FR-17), and a first child's
+   collapsing top margin would push it 14px down. */
+.preview {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.preview .panel,
+.preview .callout,
+.preview .note {
+  margin: 0;
+}
+
+/* Fingerprints, SAN entries and PEM subjects have no break opportunity of
+   their own inside a 380px column. */
+.preview .mono {
+  word-break: break-all;
+}
+
+.preview [data-dim] {
+  color: var(--text-muted);
+}
+
+/* A panel's heading (brief section 6.9). Uppercased in the stylesheet, not
+   in the markup: what a screen reader and a text-node test read is the
+   sentence FR-14 fixes. */
+.kicker {
+  margin: 0 0 10px;
+  font-size: 0.625rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* The design's key/value grid inside a panel (brief section 6.9). */
+.kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.kv dt {
+  color: var(--text-muted);
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* One line per resolved name in the constraints panel. */
+.checks {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 0.75rem;
+}
+
+/* The verdict is in the words beside these, so the glyph itself is
+   aria-hidden and carries no information a reader would miss. */
+.mark-ok {
+  color: var(--accent);
+}
+
+.mark-bad {
+  color: var(--bad-fg);
+}
+
 /* ---- CA hierarchy rows (spec 0017) ---- */
 
 /* The design's dashed readout (brief section 6.9). */
@@ -1197,5 +1289,12 @@ footer {
   .section {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
+  }
+
+  /* Spec 0029 FR-17: below the breakpoint the aside stacks *after* the form,
+     in source order -- on a phone the operator meets the fields first and the
+     verdict below them, and the tab order is the same order. */
+  .form-split {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -670,7 +670,11 @@ def test_import_form_offers_no_constraint_field(client: TestClient, cfg: Config)
     )
     assert resp.status_code == 303, resp.text
     root_id = _last_root_id(cfg)
-    detail_html = client.get(f"/ca/{root_id}").text
+    # spec 0029 FR-13 re-points this read. The requirement is unchanged --
+    # `permitted_names`/`excluded_names` live on the intermediate-add form and
+    # nowhere else, which is what makes the two absences above scoped rather
+    # than vacuous -- but that form is now behind a URL, and this is the URL.
+    detail_html = client.get(f"/ca/{root_id}?add=intermediate").text
     intermediate_form = _fields_of_form(detail_html, f"/ca/{root_id}/intermediate")
     assert intermediate_form.found_form is True
     assert "permitted_names" in intermediate_form.field_names

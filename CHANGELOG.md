@@ -430,6 +430,30 @@ certificate under it, not only the ones the key holder made.
   guard, form field, redirect, audit event, schema, API, MCP or ACME
   behaviour changes.
 
+- **The five form pages take the design's two-column shape, and htmx is wired
+  for the first time.** Issue, Sign a CSR, Create a CA and Import a CA gain a
+  preview panel beside the form: the constraint marks and the verdict on the
+  issue page, the parsed subject/SANs/key on the sign and import pages, and
+  what a create would produce. Four new endpoints answer them —
+  `POST /certs/issue/preview`, `/certs/sign/preview`, `/ca/create/preview`,
+  `/ca/import/preview` — each guarded exactly like the mutation it previews,
+  each writing nothing and unsealing no private key. The constraint panel calls
+  `leaf.check_name_constraints`, the signer's own function, once per name and
+  once over the whole set, so the panel and the button cannot disagree; the
+  expiry it states comes from the same clamp the certificate gets. Every one of
+  the four answers a full page when the `HX-Request` header is absent, from the
+  same Jinja macro, and every form carries a `Check` button that uses it — with
+  JavaScript off nothing on these pages silently does nothing. The rule htmx
+  enters under is recorded in `docs/adr/0003-url-state-disclosure-and-htmx.md`.
+  The CA-import preview names its two textareas explicitly and declares no
+  parameter for a private key or a passphrase, so typing one sends nothing.
+- **`Add intermediate` and `Cross-sign with another root` on a hierarchy page
+  are URL state.** `GET /ca/{id}?add=intermediate` (or `?add=cross-sign`)
+  renders that panel open; without the parameter both are closed and each shows
+  its heading, its help line and a real link. An unrecognised `add=` value is a
+  typo, not an error. A rejected create or cross-sign comes back with its own
+  panel open and the submitted values still in the fields.
+
 ### Changed
 
 - **Seven environment variables, not five.** `CABIN_TLS` (default `false`) and

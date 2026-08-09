@@ -2,6 +2,7 @@
 {% set nav_current = "issue" %}
 {% block title %}Issue — cabin{% endblock %}
 {% block content %}
+{% from "form_macros.html" import issue_panel %}
 <div class="page-head">
   <div>
     <h1>Issue a certificate</h1>
@@ -23,8 +24,8 @@
       subject alternative names are what they actually verify against.
     </p>
   </div>
-  <div>
-    <form method="post" action="/certs/issue">
+  <div class="form-split">
+    <form id="issue-form" method="post" action="/certs/issue">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
         <label for="subject_cn">Common name</label>
@@ -73,8 +74,9 @@
         <label for="days">Validity (days)</label>
         <input id="days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ values.get('days', default_days) }}" required />
       </div>
-      <div class="actions"><button type="submit" class="primary">Issue certificate</button></div>
+      <div class="actions"><button type="submit" class="primary">Issue certificate</button> <button type="submit" formaction="/certs/issue/preview" formmethod="post">Check</button></div>
     </form>
+    <aside class="preview" id="preview" hx-post="/certs/issue/preview" hx-target="#preview" hx-swap="innerHTML" hx-trigger="keyup changed delay:400ms from:#issue-form, change from:#issue-form" hx-include="#issue-form">{{ issue_panel(values.get('preview')) }}</aside>
   </div>
 </div>
 {% endblock %}

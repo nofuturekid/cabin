@@ -2,6 +2,7 @@
 {% set nav_current = "sign" %}
 {% block title %}Sign a CSR — cabin{% endblock %}
 {% block content %}
+{% from "form_macros.html" import sign_panel %}
 <div class="page-head">
   <div>
     <h1>Sign a CSR</h1>
@@ -23,8 +24,8 @@
       requests is ignored.
     </p>
   </div>
-  <div>
-    <form method="post" action="/certs/sign">
+  <div class="form-split">
+    <form id="sign-form" method="post" action="/certs/sign">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
         <label for="csr_pem">Certificate signing request (PEM)</label>
@@ -60,8 +61,9 @@
         <label for="sign_days">Validity (days)</label>
         <input id="sign_days" type="number" name="days" min="{{ min_days }}" max="{{ max_days }}" value="{{ values.get('days', default_days) }}" required />
       </div>
-      <div class="actions"><button type="submit" class="primary">Sign CSR</button></div>
+      <div class="actions"><button type="submit" class="primary">Sign CSR</button> <button type="submit" formaction="/certs/sign/preview" formmethod="post">Check</button></div>
     </form>
+    <aside class="preview" id="preview" hx-post="/certs/sign/preview" hx-target="#preview" hx-swap="innerHTML" hx-trigger="keyup changed delay:400ms from:#sign-form, change from:#sign-form" hx-include="#sign-form">{{ sign_panel(values.get('preview')) }}</aside>
   </div>
 </div>
 {% endblock %}
