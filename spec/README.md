@@ -21,3 +21,4 @@ Out of Scope.
 | 0012 | acme-finalize-eab  | finalize/cert/revokeCert, EAB                             |
 | 0013 | mcp                | FastMCP mount + tools                                     |
 | 0014 | deployment         | Dockerfile, compose, Unraid template, release workflows   |
+| 0026 | hierarchy-pages    | Issuer tables on the hierarchy page, row detail pages     |
