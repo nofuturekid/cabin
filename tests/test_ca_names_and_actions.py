@@ -259,10 +259,15 @@ _TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
 _CLASS_RE = re.compile(r'class="([^"]*)"')
 
 
-def _row(html: str, marker: str, *, class_name: str, tag: str | None = "div") -> str:
+def _row(html: str, marker: str, *, class_name: str | None = None, tag: str | None = "div") -> str:
     """The full outer HTML of the innermost element carrying `class_name`
     that contains `marker`'s first occurrence -- scoped by parsing the
     actual tag nesting. `tag=None` matches any tag name."""
+    # A marker that is not on the page at all is a distinct failure from
+    # "no element of that class wraps it"; `html.index` alone would report
+    # it as a bare ValueError from inside this helper.
+    if marker not in html:
+        raise AssertionError(f"marker {marker!r} is not on the page at all")
     marker_idx = html.index(marker)
     stack: list[tuple[str, str, int]] = []
     for m in _TAG_RE.finditer(html):
@@ -278,7 +283,12 @@ def _row(html: str, marker: str, *, class_name: str, tag: str | None = "div") ->
         if open_start <= marker_idx < m.end():
             classes = _CLASS_RE.search(open_attrs)
             matches_tag = tag is None or open_name == tag
-            if matches_tag and classes is not None and class_name in classes.group(1).split():
+            # spec 0026: `class_name=None` scopes a `<tr>` by a marker inside
+            # it -- the two hierarchy tables' rows deliberately carry no class.
+            matches_class = class_name is None or (
+                classes is not None and class_name in classes.group(1).split()
+            )
+            if matches_tag and matches_class:
                 return html[open_start : m.end()]
     raise AssertionError(f"no <{tag or '*'} class={class_name!r}> element wraps {marker!r}")
 
@@ -839,6 +849,12 @@ def test_dashboard_distinguishes_no_ca_from_no_issuer(client: TestClient, cfg: C
     no_issuer = _element(root_only, "ca-no-issuer")
     assert no_issuer.found is True
     assert f"/ca/{root_id}" in no_issuer.anchor_hrefs
+    # spec 0026 FR-17/AC-19: this href does NOT gain a fragment. The page it
+    # lands on carries its own empty state pointing further down
+    # (`#ca-no-intermediates` -> `#add-intermediate`), so adding the
+    # fragment here would break this exact-membership assertion and its two
+    # siblings below to save a scroll the page already handles.
+    assert f"/ca/{root_id}#add-intermediate" not in no_issuer.anchor_hrefs
     revocation_before = _row(root_only, "Revocation", class_name="section", tag="div")
     assert _count_tag(revocation_before, "table") == 0
 
@@ -1089,6 +1105,13 @@ def test_detail_page_has_no_details_and_no_empty_column(
     assert _create_root(client, cfg, name="Beta Root CA", path_length=2).status_code == 303
     root_b = _last_root_id(cfg)
     assert _create_intermediate(client, cfg, root_b, name="Beta Issuing CA").status_code == 303
+    # spec 0026: root_a's page carries a `Cross certificates` table only when
+    # it actually has a cross row, so the fourth block below exists.
+    cross_resp = client.post(
+        f"/ca/{root_a}/cross-sign",
+        data={"signing_root_id": root_b, "years": 5, "csrf_token": _csrf(client, cfg)},
+    )
+    assert cross_resp.status_code == 303, cross_resp.text
 
     db = _db(cfg)
     try:
@@ -1113,18 +1136,30 @@ def test_detail_page_has_no_details_and_no_empty_column(
     cross_block = _row(html, cross_action, class_name="section", tag=None)
     assert "<h2" in cross_block
 
-    chain_marker = f"/ca/{intermediate_a_id}/chain.pem"
-    chain_block = _row(html, chain_marker, class_name="section", tag=None)
-    assert "<h2" in chain_block
+    # spec 0026: the third block used to be located by a `chain.pem` link,
+    # which this page no longer carries -- an intermediate is a row in the
+    # `Issuers` table now and everything else about it, that link included,
+    # is on its own page. The two requirements this block carried stay on
+    # this page, over the two table sections instead: each is a headed
+    # `.section`, and all four are pairwise distinct. The third -- that the
+    # `chain.pem` block is itself a headed section -- follows the link to the
+    # issuer page, which joins the section probe in
+    # `test_ca_issuer_pages.py::test_section_and_danger_probes_cover_all_three_pages`.
+    issuers_block = _row(html, ">Issuers<", class_name="section", tag=None)
+    assert "<h2" in issuers_block
+
+    cross_table_block = _row(html, ">Cross certificates<", class_name="section", tag=None)
+    assert "<h2" in cross_table_block
+
+    assert f"/ca/{intermediate_a_id}/chain.pem" not in html
 
     # Each is its OWN section, not one giant wrapper carrying every action --
-    # under today's single `.section` for the whole hierarchy, all three of
+    # under the pre-0024 single `.section` for the whole hierarchy, all of
     # the above are literally the same string, and an "h2 appears somewhere
     # before the marker" check would pass on that shared wrapper by
     # accident. Distinctness is what actually proves the split happened.
-    assert intermediate_block != cross_block
-    assert intermediate_block != chain_block
-    assert cross_block != chain_block
+    blocks = [intermediate_block, cross_block, issuers_block, cross_table_block]
+    assert len(set(blocks)) == len(blocks)
 
     if Path(CHROME).exists():
         bad = _run_probe(html, _SECTION_PROBE, tmp_path, "ca_detail_sections")
@@ -1190,14 +1225,38 @@ def test_every_danger_button_has_a_confirmation(
     )
     assert cross_resp.status_code == 303
 
-    # root_b's own page now shows its root, its intermediate and the cross
-    # row signed by root_a -- three danger buttons, proving the treatment
-    # repeats rather than being applied to the first row alone (AC-11).
-    html = client.get(f"/ca/{root_b}").text
-    assert _count_danger_buttons(html) >= 1  # sanity: the fixture built what it claims to
+    db = _db(cfg)
+    try:
+        intermediate_b = db.scalars(
+            select(CACertificate).where(
+                CACertificate.kind == "intermediate", CACertificate.parent_id == root_b
+            )
+        ).one()
+        intermediate_b_id = intermediate_b.id
+        cross_row = db.scalars(select(CACertificate).where(CACertificate.kind == "cross")).one()
+        cross_id = cross_row.id
+    finally:
+        db.close()
 
-    bad = _run_probe(html, _DANGER_PROBE, tmp_path, "ca_detail_danger")
-    assert bad == [], bad
+    # spec 0026: root_b's page used to show its root, its intermediate and
+    # the cross row -- three danger buttons on one page. Two of the three
+    # moved onto pages of their own, so a probe pointed only at the root
+    # page would now cover exactly one button and stay green while covering
+    # none of the moved ones. It probes all three pages, each with its own
+    # `_count_danger_buttons(...) >= 1` sanity assertion, so no page can
+    # pass by having nothing to check (AC-14).
+    pages = {
+        "ca_detail_danger": f"/ca/{root_b}",
+        "ca_issuer_danger": f"/ca/{root_b}/issuer/{intermediate_b_id}",
+        "ca_cross_danger": f"/ca/{root_b}/cross/{cross_id}",
+    }
+    for name, path in pages.items():
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        html = resp.text
+        assert _count_danger_buttons(html) >= 1, f"{path} carries no danger button at all"
+        bad = _run_probe(html, _DANGER_PROBE, tmp_path, name)
+        assert bad == [], (path, bad)
 
 
 # === FR-10/AC-12: the stylesheet loses what nothing uses, both directions ===
@@ -1230,13 +1289,37 @@ def test_stylesheet_and_templates_agree_in_both_directions(client: TestClient, c
     )
     assert cross_resp.status_code == 303
 
-    pages = [
-        client.get("/ca").text,
-        client.get("/ca/new").text,
-        client.get("/ca/import").text,
-        client.get(f"/ca/{root_a}").text,
-        client.get(f"/ca/{root_b}").text,
+    db = _db(cfg)
+    try:
+        intermediate_b = db.scalars(
+            select(CACertificate).where(
+                CACertificate.kind == "intermediate", CACertificate.parent_id == root_b
+            )
+        ).one()
+        intermediate_b_id = intermediate_b.id
+        cross_id = db.scalars(select(CACertificate).where(CACertificate.kind == "cross")).one().id
+    finally:
+        db.close()
+
+    # spec 0025 moved CA import from `/ca/import` to `/transfer/ca-import`;
+    # the old path now 405s with a JSON body, which carries no markup and no
+    # classes, so it would silently drop out of this check. Every page is
+    # fetched through the same loop and its status asserted, so a page that
+    # moves again fails loudly here instead of quietly contributing nothing.
+    page_paths = [
+        "/ca",
+        "/ca/new",
+        "/transfer/ca-import",
+        f"/ca/{root_a}",
+        f"/ca/{root_b}",
+        f"/ca/{root_b}/issuer/{intermediate_b_id}",
+        f"/ca/{root_b}/cross/{cross_id}",
     ]
+    pages = []
+    for path in page_paths:
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        pages.append(resp.text)
 
     defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", css_text))
     used: set[str] = set()

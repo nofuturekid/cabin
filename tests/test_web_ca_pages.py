@@ -181,12 +181,17 @@ _TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
 _CLASS_RE = re.compile(r'class="([^"]*)"')
 
 
-def _row(html: str, marker: str, *, class_name: str, tag: str | None = "div") -> str:
+def _row(html: str, marker: str, *, class_name: str | None = None, tag: str | None = "div") -> str:
     """The full outer HTML of the innermost element carrying `class_name`
     that contains `marker`'s first occurrence -- scoped by parsing the
     actual tag nesting, following `test_web_ca.py:168`. `tag=None` matches
     any tag name, for a class (like `.note`) not pinned to one element.
     """
+    # A marker that is not on the page at all is a distinct failure from
+    # "no element of that class wraps it"; `html.index` alone would report
+    # it as a bare ValueError from inside this helper.
+    if marker not in html:
+        raise AssertionError(f"marker {marker!r} is not on the page at all")
     marker_idx = html.index(marker)
     stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
     for m in _TAG_RE.finditer(html):
@@ -202,7 +207,12 @@ def _row(html: str, marker: str, *, class_name: str, tag: str | None = "div") ->
         if open_start <= marker_idx < m.end():
             classes = _CLASS_RE.search(open_attrs)
             matches_tag = tag is None or open_name == tag
-            if matches_tag and classes is not None and class_name in classes.group(1).split():
+            # spec 0026: `class_name=None` scopes a `<tr>` by a marker inside
+            # it -- the two hierarchy tables' rows deliberately carry no class.
+            matches_class = class_name is None or (
+                classes is not None and class_name in classes.group(1).split()
+            )
+            if matches_tag and matches_class:
                 return html[open_start : m.end()]
     raise AssertionError(f"no <{tag or '*'} class={class_name!r}> element wraps {marker!r}")
 
@@ -440,28 +450,44 @@ def test_ca_detail_shows_only_its_own_hierarchy(client: TestClient, cfg: Config)
     assert alpha_page.status_code == 200
     assert "alpha" in alpha_page.text
     assert alpha_root_fingerprint in alpha_page.text
-    assert alpha_int_fingerprint in alpha_page.text
     # spec 0024 FR-1: alpha and beta's rows are no longer distinguished by a
     # " Intermediate CA" suffix (both hierarchies are literally named just
     # "alpha"/"beta" now), so cross-hierarchy isolation is checked against
-    # beta's own fingerprints -- unambiguous, unlike a name that could now
-    # collide -- rather than a marker string that no longer exists. The root
-    # fingerprint alone is not a sufficient check: `_group` takes its root
-    # row straight from its own `root` argument, so a bug that drops the
-    # `parent_id == root.id` filter on `_group`'s intermediate list would
-    # leak beta's INTERMEDIATE onto alpha's page while beta's root
-    # fingerprint stayed correctly absent -- only the intermediate
-    # fingerprint (rendered per row at ca_detail.html) actually moves.
+    # beta's own unambiguous values rather than a marker string that no
+    # longer exists. The root fingerprint alone is not a sufficient check:
+    # `_group` takes its root row straight from its own `root` argument, so
+    # a bug that drops the `parent_id == root.id` filter on `_group`'s
+    # intermediate list would leak beta's INTERMEDIATE onto alpha's page
+    # while beta's root fingerprint stayed correctly absent.
+    #
+    # spec 0026: the field that moves when that filter breaks is no longer
+    # the intermediate's fingerprint -- no fingerprint but the root's own is
+    # on this page any more (FR-2) -- but the row's LINK, which names both
+    # the hierarchy and the row. The fingerprint half of this test moves to
+    # the two issuer pages below, keeping the requirement it was written for.
     assert beta_root_fingerprint not in alpha_page.text
-    assert beta_int_fingerprint not in alpha_page.text
+    assert f'href="/ca/{alpha_root}/issuer/{alpha_int}"' in alpha_page.text
+    assert f"/issuer/{beta_int}" not in alpha_page.text
 
     beta_page = client.get(f"/ca/{beta_root}")
     assert beta_page.status_code == 200
     assert "beta" in beta_page.text
     assert beta_root_fingerprint in beta_page.text
-    assert beta_int_fingerprint in beta_page.text
     assert alpha_root_fingerprint not in beta_page.text
-    assert alpha_int_fingerprint not in beta_page.text
+    assert f'href="/ca/{beta_root}/issuer/{beta_int}"' in beta_page.text
+    assert f"/issuer/{alpha_int}" not in beta_page.text
+
+    # ...and each intermediate's own page carries its own fingerprint and
+    # not the other hierarchy's.
+    alpha_issuer = client.get(f"/ca/{alpha_root}/issuer/{alpha_int}")
+    assert alpha_issuer.status_code == 200
+    assert alpha_int_fingerprint in alpha_issuer.text
+    assert beta_int_fingerprint not in alpha_issuer.text
+
+    beta_issuer = client.get(f"/ca/{beta_root}/issuer/{beta_int}")
+    assert beta_issuer.status_code == 200
+    assert beta_int_fingerprint in beta_issuer.text
+    assert alpha_int_fingerprint not in beta_issuer.text
 
 
 def test_ca_detail_404_for_a_non_root_id(client: TestClient, cfg: Config) -> None:
@@ -642,9 +668,18 @@ def test_viewer_reads_the_detail_page_and_sees_no_form(client: TestClient, cfg: 
     viewer_page = client.get(f"/ca/{alpha_root}")
     assert viewer_page.status_code == 200
     assert "alpha" in viewer_page.text
-    expected_crl_url = f"http://ca.example.org/crl/{alpha_int}"
-    assert f'href="{expected_crl_url}"' in viewer_page.text  # readable, not gated
     assert _form_actions(viewer_page.text) == ["/logout"]
+
+    # spec 0026: "a viewer can read the hierarchy in full" was measured on
+    # the CRL URL, which is no longer on the root page (FR-2) -- it moved,
+    # with everything else about an intermediate, onto that intermediate's
+    # own page. Both halves follow it there: the URL is readable, and that
+    # page carries no form either.
+    expected_crl_url = f"http://ca.example.org/crl/{alpha_int}"
+    viewer_issuer = client.get(f"/ca/{alpha_root}/issuer/{alpha_int}")
+    assert viewer_issuer.status_code == 200
+    assert f'href="{expected_crl_url}"' in viewer_issuer.text  # readable, not gated
+    assert _form_actions(viewer_issuer.text) == ["/logout"]
 
 
 def test_viewer_rail_has_no_ca_new_or_ca_import(client: TestClient, cfg: Config) -> None:

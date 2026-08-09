@@ -870,15 +870,19 @@ def test_settings_page_toggles_acme_and_shows_the_directory_url(
     assert raw_client.get(f"/acme/ca/{issuer_id}/directory").status_code == 200
     assert "/acme/ca/" not in raw_client.get("/settings").text
 
-    # spec 0023: the issuer's own ACME directory link lives on its
-    # hierarchy's detail page now, not on the /ca overview.
+    # spec 0023 moved the issuer's own ACME directory link off the /ca
+    # overview onto its hierarchy's detail page; spec 0026 moved it onto
+    # that issuer's own page. FR-13's requirement is unchanged -- a
+    # directory belongs to ONE issuer and is shown in that issuer's own
+    # place, not once per page -- and the row it was shown in is now a page.
     db = db_session(cfg)
     try:
         root_id = ca_service.get_ca(db, issuer_id).parent_id
     finally:
         db.close()
     assert root_id is not None
-    assert (
-        f"https://ca.example.org/acme/ca/{issuer_id}/directory"
-        in raw_client.get(f"/ca/{root_id}").text
-    )
+    issuer_page = raw_client.get(f"/ca/{root_id}/issuer/{issuer_id}")
+    assert issuer_page.status_code == 200, issuer_page.text
+    assert f"https://ca.example.org/acme/ca/{issuer_id}/directory" in issuer_page.text
+    # ...and not on the hierarchy page it left
+    assert f"/acme/ca/{issuer_id}/directory" not in raw_client.get(f"/ca/{root_id}").text

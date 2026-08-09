@@ -594,9 +594,13 @@ def test_cdp_present_with_base_url(client: TestClient, cfg: Config) -> None:
     forced = f"http://ca.example.org/crl/{issuer_id}"
     assert _cdp_urls(issued) == [forced]
 
-    # spec 0023: the issuer's own CDP link lives on its hierarchy's detail
-    # page now, not on the /ca overview.
-    page = client.get(f"/ca/{_sole_root_id(cfg)}")
+    # spec 0023 moved the issuer's own CDP link off the /ca overview onto its
+    # hierarchy's detail page; spec 0026 moved it one step further, onto that
+    # issuer's own page, together with everything else about it. What this
+    # test measures is unchanged: the EXACT forced-http URL the certificate
+    # carries is the one shown to the operator, and the https form is not.
+    page = client.get(f"/ca/{_sole_root_id(cfg)}/issuer/{issuer_id}")
+    assert page.status_code == 200, page.text
     assert forced in page.text
     assert "https://ca.example.org/crl" not in page.text
 
@@ -625,9 +629,13 @@ def test_cdp_absent_without_base_url(client: TestClient, cfg: Config) -> None:
 
     with pytest.raises(x509.ExtensionNotFound):
         issued.extensions.get_extension_for_class(x509.CRLDistributionPoints)
-    # ...and the hierarchy's own detail page says so, so an operator can
-    # find out why
-    assert "base URL" in client.get(f"/ca/{_sole_root_id(cfg)}").text
+    # ...and the issuer's own page says so, so an operator can find out why.
+    # Spec 0026 moved that note off the hierarchy page along with the URLs it
+    # stands in for; the requirement -- an explanation rather than silence --
+    # is unchanged.
+    page = client.get(f"/ca/{_sole_root_id(cfg)}/issuer/{_sole_intermediate_id(cfg)}")
+    assert page.status_code == 200, page.text
+    assert "base URL" in page.text
 
 
 def test_base_url_validation(client: TestClient, cfg: Config) -> None:

@@ -253,6 +253,50 @@ def _row_view(
     }
 
 
+def _page_of(row: CACertificate) -> str:
+    """Spec 0026 FR-11: the page that owns ``row`` -- the one place that
+    mapping lives, so a table's ``href`` and a POST's redirect can never
+    disagree about where a row is shown. A root's page is the hierarchy page
+    itself; an intermediate hangs under its ``parent_id``; a cross row hangs
+    under its ``cross_of_id``, its **subject** root, because that is the
+    hierarchy whose table lists it (FR-8) -- ``parent_id`` on a cross row is
+    the *signing* root and would name a page reachable from no table at all.
+
+    Takes the row alone: both foreign keys are on it, so no ``Session`` is
+    needed to answer this.
+    """
+    if row.kind == "root":
+        return f"/ca/{row.id}"
+    if row.kind == "intermediate":
+        assert row.parent_id is not None  # FR-1's invariant: every intermediate has a parent
+        return f"/ca/{row.parent_id}/issuer/{row.id}"
+    assert row.cross_of_id is not None  # FR-1's invariant: every cross row names its subject
+    return f"/ca/{row.cross_of_id}/cross/{row.id}"
+
+
+def _child_view(row: CACertificate) -> dict[str, object]:
+    """Spec 0026 FR-12: one row of the ``Issuers`` or ``Cross certificates``
+    table, and nothing more -- id, name, status, expiry and the link to the
+    row's own page. Deliberately **not** a thinner ``_row_view``: it calls
+    neither ``leaf.constraints_of`` nor ``crl_service.distribution_url`` nor
+    ``crl_service.ca_issuers_url`` nor ``acme_http.directory_url``, because
+    nothing in a table row displays any of them. A page doing hidden work for
+    output it no longer produces leaves the next reader unable to tell which
+    of the two was the mistake.
+
+    Parses the certificate once, through ``describe_certificate`` rather than
+    ``_cert_info``, for the reason ``_overview``'s docstring gives.
+    """
+    cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    return {
+        "id": row.id,
+        "name": row.name,
+        "status": row.status,
+        "not_valid_after": ca_x509.describe_certificate(cert)["not_valid_after"],
+        "href": _page_of(row),
+    }
+
+
 def _cross_sign_candidates(
     rows: list[CACertificate], subject: CACertificate
 ) -> list[dict[str, object]]:
@@ -314,8 +358,6 @@ def _group(
     db: Session,
     rows: list[CACertificate],
     root: CACertificate,
-    *,
-    acme_enabled: bool,
 ) -> dict[str, object]:
     """FR-3: one hierarchy, in full -- today's ``_groups`` (spec 0017-0022)
     for a single root, same keys (``root``, ``intermediates``,
@@ -326,8 +368,15 @@ def _group(
     would render an empty select and silently remove the cross-signing
     action from an instance that can perform it (FR-3's own warning).
     ``root`` names which group to build.
+
+    Spec 0026: the two child lists are ``_child_view`` entries -- five keys
+    for an intermediate, those plus ``signed_by`` and ``served`` for a cross
+    row -- because both are tables now and everything else about a row is on
+    the row's own page (FR-2, FR-3, FR-6). The ``acme_enabled`` keyword went
+    with them: the only row left on this page is the root, and
+    ``_row_view`` computes an ACME directory URL on its intermediate branch
+    only, so the flag's value cannot reach the result.
     """
-    key_sealed_by_id = {row.id: row.key_sealed is not None for row in rows}
     rows_by_id = {row.id: row for row in rows}
     children = [row for row in rows if row.kind == "intermediate" and row.parent_id == root.id]
     cross_source = [row for row in rows if row.kind == "cross" and row.cross_of_id == root.id]
@@ -351,27 +400,16 @@ def _group(
         # first invariant) -- the `is not None` guards are for mypy's
         # benefit, not because either lookup is ever expected to miss.
         signer = rows_by_id.get(cross.parent_id) if cross.parent_id is not None else None
-        parent_has_key = (
-            key_sealed_by_id.get(cross.parent_id, False) if cross.parent_id is not None else False
-        )
         cross_rows.append(
             {
-                **_row_view(db, cross, parent_has_key=parent_has_key, acme_enabled=acme_enabled),
+                **_child_view(cross),
                 "signed_by": signer.name if signer is not None else "unknown",
                 "served": served,
             }
         )
     return {
-        "root": _row_view(db, root, parent_has_key=False, acme_enabled=acme_enabled),
-        "intermediates": [
-            _row_view(
-                db,
-                child,
-                parent_has_key=key_sealed_by_id.get(root.id, False),
-                acme_enabled=acme_enabled,
-            )
-            for child in children
-        ],
+        "root": _row_view(db, root, parent_has_key=False, acme_enabled=False),
+        "intermediates": [_child_view(child) for child in children],
         "cross_certificates": cross_rows,
         "chain": {
             "default_name": chain_set.default.rows[-1].name,
@@ -391,10 +429,14 @@ def _group(
 
 
 def _root_of(db: Session, row: CACertificate) -> CACertificate:
-    """FR-7's redirect target, and the only place that mapping lives: the
-    row itself for a root, its ``parent_id`` for an intermediate, its
-    ``cross_of_id`` for a cross row -- an action started on a page comes
-    back to that page, wherever in the hierarchy it actually landed."""
+    """The hierarchy ``row`` is shown under: the row itself for a root, its
+    ``parent_id`` for an intermediate, its ``cross_of_id`` for a cross row.
+
+    Spec 0026 left it exactly one call site -- FR-10's re-render, which needs
+    the root **row** to build an issuer page, not a path. The redirects it
+    used to serve go through ``_page_of`` now, which answers the finer
+    question (which *page* owns a row) and needs no ``Session`` to do it.
+    """
     if row.kind == "root":
         return row
     if row.kind == "intermediate":
@@ -402,6 +444,45 @@ def _root_of(db: Session, row: CACertificate) -> CACertificate:
         return ca_service.get_ca(db, row.parent_id)
     assert row.cross_of_id is not None  # FR-1's invariant: every cross row names its subject
     return ca_service.get_ca(db, row.cross_of_id)
+
+
+def _load_pair(
+    db: Session, root_id: int, row_id: int, *, kind: str
+) -> tuple[CACertificate, CACertificate]:
+    """Spec 0026 FR-7: the only place the two new pages' seven refusals
+    live, so ``/ca/{root}/issuer/{id}`` and ``/ca/{root}/cross/{id}`` cannot
+    drift apart. Every one of them is a 404 (FR-9): not a redirect to the
+    hierarchy the row really belongs to -- the next thing an operator does
+    on that page is renew or retire, and a silently corrected URL means
+    acting on a hierarchy they did not think they had open -- and not a 403,
+    since every logged-in user may read every row at its correct URL.
+
+    ``kind`` is ``"intermediate"`` or ``"cross"``, and it decides which
+    foreign key has to name ``root_id``: ``parent_id`` for an intermediate,
+    ``cross_of_id`` for a cross row. That difference is the whole point
+    (FR-8): a cross row's ``parent_id`` is the root that *signed* it, while
+    the table that links to it sits on its *subject* root's page, so a guard
+    written against ``parent_id`` would refuse the URL the instance actually
+    links to and serve one reachable from no table at all.
+    """
+    try:
+        root = ca_service.get_ca(db, root_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if root.kind != "root":
+        raise HTTPException(
+            status_code=404, detail="a hierarchy is named by its root, not by this id"
+        )
+    try:
+        row = ca_service.get_ca(db, row_id)
+    except UnknownIssuerError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if row.kind != kind:
+        raise HTTPException(status_code=404, detail=f"this id does not name a {kind} certificate")
+    owner_id = row.parent_id if kind == "intermediate" else row.cross_of_id
+    if owner_id != root.id:
+        raise HTTPException(status_code=404, detail="this row does not belong to that hierarchy")
+    return root, row
 
 
 def _detail_page(
@@ -421,13 +502,70 @@ def _detail_page(
 
     No longer takes ``open_form`` (FR-8): every action is its own `<details>`-
     free `.section` now, so there is nothing left to open.
+
+    Spec 0026: no longer reads ``ACME_ENABLED`` either -- the only ACME
+    directory URL this page ever showed belonged to an intermediate, and an
+    intermediate is a table row here now. That lookup moved to
+    ``_issuer_page``, which is where the URL is rendered.
     """
     rows = ca_service.list_cas(db)
     context = base_context(request, user)
     context["error"] = error
-    context["group"] = _group(db, rows, root, acme_enabled=get_flag(db, ACME_ENABLED))
+    context["group"] = _group(db, rows, root)
     context["values"] = values or {}
     return templates.TemplateResponse(request, "ca_detail.html", context, status_code=status_code)
+
+
+def _issuer_page(
+    request: Request,
+    db: Session,
+    user: User,
+    root: CACertificate,
+    row: CACertificate,
+    error: str | None,
+    *,
+    status_code: int = 200,
+) -> Response:
+    """Spec 0026 FR-6: the one renderer for ``ca_issuer.html`` -- one
+    intermediate or one cross certificate in full, under the hierarchy it
+    belongs to. Used by both new GETs and by FR-10's 400, because the page
+    that owns a form is the page an unticked confirmation has to come back
+    to.
+
+    ``parent_has_key`` is read from ``row.parent_id``, never from ``root``.
+    For an intermediate the two are the same row; for a cross row they are
+    not -- ``parent_id`` is the *signing* root (FR-8) -- and ``_row_view``
+    decides ``can_renew`` from it. Taking it from the subject root would
+    offer a Renew button on an imported cross certificate that can only ever
+    500, and hide it on one cabin itself signed.
+    """
+    parent_has_key = False
+    if row.parent_id is not None:
+        parent_has_key = ca_service.get_ca(db, row.parent_id).key_sealed is not None
+    view = _row_view(
+        db, row, parent_has_key=parent_has_key, acme_enabled=get_flag(db, ACME_ENABLED)
+    )
+    if row.kind == "cross":
+        # Exactly what `_group` computes for the same row, from the same
+        # `ChainSet`: which path this instance actually serves is decided
+        # fresh on every render and never cached on a row.
+        chain_set = ca_service.chains_for(db, root.id)
+        alternate_cross_ids = {
+            alt.via_cross_id for alt in chain_set.alternates if alt.via_cross_id is not None
+        }
+        if row.id == chain_set.default.via_cross_id:
+            view["served"] = "default"
+        elif row.id in alternate_cross_ids:
+            view["served"] = "alternate"
+        else:
+            view["served"] = "not_served"
+        signer = ca_service.get_ca(db, row.parent_id) if row.parent_id is not None else None
+        view["signed_by"] = signer.name if signer is not None else "unknown"
+    context = base_context(request, user)
+    context["error"] = error
+    context["root"] = {"id": root.id, "name": root.name}
+    context["row"] = view
+    return templates.TemplateResponse(request, "ca_issuer.html", context, status_code=status_code)
 
 
 def _new_page(request: Request, user: User, error: str | None, status_code: int = 200) -> Response:
@@ -483,6 +621,50 @@ def ca_detail(
             status_code=404, detail="a hierarchy is named by its root, not by this id"
         )
     return _detail_page(request, db, user, row, None)
+
+
+@router.get("/{root_id:int}/issuer/{issuer_id:int}")
+def ca_issuer_detail(
+    root_id: int,
+    issuer_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Spec 0026 FR-5: one intermediate in full -- its identity, its
+    downloads, its published URLs, its constraints and its renew and retire
+    controls, all of which used to be a `.section` on the hierarchy page.
+
+    Nested under the root rather than generalising ``/ca/{ca_id}``: that path
+    means "the hierarchy whose root is this id" and refuses every non-root id,
+    a refusal one spec old. Nesting costs nothing -- both ids are in hand
+    wherever the link is rendered -- and it buys ``_load_pair``'s guard.
+
+    ``:int`` on **both** parameters (spec 0023 FR-9): without the converter a
+    non-numeric segment reaches the handler and answers 422 from conversion
+    instead of 404 from routing.
+    """
+    root, row = _load_pair(db, root_id, issuer_id, kind="intermediate")
+    return _issuer_page(request, db, user, root, row, None)
+
+
+@router.get("/{root_id:int}/cross/{cross_id:int}")
+def ca_cross_detail(
+    root_id: int,
+    cross_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Spec 0026 FR-5: one cross certificate in full, under its **subject**
+    root (FR-8). A separate path from ``/issuer/`` because cabin reserves the
+    word "issuer" for something that signs leaves -- that is what
+    ``resolve_issuer``, ``active_issuers`` and every ACME directory URL mean
+    by it -- and a cross certificate signs nothing. One URL covering both
+    would be a page lying about what it shows.
+    """
+    root, row = _load_pair(db, root_id, cross_id, kind="cross")
+    return _issuer_page(request, db, user, root, row, None)
 
 
 @router.post("/create")
@@ -727,10 +909,13 @@ def ca_renew(
     actor: Actor = Depends(current_actor),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
-    """FR-7: unchanged but for its redirect target -- ``root_of_row``
-    (FR-7/``_root_of``) rather than the now-gone list page. Out of Scope: the
-    bare ``HTTPException`` on a form-bounds refusal is left as it was; a
-    single number lost on a 400 is not FR-8's defect."""
+    """FR-7: unchanged but for its redirect target. Spec 0026 FR-11 moves
+    that target one step further, from the hierarchy page to the row's own
+    page (``_page_of``): this is 0023 FR-7's own rule -- an action comes back
+    to the page that owns the control -- following the control onto the page
+    it now lives on. Out of Scope: the bare ``HTTPException`` on a
+    form-bounds refusal is left as it was; a single number lost on a 400 is
+    not FR-8's defect."""
     form_error = _year_bounds_error(years, "years")
     if form_error is not None:
         raise HTTPException(status_code=400, detail=form_error)
@@ -750,8 +935,7 @@ def ca_renew(
         detail={"years": years},
         ip=client_ip(request, db),
     )
-    root = _root_of(db, row)
-    return RedirectResponse(f"/ca/{root.id}", status_code=303)
+    return RedirectResponse(_page_of(row), status_code=303)
 
 
 @router.post("/{ca_id}/retire")
@@ -773,13 +957,24 @@ def ca_retire(
     checkbox is a state an operator reaches by forgetting one click, not a
     domain refusal, so it gets a form response rather than a JSON error
     document.
+
+    Spec 0026 FR-10: that re-render has to be the page which actually
+    carries the form the operator just failed to submit, and after the split
+    the hierarchy page carries it only for the root itself. So the branch
+    chooses by kind -- ``_detail_page`` for a root, ``_issuer_page`` for an
+    intermediate or a cross row. The status code, the message and the rule
+    that the row is not touched before the check are all unchanged.
     """
     try:
         row = ca_service.get_ca(db, ca_id)
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if not confirm:
-        return _detail_page(request, db, user, _root_of(db, row), _CONFIRM_RETIRE, status_code=400)
+        if row.kind == "root":
+            return _detail_page(request, db, user, row, _CONFIRM_RETIRE, status_code=400)
+        return _issuer_page(
+            request, db, user, _root_of(db, row), row, _CONFIRM_RETIRE, status_code=400
+        )
     was_active = row.status == "active"
     try:
         _refuse_retire_of_tls_issuer(request, db, ca_id, row)
@@ -798,8 +993,7 @@ def ca_retire(
             target_id=ca_id,
             ip=client_ip(request, db),
         )
-    root = _root_of(db, row)
-    return RedirectResponse(f"/ca/{root.id}", status_code=303)
+    return RedirectResponse(_page_of(row), status_code=303)
 
 
 @router.get("/{ca_id}.pem")

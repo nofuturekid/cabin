@@ -6,11 +6,12 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
-Three specifications, 0023–0025, have landed since 0.2.0 was tagged and are
-not yet released. Together they split `/ca` into four pages, stop composing
-a name for a hierarchy cabin creates, separate creating a root from creating
-its first intermediate, and give every CA import and export its own page
-under a new "Transfer" rail group.
+Four specifications, 0023–0026, have landed since 0.2.0 was tagged and are
+not yet released. Together they split `/ca` into four pages and then a
+hierarchy page into a list plus a page per row, stop composing a name for a
+hierarchy cabin creates, separate creating a root from creating its first
+intermediate, and give every CA import and export its own page under a new
+"Transfer" rail group.
 
 Two things to know before upgrading an instance already running cabin.
 
@@ -101,6 +102,28 @@ certificate under it, not only the ones the key holder made.
   `ca_key_exported` audit event without the password in it. Per-certificate
   downloads (`/certs/{id}/download/...`) stay on the certificate's own page
   and do not move here.
+- Spec 0026 (hierarchy-pages): a hierarchy page is a list again.
+  `GET /ca/{root_id}` renders its root, then an **Issuers** table (name,
+  status, expiry — the name is the link), then a **Cross certificates**
+  table (name, signer, status, serving state, expiry; omitted entirely when
+  the root has none), and only then the *Add intermediate* and *Cross-sign*
+  forms, which used to sit above everything that repeats. An intermediate
+  costs a table row rather than a full section, and a root with no issuer
+  yet says so and links to the form further down its own page instead of
+  showing an empty stretch. Everything a row used to show inline —
+  subject, fingerprint, `cert.pem` and `chain.pem`, the CRL and AIA URLs or
+  the note explaining their absence, the ACME directory URL, the name
+  constraints, and the renew and retire controls — moves to two new pages,
+  `GET /ca/{root_id}/issuer/{issuer_id}` and
+  `GET /ca/{root_id}/cross/{cross_id}`, readable by any logged-in user with
+  the controls still admin-only. A row and its hierarchy that do not belong
+  together answer 404 rather than redirecting to the right one, since the
+  next thing done on such a page renews or retires. `POST /ca/{ca_id}/renew`
+  and `POST /ca/{ca_id}/retire` keep their paths, fields and guards, and now
+  redirect to the row's own page; a retire submitted without its
+  confirmation ticked re-renders that same page rather than the hierarchy
+  page that no longer carries the form. No stylesheet change and no schema,
+  API, MCP or ACME change.
 
 ### Fixed
 

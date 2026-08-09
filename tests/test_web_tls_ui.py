@@ -43,6 +43,7 @@ Contract fixes it to, and the audit action is checked as a rendered
 
 import contextlib
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -131,13 +132,54 @@ def _csrf(client: TestClient, cfg: Config) -> str:
         db.close()
 
 
-def _window(html: str, marker: str, size: int = 600) -> str:
-    """The text following ``marker``'s first occurrence -- scopes an
-    assertion to the row it belongs to, the same cheap-proxy pattern
-    ``test_web_ca.py``/``test_web_dashboard.py`` already use for rows with
-    no id of their own."""
-    idx = html.index(marker)
-    return html[idx : idx + size]
+#: spec 0026's Test list: the 900-character `_window` this file used to
+#: scope the "no base URL" note is replaced, not widened -- the pattern that
+#: once broke a test when production markup was compacted. `_dom_row` is the
+#: element scoper the other web test files already duplicate.
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
+_CLASS_RE = re.compile(r'class="([^"]*)"')
+
+
+def _dom_row(html: str, marker: str, *, class_name: str, tag: str | None = None) -> str:
+    """The full outer HTML of the innermost element carrying ``class_name``
+    that contains ``marker``'s first occurrence -- scoped by parsing the
+    actual tag nesting, never a fixed-character window."""
+    marker_idx = html.index(marker)
+    stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
+    for m in _TAG_RE.finditer(html):
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue
+        if not closing:
+            stack.append((name, attrs, m.start()))
+            continue
+        if not stack or stack[-1][0] != name:
+            continue
+        open_name, open_attrs, open_start = stack.pop()
+        if open_start <= marker_idx < m.end():
+            classes = _CLASS_RE.search(open_attrs)
+            matches_tag = tag is None or open_name == tag
+            if matches_tag and classes is not None and class_name in classes.group(1).split():
+                return html[open_start : m.end()]
+    raise AssertionError(f"no <{tag or '*'} class={class_name!r}> element wraps {marker!r}")
 
 
 class _SpyTlsManager(TlsManager):
@@ -381,14 +423,24 @@ def test_ca_page_shows_cdp_and_aia_links_per_issuer(client: TestClient, cfg: Con
     assert alpha_crl != beta_crl
     assert alpha_aia != beta_aia
 
-    # spec 0023: the per-issuer CRL/AIA links live on each hierarchy's own
-    # detail page now, not on the /ca overview.
-    alpha_html = client.get(f"/ca/{alpha.root.id}").text
-    beta_html = client.get(f"/ca/{beta.root.id}").text
+    # spec 0023 moved the per-issuer CRL/AIA links off the /ca overview onto
+    # each hierarchy's detail page; spec 0026 moved them onto each ISSUER's
+    # own page. The requirement is untouched -- the links are per issuer and
+    # differ between hierarchies -- and the inequality assertions above are
+    # what carry it.
+    alpha_page = client.get(f"/ca/{alpha.root.id}/issuer/{alpha.intermediate.id}")
+    beta_page = client.get(f"/ca/{beta.root.id}/issuer/{beta.intermediate.id}")
+    assert alpha_page.status_code == 200, alpha_page.text
+    assert beta_page.status_code == 200, beta_page.text
+    alpha_html = alpha_page.text
+    beta_html = beta_page.text
     assert _anchor_text(alpha_html, alpha_crl) == alpha_crl
     assert _anchor_text(alpha_html, alpha_aia) == alpha_aia
     assert _anchor_text(beta_html, beta_crl) == beta_crl
     assert _anchor_text(beta_html, beta_aia) == beta_aia
+    # ...and neither issuer's pair leaks onto the other's page
+    assert _anchor_text(alpha_html, beta_crl) is None
+    assert _anchor_text(beta_html, alpha_crl) is None
 
 
 def test_displayed_urls_match_issued_certificate(client: TestClient, cfg: Config) -> None:
@@ -421,39 +473,49 @@ def test_displayed_urls_match_issued_certificate(client: TestClient, cfg: Config
     finally:
         db.close()
 
-    # spec 0023: the issuer's own row -- and its CRL/AIA links -- lives on
-    # its hierarchy's detail page now, not on the /ca overview.
-    html = client.get(f"/ca/{hierarchy.root.id}").text
+    # spec 0023 moved the issuer's own row -- and its CRL/AIA links -- off
+    # the /ca overview onto its hierarchy's detail page; spec 0026 moved it
+    # onto the issuer's own page. Only the URL fetched changes: what is
+    # compared, page against real issued certificate, is untouched.
+    page = client.get(f"/ca/{hierarchy.root.id}/issuer/{hierarchy.intermediate.id}")
+    assert page.status_code == 200, page.text
+    html = page.text
     assert _anchor_text(html, expected_cdp) == expected_cdp
     assert _anchor_text(html, expected_aia) == expected_aia
 
 
 def test_ca_page_urls_absent_without_base_url(client: TestClient, cfg: Config) -> None:
     """Without a base URL there is nothing valid to embed in a certificate,
-    so the hierarchy's own detail page must show neither link -- and the
-    existing "no base URL" note (``ca_detail.html``) must be what appears
-    in its place, not silence."""
+    so the issuer's own page must show neither link -- and the existing "no
+    base URL" note (moved verbatim out of ``ca_detail.html`` by spec 0026)
+    must be what appears in its place, not silence."""
     _setup_superadmin(client)
     db = _db(cfg)
     try:
         # distinct root/intermediate names (spec 0024 no longer gives them
-        # one on its own): `_window`'s marker below needs the intermediate's
-        # name to be unique on the page, or it lands on the root's own
-        # heading instead.
+        # one on its own), so nothing below can match the root's own row by
+        # accident.
         hierarchy = ca_service.create_hierarchy(
             db, _secrets(cfg), "cabin root", "cabin intermediate"
         )
     finally:
         db.close()
 
-    html = client.get(f"/ca/{hierarchy.root.id}").text
+    # spec 0026: both halves follow the URLs they are about onto the
+    # issuer's own page.
+    page = client.get(f"/ca/{hierarchy.root.id}/issuer/{hierarchy.intermediate.id}")
+    assert page.status_code == 200, page.text
+    html = page.text
     crl_href = f"/crl/{hierarchy.intermediate.id}"
     aia_href = f"/ca/{hierarchy.intermediate.id}.cer"
     hrefs = {href for href, _text in _anchors(html)}
     assert crl_href not in hrefs
     assert aia_href not in hrefs
 
-    note = _window(html, hierarchy.intermediate.name, size=900)
+    # The 900-character window this used to slice is replaced rather than
+    # widened (spec 0026's Test list): the note is scoped to its own `.note`
+    # element, so compacted markup can never quietly move what is measured.
+    note = _dom_row(html, "base URL", class_name="note")
     assert "base URL" in note
 
 

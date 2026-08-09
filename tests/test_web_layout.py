@@ -32,12 +32,13 @@ TEMPLATES = Path(__file__).resolve().parents[1] / "src/cabin/web/templates"
 STATIC = Path(__file__).resolve().parents[1] / "src/cabin/web/static"
 CSS = STATIC / "cabin.css"
 
-#: Templates rendered inside the rail. login/setup are the two without one.
-CONTENT_TEMPLATES = sorted(
-    p.name
-    for p in TEMPLATES.glob("*.html")
-    if p.name not in {"layout.html", "login.html", "setup.html"}
-)
+#: Templates rendered inside the rail. login/setup are the two without one,
+#: and `ca_macros.html` (spec 0026 FR-13) is not a page at all: it is a macro
+#: library, extends nothing, defines no content block and is never rendered
+#: on its own. AC-18 asserts exactly that below, so the exemption cannot
+#: later be widened to silence a real page that forgot its `nav_current`.
+NOT_PAGES = {"layout.html", "login.html", "setup.html", "ca_macros.html"}
+CONTENT_TEMPLATES = sorted(p.name for p in TEMPLATES.glob("*.html") if p.name not in NOT_PAGES)
 
 
 # --------------------------------------------------------------------------
@@ -61,6 +62,25 @@ def test_every_content_template_sets_nav_current() -> None:
         if not re.search(r"{%\s*set nav_current\s*=", (TEMPLATES / name).read_text())
     ]
     assert missing == []
+
+    # spec 0026 AC-18: the one exemption this test grants is a macro library,
+    # and it is checked rather than trusted -- a real page smuggled into
+    # NOT_PAGES to silence a failure is the only way this exemption can do
+    # harm. `ca_macros.html` must be no page...
+    macros_path = TEMPLATES / "ca_macros.html"
+    assert macros_path.exists(), "ca_macros.html is missing (spec 0026 FR-13)"
+    macros = macros_path.read_text()
+    assert "{% extends" not in macros
+    assert "{% block content %}" not in macros
+
+    # ...and everything this test does check must be one: a template that
+    # extends nothing cannot be marked by the rail whatever it sets.
+    not_extending = [
+        name
+        for name in CONTENT_TEMPLATES
+        if '{% extends "layout.html" %}' not in (TEMPLATES / name).read_text()
+    ]
+    assert not_extending == []
 
 
 def test_every_table_is_wrapped_in_scroller() -> None:
@@ -171,6 +191,37 @@ def _root_id(cfg: Config) -> int:
             select(CACertificate).where(CACertificate.kind == "root").order_by(CACertificate.id)
         ).first()
         assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
+def _first_intermediate_id(cfg: Config) -> int:
+    """The intermediate under ``_root_id``'s hierarchy -- what spec 0026's
+    `/ca/{root_id}/issuer/{issuer_id}` is addressed by. Lowest id, for the
+    reason ``_root_id`` gives."""
+    db: Session = create_session_factory(cfg.db_url)()
+    try:
+        row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "intermediate")
+            .order_by(CACertificate.id)
+        ).first()
+        assert row is not None, "no intermediate row exists"
+        return row.id
+    finally:
+        db.close()
+
+
+def _cross_id(cfg: Config) -> int:
+    """The cross certificate ``_populate(second_issuer=True)`` creates for
+    ``_root_id``'s root -- spec 0026's `/ca/{root_id}/cross/{cross_id}`."""
+    db: Session = create_session_factory(cfg.db_url)()
+    try:
+        row = db.scalars(
+            select(CACertificate).where(CACertificate.kind == "cross").order_by(CACertificate.id)
+        ).first()
+        assert row is not None, "no cross row exists"
         return row.id
     finally:
         db.close()
@@ -320,6 +371,22 @@ def _populate(client: TestClient, cfg: Config, *, second_issuer: bool = False) -
                     "name": "Beta Worldwide Corporation Internal Issuing Sub-Authority CA",
                     "key_type": "ecdsa-p256",
                     "years": 10,
+                    "csrf_token": _csrf(client, cfg),
+                },
+            ).status_code
+            == 303
+        )
+        # spec 0026: the five-column `Cross certificates` table is the widest
+        # new thing on a hierarchy page, and its row's own page is one of the
+        # two pages the overflow probe gains -- neither exists unless a cross
+        # certificate does. The second root's `path_length=2` is what lets it
+        # sign the first.
+        assert (
+            client.post(
+                f"/ca/{_root_id(cfg)}/cross-sign",
+                data={
+                    "signing_root_id": second_root_id,
+                    "years": 5,
                     "csrf_token": _csrf(client, cfg),
                 },
             ).status_code
@@ -657,6 +724,8 @@ def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int) -> None
             "ca": "/ca",
             "ca_new": "/ca/new",
             "ca_detail": f"/ca/{_root_id(cfg)}",
+            "ca_issuer": f"/ca/{_root_id(cfg)}/issuer/{_first_intermediate_id(cfg)}",
+            "ca_cross": f"/ca/{_root_id(cfg)}/cross/{_cross_id(cfg)}",
             "transfer_ca_import": "/transfer/ca-import",
             "transfer_cross_import": "/transfer/cross-import",
             "transfer_trust_bundle": "/transfer/trust-bundle",

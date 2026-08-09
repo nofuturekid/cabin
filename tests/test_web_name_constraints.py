@@ -288,9 +288,14 @@ _TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
 _CLASS_RE = re.compile(r'class="([^"]*)"')
 
 
-def _row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
+def _row(html: str, marker: str, *, class_name: str | None = None, tag: str = "div") -> str:
     """The full outer HTML of the innermost ``<tag class="class_name">``
     element that contains ``marker``'s first occurrence."""
+    # A marker that is not on the page at all is a distinct failure from
+    # "no element of that class wraps it"; `html.index` alone would report
+    # it as a bare ValueError from inside this helper.
+    if marker not in html:
+        raise AssertionError(f"marker {marker!r} is not on the page at all")
     marker_idx = html.index(marker)
     stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
     for m in _TAG_RE.finditer(html):
@@ -305,7 +310,12 @@ def _row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
         open_name, open_attrs, open_start = stack.pop()
         if open_start <= marker_idx < m.end():
             classes = _CLASS_RE.search(open_attrs)
-            if open_name == tag and classes is not None and class_name in classes.group(1).split():
+            # spec 0026: `class_name=None` scopes a `<tr>` by a marker inside
+            # it -- the two hierarchy tables' rows deliberately carry no class.
+            matches_class = class_name is None or (
+                classes is not None and class_name in classes.group(1).split()
+            )
+            if open_name == tag and matches_class:
                 return html[open_start : m.end()]
     raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
 
@@ -537,21 +547,24 @@ def _seed_alpha_beta(cfg: Config) -> None:
 
 
 def test_ca_page_shows_constraints_per_row(client: TestClient, cfg: Config) -> None:
-    """AC-12's positive half: alpha's intermediate row renders ``example.com``
-    as visible text, scoped to its own ``.section`` block on its hierarchy's
-    own detail page (spec 0023 moved per-row detail off ``/ca``, spec 0024
-    FR-8 then made every action its own headed ``.section``) -- not found by
-    searching the whole page, which would pass even if it were rendered on
-    the wrong row."""
+    """AC-12's positive half: alpha's intermediate renders ``example.com`` as
+    visible text, scoped to the ``.constraints`` block on that
+    intermediate's own page (spec 0023 moved per-row detail off ``/ca``,
+    spec 0024 FR-8 made every action its own headed ``.section``, spec 0026
+    moved everything about one intermediate onto its own page) -- not found
+    by searching the whole page, which would pass even if it were rendered
+    somewhere else entirely."""
     _setup_superadmin(client)
     _seed_alpha_beta(cfg)
 
     alpha_root = _by_name(cfg, "alpha Root CA")
-    html = client.get(f"/ca/{alpha_root.id}").text
-    alpha_block = _row(html, "alpha Intermediate CA", class_name="section")
+    alpha_intermediate = _by_name(cfg, "alpha Intermediate CA")
+    page = client.get(f"/ca/{alpha_root.id}/issuer/{alpha_intermediate.id}")
+    assert page.status_code == 200, page.text
+    alpha_block = _row(page.text, "example.com", class_name="constraints", tag="div")
     assert "example.com" in alpha_block
 
-    expected = leaf_mod.constraints_of(_cert_of(_by_name(cfg, "alpha Intermediate CA")))
+    expected = leaf_mod.constraints_of(_cert_of(alpha_intermediate))
     assert expected.permitted_dns == ("example.com",)
 
 
@@ -567,12 +580,22 @@ def test_ca_page_shows_no_block_for_an_unconstrained_row(client: TestClient, cfg
     _seed_alpha_beta(cfg)
 
     beta_root = _by_name(cfg, "beta Root CA")
-    html = client.get(f"/ca/{beta_root.id}").text
-    beta_block = _row(html, "beta Intermediate CA", class_name="section").lower()
-    assert "permitted" not in beta_block
-    assert "excluded" not in beta_block
+    beta_intermediate = _by_name(cfg, "beta Intermediate CA")
+    beta_page = client.get(f"/ca/{beta_root.id}/issuer/{beta_intermediate.id}")
+    assert beta_page.status_code == 200, beta_page.text
+    beta_html = beta_page.text.lower()
+    assert "permitted" not in beta_html
+    assert "excluded" not in beta_html
 
-    assert leaf_mod.constraints_of(_cert_of(_by_name(cfg, "beta Intermediate CA"))).is_empty()
+    # ...and the counter-check, without which the two assertions above would
+    # equally pass on a page that renders no constraints block for anybody:
+    # the constrained intermediate's own page does carry that vocabulary.
+    alpha_root = _by_name(cfg, "alpha Root CA")
+    alpha_intermediate = _by_name(cfg, "alpha Intermediate CA")
+    alpha_html = client.get(f"/ca/{alpha_root.id}/issuer/{alpha_intermediate.id}").text.lower()
+    assert "permitted" in alpha_html
+
+    assert leaf_mod.constraints_of(_cert_of(beta_intermediate)).is_empty()
 
 
 def test_ca_page_shows_an_imported_roots_constraints(client: TestClient, cfg: Config) -> None:
@@ -599,10 +622,13 @@ def test_ca_page_shows_an_imported_roots_constraints(client: TestClient, cfg: Co
 
     root = _by_name(cfg, "Delegated Root CA")
     html = client.get(f"/ca/{root.id}").text
-    root_i = html.index("Delegated Root CA")
-    intermediate_i = html.index("Delegated Intermediate CA")
-    assert root_i < intermediate_i
-    root_block = html[root_i:intermediate_i]
+    # spec 0026: the root section does not move (FR-1), so this requirement
+    # stays on this page -- but its scoping does change. The old window
+    # `html[root_i:intermediate_i]` only worked because the intermediate's
+    # own `.section` followed the root's; an intermediate is a table row
+    # now. Scoped to the root's own `.section`, by its `<h2>`, the way
+    # `test_web_ca.py`'s imported-root test already does.
+    root_block = _row(html, f"<h2>{root.name}</h2>", class_name="section")
     assert "partner.example" in root_block
 
     expected = leaf_mod.constraints_of(_cert_of(_by_name(cfg, "Delegated Root CA")))
@@ -693,8 +719,12 @@ def test_imported_intermediate_constraint_is_displayed_on_ca(
     assert resp.status_code == 303, resp.text
 
     root = _by_name(cfg, "Delegating Root CA")
-    html = client.get(f"/ca/{root.id}").text
-    block = _row(html, "Delegated Partner Intermediate CA", class_name="section")
+    intermediate = _by_name(cfg, "Delegated Partner Intermediate CA")
+    # spec 0026: an imported intermediate's constraints, read from its
+    # certificate, are displayed on that intermediate's own page.
+    page = client.get(f"/ca/{root.id}/issuer/{intermediate.id}")
+    assert page.status_code == 200, page.text
+    block = _row(page.text, "delegated.example", class_name="constraints", tag="div")
     assert "delegated.example" in block
 
 

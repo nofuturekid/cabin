@@ -198,14 +198,25 @@ _TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
 _CLASS_RE = re.compile(r'class="([^"]*)"')
 
 
-def _row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
+def _row(html: str, marker: str, *, class_name: str | None = None, tag: str = "div") -> str:
     """The full outer HTML of the innermost ``<tag class="class_name">``
     element that contains ``marker``'s first occurrence -- scoped by parsing
     the actual tag nesting, not by slicing a fixed number of characters
     after the marker. A row's markup can grow or shrink for any reason (a
     class added, a hint reworded) without ever moving what a test measures,
     and there is no fixed budget for the next change to silently exceed.
+
+    ``class_name`` is optional (spec 0026): a ``<tr>`` in one of the two new
+    hierarchy tables carries no class of its own -- giving it one would put a
+    selector in the stylesheet that the both-directions test would then
+    require to be used and styled -- so a table row is scoped by its tag plus
+    a marker inside it instead.
     """
+    # A marker that is not on the page at all is a distinct failure from
+    # "no element of that class wraps it"; `html.index` alone would report
+    # it as a bare ValueError from inside this helper.
+    if marker not in html:
+        raise AssertionError(f"marker {marker!r} is not on the page at all")
     marker_idx = html.index(marker)
     stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
     for m in _TAG_RE.finditer(html):
@@ -220,7 +231,10 @@ def _row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
         open_name, open_attrs, open_start = stack.pop()
         if open_start <= marker_idx < m.end():
             classes = _CLASS_RE.search(open_attrs)
-            if open_name == tag and classes is not None and class_name in classes.group(1).split():
+            matches_class = class_name is None or (
+                classes is not None and class_name in classes.group(1).split()
+            )
+            if open_name == tag and matches_class:
                 return html[open_start : m.end()]
     raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
 
@@ -329,11 +343,22 @@ def test_ca_page_lists_hierarchies(client: TestClient, cfg: Config) -> None:
     finally:
         db.close()
 
+    # spec 0026: an intermediate is a row in its hierarchy's Issuers table,
+    # not a `.section` of its own. The requirement is unchanged -- a status
+    # belongs to the row it is rendered on rather than being sprayed across
+    # the page -- so the block scoped is now that intermediate's `<tr>`,
+    # found by the link in its name cell (rows carry no class).
+    beta_intermediate_id = _by_name(cfg, "beta Intermediate CA").id
+    alpha_intermediate_id = _by_name(cfg, "alpha Intermediate CA").id
     beta_window = _row(
-        client.get(f"/ca/{beta_root.id}").text, "beta Intermediate CA", class_name="section"
+        client.get(f"/ca/{beta_root.id}").text,
+        f'href="/ca/{beta_root.id}/issuer/{beta_intermediate_id}"',
+        tag="tr",
     )
     alpha_window = _row(
-        client.get(f"/ca/{alpha_root.id}").text, "alpha Intermediate CA", class_name="section"
+        client.get(f"/ca/{alpha_root.id}").text,
+        f'href="/ca/{alpha_root.id}/issuer/{alpha_intermediate_id}"',
+        tag="tr",
     )
     assert "retired" in beta_window.lower()
     assert "retired" not in alpha_window.lower()

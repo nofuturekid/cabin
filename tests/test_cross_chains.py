@@ -214,9 +214,14 @@ _TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
 _CLASS_RE = re.compile(r'class="([^"]*)"')
 
 
-def _dom_row(html: str, marker: str, *, class_name: str, tag: str = "div") -> str:
+def _dom_row(html: str, marker: str, *, class_name: str | None = None, tag: str = "div") -> str:
     """The full outer HTML of the innermost ``<tag class="class_name">``
     element that contains ``marker``'s first occurrence."""
+    # A marker that is not on the page at all is a distinct failure from
+    # "no element of that class wraps it"; `html.index` alone would report
+    # it as a bare ValueError from inside this helper.
+    if marker not in html:
+        raise AssertionError(f"marker {marker!r} is not on the page at all")
     marker_idx = html.index(marker)
     stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
     for m in _TAG_RE.finditer(html):
@@ -231,7 +236,12 @@ def _dom_row(html: str, marker: str, *, class_name: str, tag: str = "div") -> st
         open_name, open_attrs, open_start = stack.pop()
         if open_start <= marker_idx < m.end():
             classes = _CLASS_RE.search(open_attrs)
-            if open_name == tag and classes is not None and class_name in classes.group(1).split():
+            # spec 0026: `class_name=None` scopes a `<tr>` by a marker inside
+            # it -- the two hierarchy tables' rows deliberately carry no class.
+            matches_class = class_name is None or (
+                classes is not None and class_name in classes.group(1).split()
+            )
+            if open_name == tag and matches_class:
                 return html[open_start : m.end()]
     raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
 
@@ -841,7 +851,15 @@ def test_ca_page_shows_the_cross_row_under_the_subject_root(
 ) -> None:
     """Spec 0023 moved per-hierarchy detail -- including a cross row -- onto
     ``/ca/{ca_id}``, named by its root. B is the cross certificate's subject
-    root, so B's own detail page is where the row must appear."""
+    root, so B's own detail page is where the row must appear.
+
+    Spec 0026 FR-8 keeps that requirement -- the ``cross_of_id`` invariant --
+    and gives it teeth. Comparing string positions could only ever say the
+    name appeared somewhere below B's; the row is a table row with a link
+    now, so the link itself is asserted, it resolves to 200, and the SAME
+    cross id under the SIGNING root is a 404. A guard written against
+    ``parent_id`` swaps those two and this test says so.
+    """
     scenario = _setup(client, cfg)
     row_b = _row(cfg, scenario.root_b)
     row_a = _row(cfg, scenario.root_a)
@@ -852,8 +870,13 @@ def test_ca_page_shows_the_cross_row_under_the_subject_root(
     assert cross_row.name in page.text
     # A's own name still appears too -- it is who the cross row says signed it.
     assert row_a.name in page.text
-    # under B: B's own name appears before the cross row's markup
-    assert page.text.index(row_b.name) < page.text.rindex(cross_row.name)
+
+    under_subject = f"/ca/{row_b.id}/cross/{scenario.cross}"
+    assert f'href="{under_subject}"' in page.text
+    assert client.get(under_subject).status_code == 200
+    # ...and the signing root's URL for the same row is refused: that page is
+    # reachable from no table on the instance.
+    assert client.get(f"/ca/{row_a.id}/cross/{scenario.cross}").status_code == 404
 
 
 def test_ca_page_names_the_default_and_alternate_chains(client: TestClient, cfg: Config) -> None:
@@ -954,20 +977,26 @@ def test_ca_page_marks_an_expired_cross_certificate_as_not_served(
     row_b = _row(cfg, scenario.root_b)
     page = client.get(f"/ca/{row_b.id}").text
     cross_row = _row(cfg, scenario.cross)
-    # The cross row's name equals its subject root's own name (0017's
-    # naming rule), so its own <h2> heading recurs verbatim as the root's
-    # own section heading too (spec 0024 FR-8 gave every action its own
-    # headed .section) -- a plain index() on the name alone would land on
-    # the wrong occurrence. The "cross" tag on the line right after the
-    # heading is what only the cross row's own section has -- scoped by
-    # parsing the actual tag nesting rather than a fixed character count
-    # past that marker.
+    # The cross row's name equals its subject root's own name (0017's naming
+    # rule), so the name alone never identifies its markup. Spec 0026 made
+    # the row a `<tr>` in the `Cross certificates` table and removed the
+    # `<h2>`-plus-`cross`-tag marker this used to scope by; the row's own
+    # link is what only that row carries, and a `<tr>` has no class of its
+    # own to scope by (which is what `class_name` being optional is for).
     block = _dom_row(
-        page,
-        f'<h2>{cross_row.name}</h2>\n    <p><span class="tag">cross</span>',
-        class_name="section",
+        page, f'href="/ca/{row_b.id}/cross/{scenario.cross}"', class_name=None, tag="tr"
     )
+    assert cross_row.name in block  # the row scoped is the cross row's own
     assert "not served" in block
+
+    # ...and the other half: the full clause -- which is what tells an
+    # operator that nothing needs doing -- is on the cross row's own page,
+    # where there is room for a sentence. The tag without the explanation
+    # would leave an operator with a warning and no way to act on it.
+    cross_page = client.get(f"/ca/{row_b.id}/cross/{scenario.cross}")
+    assert cross_page.status_code == 200
+    assert "outside its validity window" in cross_page.text
+    assert "no action needed to fall back to the short chain" in cross_page.text
 
 
 # --- AC-16: dashboard warning ---------------------------------------------------

@@ -1,0 +1,91 @@
+{% extends "layout.html" %}
+{% set nav_current = "ca" %}
+{% block title %}{{ row.name }} — cabin{% endblock %}
+{% block content %}
+{% from "ca_macros.html" import constraints_block, renew_retire with context %}
+<div class="page-head">
+  <div>
+    <p class="sub"><a href="/ca/{{ root.id }}">← {{ root.name }}</a></p>
+    <h1>{{ row.name }}</h1>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="scroller">
+  <table>
+    <tbody>
+      <tr><th>Kind</th><td><span class="tag">{{ row.kind }}</span></td></tr>
+      <tr><th>Status</th><td><span class="tag{% if row.status == "retired" %} tag-bad{% endif %}">{{ row.status }}</span></td></tr>
+      {% if row.kind == "cross" %}
+      <tr><th>Signed by</th><td>{{ row.signed_by }}, in place of {{ root.name }}'s own signature</td></tr>
+      <tr><th>Serving</th><td>{% if row.served == "default" %}<span class="tag tag-valid">serving -- default chain</span>{% elif row.served == "alternate" %}<span class="tag">serving -- alternate chain</span>{% else %}<span class="tag tag-warn">not served</span>{% if row.status == "active" %} -- outside its validity window ({{ row.not_valid_before }} to {{ row.not_valid_after }}), dropped automatically, no action needed to fall back to the short chain{% endif %}{% endif %}</td></tr>
+      {% endif %}
+      <tr><th>Valid from</th><td class="nowrap">{{ row.not_valid_before }}</td></tr>
+      <tr><th>Valid until</th><td class="nowrap">{{ row.not_valid_after }}</td></tr>
+      <tr><th>Subject</th><td class="mono">{{ row.subject }}</td></tr>
+      <tr><th>Fingerprint</th><td class="mono">{{ row.fingerprint }}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Downloads</h2>
+    <p class="help">The certificate on its own{% if row.kind == "intermediate" %}, or with everything it chains up to{% endif %}.</p>
+  </div>
+  <div>
+    <p class="row-actions">
+      <a href="/ca/{{ row.id }}.pem">cert.pem</a>
+      {% if row.kind == "intermediate" %}<a href="/ca/{{ row.id }}/chain.pem">chain.pem</a>{% endif %}
+    </p>
+  </div>
+</div>
+
+{% if row.kind == "intermediate" %}
+<div class="section">
+  <div>
+    <h2>Published URLs</h2>
+    <p class="help">Where this issuer publishes its revocation list and its own certificate, and where its ACME clients find their directory. These are the exact URLs embedded in everything it signs.</p>
+  </div>
+  <div>
+    {% if row.crl_url %}
+    <p class="help mono">CRL: <a href="{{ row.crl_url }}">{{ row.crl_url }}</a><br>AIA: <a href="{{ row.ca_url }}">{{ row.ca_url }}</a></p>
+    {% else %}
+    <p class="note">No base URL is set, so this issuer publishes no CRL distribution point or CA issuer URL. Set one under <a href="/settings">Settings</a>.</p>
+    {% endif %}
+    {% if row.acme_directory_url %}
+    <p class="help mono">ACME: <a href="{{ row.acme_directory_url }}">{{ row.acme_directory_url }}</a></p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if row.has_constraints %}
+<div class="section">
+  <div>
+    <h2>Name constraints</h2>
+    <p class="help">What this certificate may and may not sign, fixed in it when it was created and enforced by every relying party that reads them.</p>
+  </div>
+  <div>
+    {{ constraints_block(row) }}
+  </div>
+</div>
+{% endif %}
+
+{% if nav.ca_admin and (row.can_renew or row.can_retire) %}
+<div class="section">
+  <div>
+    <h2>Renew and retire</h2>
+    <p class="help">The two things that can be done to this certificate from here.</p>
+  </div>
+  <div>
+    {% if row.kind == "intermediate" %}
+    {{ renew_retire(row, "Retiring this intermediate stops it signing anything new; certificates already issued under it keep validating until they expire, and it still signs its own CRL.") }}
+    {% else %}
+    {{ renew_retire(row, "Retiring takes this path out of every chain cabin serves; it is not revocation. cabin publishes no CRL for a root, so anyone who already has this certificate can keep presenting it -- only whoever signed it, " ~ row.signed_by ~ ", could truly revoke it.") }}
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}
