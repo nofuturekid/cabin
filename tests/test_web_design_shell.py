@@ -29,7 +29,6 @@ asserts.
 """
 
 import re
-import subprocess
 from pathlib import Path
 
 import probes
@@ -45,11 +44,6 @@ TEMPLATES = REPO / "src/cabin/web/templates"
 STATIC = REPO / "src/cabin/web/static"
 CSS = STATIC / "cabin.css"
 BRIEF = REPO / "docs/design/0027-brief.md"
-
-#: The commit this spec starts from. AC-1 compares every content template
-#: against its content here, which is what makes "the chrome changed and
-#: nothing else did" a fact rather than a claim.
-BASELINE = "c455922"
 
 #: FR-19: renaming one of these is a deliberate act with an argument, not a
 #: side effect of a stylesheet rewrite. Thirty-one assertions across the suite
@@ -1133,61 +1127,35 @@ def test_the_danger_button_arms_with_its_checkbox(rendered: dict[str, str], tmp_
     )
 
 
-# === AC-1: the boundary holds ==============================================
-
-
-def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True)
-
-
-_JINJA_RE = re.compile(r"{%.*?%}|{{.*?}}", re.S)
-
-
-def _jinja_tags(text: str) -> set[str]:
-    return {" ".join(tag.split()) for tag in _JINJA_RE.findall(text)}
-
-
-def test_only_layout_html_changed() -> None:
-    """FR-18/AC-1: `layout.html` is the only template this spec edits.
-
-    That boundary is what makes 0027 verifiable in one step: the claim that
-    the suite still passes only means something if the chrome fits the
-    content exactly as it already was. A content template "just slightly"
-    adjusted to make a new rule look right would make that claim empty.
-
-    The second half is the formatter (FR-25). It has turned
-    `{% if x == "y" %}` into `{% if x="" ="y" %}` and cost this project five
-    debugging sessions; a Jinja tag in the new file that is not in the old
-    one is what that failure looks like.
-    """
-    listed = _git("ls-tree", "-r", "--name-only", BASELINE, "src/cabin/web/templates/")
-    assert listed.returncode == 0, listed.stderr.decode()
-    baseline_names = [line for line in listed.stdout.decode().split() if line.endswith(".html")]
-    assert len(baseline_names) > 10, baseline_names
-
-    current = sorted(p.name for p in TEMPLATES.glob("*.html"))
-    assert current == sorted(Path(name).name for name in baseline_names), (
-        "a template was added or removed; 0027 adds none"
-    )
-
-    changed = []
-    for name in baseline_names:
-        show = _git("show", f"{BASELINE}:{name}")
-        assert show.returncode == 0, show.stderr.decode()
-        if show.stdout != (REPO / name).read_bytes():
-            changed.append(Path(name).name)
-    assert changed == ["layout.html"], (
-        f"0027 edits layout.html and nothing else under templates/; changed: {changed}"
-    )
-
-    before = _git("show", f"{BASELINE}:src/cabin/web/templates/layout.html").stdout.decode()
-    after = (TEMPLATES / "layout.html").read_text()
-    invented = _jinja_tags(after) - _jinja_tags(before)
-    assert invented == set(), (
-        f"layout.html grew Jinja tags that were not in it before -- the "
-        f"formatter's failure mode is a broken tag, and this is what it looks "
-        f"like: {sorted(invented)}"
-    )
+# === AC-1: the boundary held, and the test that said so is retired =========
+#
+# `test_only_layout_html_changed` lived here. It compared every template
+# against commit `c455922` and asserted that `layout.html` was the only one
+# that differed, which is spec 0027 FR-18/AC-1: *0027 touched no content
+# template's markup*. Spec 0028 edits five of them by requirement (FR-1), so
+# the test now fails on exactly the change it was written to permit later.
+#
+# It is retired rather than re-pointed, and the argument is that the thing it
+# asserted is **a property of one commit, not of the codebase**. "The diff
+# from c455922 to the 0027 merge touched one template" was true when it was
+# written, is true now, and will be true forever; nothing a later commit does
+# can make it false. So there is no regression for it to catch. Re-pointing it
+# at a second fixed pair of commits would assert only that git history is
+# immutable, which git already guarantees and which no reader would think to
+# check for.
+#
+# Its evidence therefore lives where it always lived: in the commit. `git
+# show c455922..<0027>` -- src/cabin/web/templates/ is the record, and it is a
+# better one than a test, because it cannot be edited to agree with the code.
+#
+# What it also carried was the formatter guard (0027 FR-25): a Jinja tag in
+# the new file that was not in the old one. That half is not lost with it --
+# every spec since 0021 has carried the same rule, and 0028 FR-18 restates it
+# with the same enforcement (read `git diff` after every template edit). The
+# rendered pages are the check that a mangled tag cannot survive: a broken
+# `{% if %}` does not render a page, and twenty of them are fetched with
+# `assert resp.status_code == 200` by `render_pages` before any probe in this
+# file runs.
 
 
 # === AC-16: the load-bearing names survive =================================

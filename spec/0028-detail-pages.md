@@ -660,17 +660,28 @@ two criteria failing with no argument beside them.
   overflow. Every table's fit inside its own scroller is measured
   separately, by AC-1, on all three `.rows` tables.
 
-  **A pre-existing defect this makes visible, and fixes.** The
-  five-column `Cross certificates` table spec 0026 shipped **does not
-  fit at 390 today**: measured on the long-name fixture, its scroller
-  needs 78px more than it has, so the table scrolls sideways inside its
-  box on a phone. Nothing caught it, because the only instrument pointed
-  at it was the page probe, and the page probe excuses exactly this.
-  Spec 0026 declined a fourth column to protect a width its own
-  five-column table was already over. FR-9's wrapping requirement brings
-  that table to **0** as well, so AC-1 covers all three tables and this
-  spec either fixes the defect or fails loudly. The criterion is not
-  widened to let the cross table pass.
+  **Two pre-existing defects this makes visible, and fixes.** Neither
+  was named by any requirement, and both were hidden by the same
+  exemption — the only instrument ever pointed at them was the page
+  probe, and the page probe excuses exactly this. Measured on the
+  long-name fixture, each table against its own `.scroller` at 390:
+
+  | Table                                   | Before | After |
+  | --------------------------------------- | ------ | ----- |
+  | `Cross certificates` (5 col, spec 0026) | 78     | **0** |
+  | `/ca`'s hierarchies list (5 col, 0023)  | ~160   | **0** |
+
+  So spec 0026 declined a fourth column to protect a width its own
+  five-column table was already 78 pixels over, and `/ca` — the page
+  that argument was about — was over by twice that and had been since 0023. FR-9's wrapping requirement brings both to zero. AC-1 covers all
+  three `.rows` tables for that reason, and the criterion is not widened
+  to let either of them pass.
+
+  (`/ca`'s figure moves with the timestamp's width and with whether the
+  page is long enough to take a scrollbar — the same one-or-two-pixel
+  caveat FR-9's table carries. It has been measured at 158 and at 160 on
+  different fixtures; what is not in doubt is the order of magnitude or
+  the sign.)
 
 - FR-17: **What changes in `ca_ui.py`, exactly.** The Interface
   Contract enumerates every key, including the ones inside the
@@ -922,7 +933,22 @@ certificate for beta's root signed by alpha's root, and a base URL set.
   the table is inside a `<div class="scroller">`. In Chrome its `<tr>`
   computes `grid-template-columns` to two tracks. On
   `GET /certs/{cert_id}` the same treatment applies and the SANs cell
-  contains one element per name.
+  contains **one element per entry of `cert.sans`** — the model's own
+  stored values, `DNS:` prefix and all, which is what that cell renders
+  today and what FR-6 means by "the values are the same values".
+
+  **"Per name" was ambiguous, and the ambiguity made this criterion and
+  AC-16 mutually unsatisfiable.** `certificates.sans_json` stores a SAN
+  prefixed (`ca/certs.py`: "the stored SAN strings (`DNS:nas.lan`,
+  ...)"), so read as "one element per name **as requested**" this
+  criterion required the page to strip the prefix — which is a change to
+  what the page says, forbidden by FR-15, and a text node lost, which
+  AC-16 forbids in the same breath. No build could satisfy both
+  readings; the first draft of this spec's own test was written to the
+  wrong one and failed both criteria for that single reason. A pair of
+  criteria that cannot both hold is the same class of defect as one that
+  cannot fail, and it is corrected here rather than worked around in the
+  test.
   _Goes red if_: the restyle drops a field — each is named separately,
   so the failure says which — or drops the `.scroller` wrapper, which
   `test_every_table_is_wrapped_in_scroller` would then also catch.
@@ -1049,6 +1075,12 @@ certificate for beta's root signed by alpha's root, and a base URL set.
     issuer names and expiries FR-5's rows carry, and FR-4's heading and
     help line. An addition that is not in the list fails.
 
+  Both SAN lists — the joined string that goes and the elements that
+  arrive — are **`cert.sans`'s own values**, prefix included (AC-7).
+  Naming them in any other form makes this criterion unsatisfiable
+  against a build that satisfies AC-7, which is exactly what happened
+  the first time.
+
   _Goes red if_: a heading is "improved" while the markup around it is
   rewritten — which fails both halves at once, since the old wording
   disappears and the new wording is in nobody's list. This is the change
@@ -1164,6 +1196,32 @@ where that requirement lives afterwards:
   `parent_id == root.id` filter, measured on the row's link. Unchanged
   in substance; re-verified against the grid `<tr>`, which is still a
   `<tr>`.
+- **`tests/test_web_ca_pages.py:381`
+  `test_ca_list_has_no_forms_and_links_each_hierarchy`** protects spec
+  0023 AC-1: _`/ca` is a list — no forms, and no per-hierarchy detail,
+  which belongs on the hierarchy's own page._ It measured that with two
+  proxies, and FR-5 supersedes one of them: an intermediate's **name**
+  no longer counts as detail, because naming every issuer is what the
+  grouped list is for — every issuance, every ACME directory and every
+  grant is named by an issuer and not by a root, and a count tells an
+  operator a number when what they wanted was a name. The assertion is
+  inverted rather than dropped, and tightened while it moves: the name
+  must now be present **as a link to the issuer's own page**, which a
+  stray mention of the string would not satisfy. The other proxy — no
+  fingerprint of any row on the list — is untouched, and it is the one
+  now carrying the requirement whole.
+- **`tests/test_web_ca.py:641`
+  `test_ca_page_hides_unavailable_actions_for_imported_root`** protects
+  that an imported root, which has no stored key, is offered no renew.
+  FR-4 moves the root's renew form into the `Renew and retire` section,
+  so the positive control follows it there; it is **not** relaxed into a
+  page-wide search, which would pass on a build that offered the form
+  somewhere else entirely. The negative gains two clauses that the move
+  makes necessary: the blocked URL is absent from the whole page (an
+  absence scoped to one block says little once the block has moved), and
+  the imported root's own `Renew and retire` section is asserted to
+  exist and to carry its retire form — so this is an absence inside a
+  block that is there, not the absence of the block.
 
 **Strengthened** — the requirement grows. Each is named with what it
 was protecting and what it could not catch:
@@ -1189,6 +1247,32 @@ was protecting and what it could not catch:
   danger probe's armed/disarmed half now runs inside `.panel-danger`;
   the assertion shape does not change and the
   `_count_danger_buttons(html) >= 1` sanity clause stays.
+
+**Retired — one, with its argument.**
+
+- **`tests/test_web_design_shell.py`, `test_only_layout_html_changed`**
+  protected spec 0027 FR-18/AC-1: _0027 touched no content template's
+  markup_. It compared every template against commit `c455922` and
+  required `layout.html` to be the only one that differed. This spec
+  edits five templates by requirement (FR-1), so it now fails on exactly
+  the change it existed to license later.
+
+  It is **retired, not re-pointed**, and the reason is that what it
+  asserted is a property of one commit rather than of the codebase. "The
+  diff from `c455922` to the 0027 merge touched one template" was true
+  when it was written, is true now, and cannot be made false by anything
+  a later commit does — so there is no regression for it to catch.
+  Re-pointing it at a second fixed pair of commits would assert only
+  that git history is immutable, which git already guarantees and which
+  no reader would think to check. Its evidence is the commit itself, and
+  a commit is better evidence than a test here, because it cannot be
+  edited into agreeing with the code.
+
+  Its second half — the formatter guard, a Jinja tag in the new file
+  that was not in the old one — is not lost with it. FR-18 restates the
+  rule with the same enforcement, and the twenty pages
+  `render_pages` fetches with `assert resp.status_code == 200` before
+  any probe runs are what a mangled `{% if %}` cannot survive.
 
 **Deleted: none.**
 

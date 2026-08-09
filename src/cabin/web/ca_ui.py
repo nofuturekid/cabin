@@ -283,13 +283,18 @@ def _page_of(row: CACertificate) -> str:
 
 def _child_view(row: CACertificate) -> dict[str, object]:
     """Spec 0026 FR-12: one row of the ``Issuers`` or ``Cross certificates``
-    table, and nothing more -- id, name, status, expiry and the link to the
-    row's own page. Deliberately **not** a thinner ``_row_view``: it calls
+    table, and nothing more -- id, name, kind, status, expiry and the link to
+    the row's own page. Deliberately **not** a thinner ``_row_view``: it calls
     neither ``leaf.constraints_of`` nor ``crl_service.distribution_url`` nor
     ``crl_service.ca_issuers_url`` nor ``acme_http.directory_url``, because
     nothing in a table row displays any of them. A page doing hidden work for
     output it no longer produces leaves the next reader unable to tell which
     of the two was the mistake.
+
+    Spec 0028 FR-17 adds ``kind`` -- six keys, where spec 0026's contract said
+    exactly five. It is ``row.kind`` and nothing else, no lookup: the Issuers
+    table renders it as a column (FR-2) and the grouped list on ``/ca`` tells
+    a root row from a child row by it (FR-5).
 
     Parses the certificate once, through ``describe_certificate`` rather than
     ``_cert_info``, for the reason ``_overview``'s docstring gives.
@@ -298,6 +303,7 @@ def _child_view(row: CACertificate) -> dict[str, object]:
     return {
         "id": row.id,
         "name": row.name,
+        "kind": row.kind,
         "status": row.status,
         "not_valid_after": ca_x509.describe_certificate(cert)["not_valid_after"],
         "href": _page_of(row),
@@ -334,19 +340,32 @@ def _overview(db: Session, rows: list[CACertificate]) -> list[dict[str, object]]
     has no `<details>`, no CRL or ACME URL and no constraints block, so it
     has no reason to call ``leaf.constraints_of`` at all. ``db`` is unused --
     kept for symmetry with ``_group``, whose sibling this is.
+
+    Spec 0028 FR-17 adds ``issuers``: one ``_child_view`` entry per
+    intermediate of that root, in ``list_cas`` order, so that ``/ca`` can draw
+    the design's grouped list (FR-5). The count and the rows are built from
+    one pass over ``rows``, because they are two statements to the reader
+    about the same hierarchy and a page whose own two statements disagree is
+    worse than a page that makes only one.
+
+    The work bound follows the component here (spec 0026 FR-12): the child
+    rows go through ``_child_view``, which makes no URL lookup and no
+    constraints parse -- the obvious shortcut, ``_row_view``, would make three
+    lookups and a parse per row for output this list does not have.
     """
     del db
-    intermediate_counts: dict[int, int] = {}
+    issuers: dict[int, list[dict[str, object]]] = {}
     cross_counts: dict[int, int] = {}
     for row in rows:
         if row.kind == "intermediate" and row.parent_id is not None:
-            intermediate_counts[row.parent_id] = intermediate_counts.get(row.parent_id, 0) + 1
+            issuers.setdefault(row.parent_id, []).append(_child_view(row))
         elif row.kind == "cross" and row.cross_of_id is not None:
             cross_counts[row.cross_of_id] = cross_counts.get(row.cross_of_id, 0) + 1
     overview: list[dict[str, object]] = []
     for row in rows:
         if row.kind != "root":
             continue
+        children = issuers.get(row.id, [])
         cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
         overview.append(
             {
@@ -354,8 +373,9 @@ def _overview(db: Session, rows: list[CACertificate]) -> list[dict[str, object]]
                 "name": row.name,
                 "status": row.status,
                 "not_valid_after": ca_x509.describe_certificate(cert)["not_valid_after"],
-                "intermediate_count": intermediate_counts.get(row.id, 0),
+                "intermediate_count": len(children),
                 "cross_count": cross_counts.get(row.id, 0),
+                "issuers": children,
             }
         )
     return overview

@@ -26,7 +26,7 @@
 </form>
 {% endif %}
 {% if row.can_retire %}
-<form method="post" action="/ca/{{ row.id }}/retire">
+<form method="post" action="/ca/{{ row.id }}/retire" class="panel-danger">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
   <p class="help">{{ retire_help }}</p>
   <label class="field-check">

@@ -12,15 +12,18 @@
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+{% if row.kind == "cross" %}
+<div class="panel">
+  <p>{{ row.signed_by }}, in place of {{ root.name }}'s own signature</p>
+  <p>{% if row.served == "default" %}<span class="tag tag-valid">serving -- default chain</span>{% elif row.served == "alternate" %}<span class="tag">serving -- alternate chain</span>{% else %}<span class="tag tag-warn">not served</span>{% if row.status == "active" %} -- outside its validity window ({{ row.not_valid_before }} to {{ row.not_valid_after }}), dropped automatically, no action needed to fall back to the short chain{% endif %}{% endif %}</p>
+</div>
+{% endif %}
+
 <div class="scroller">
-  <table>
+  <table class="facts">
     <tbody>
       <tr><th>Kind</th><td><span class="tag">{{ row.kind }}</span></td></tr>
-      <tr><th>Status</th><td><span class="tag{% if row.status == "retired" %} tag-bad{% endif %}">{{ row.status }}</span></td></tr>
-      {% if row.kind == "cross" %}
-      <tr><th>Signed by</th><td>{{ row.signed_by }}, in place of {{ root.name }}'s own signature</td></tr>
-      <tr><th>Serving</th><td>{% if row.served == "default" %}<span class="tag tag-valid">serving -- default chain</span>{% elif row.served == "alternate" %}<span class="tag">serving -- alternate chain</span>{% else %}<span class="tag tag-warn">not served</span>{% if row.status == "active" %} -- outside its validity window ({{ row.not_valid_before }} to {{ row.not_valid_after }}), dropped automatically, no action needed to fall back to the short chain{% endif %}{% endif %}</td></tr>
-      {% endif %}
+      <tr><th>Status</th><td><span class="tag{% if row.status == 'retired' %} tag-bad{% endif %}">{{ row.status }}</span></td></tr>
       <tr><th>Valid from</th><td class="nowrap">{{ row.not_valid_before }}</td></tr>
       <tr><th>Valid until</th><td class="nowrap">{{ row.not_valid_after }}</td></tr>
       <tr><th>Subject</th><td class="mono">{{ row.subject }}</td></tr>

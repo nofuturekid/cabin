@@ -11,7 +11,7 @@
 
 {% if overview %}
 <div class="scroller">
-  <table>
+  <table class="rows cols-hierarchies">
     <thead>
       <tr>
         <th>Name</th>
@@ -23,13 +23,26 @@
     </thead>
     <tbody>
       {% for root in overview %}
-      <tr>
-        <td><a href="/ca/{{ root.id }}">{{ root.name }}</a> <span class="tag">root</span></td>
-        <td><span class="tag{% if root.status == "retired" %} tag-bad{% endif %}">{{ root.status }}</span></td>
-        <td class="nowrap">{{ root.not_valid_after }}</td>
+      <tr class="row-root {% if root.status == 'retired' %} state-retired {% else %} state-active {% endif %}">
+        <td><a class="rowlink" href="/ca/{{ root.id }}">{{ root.name }}</a> <span class="tag">root</span></td>
+        <td><span class="tag{% if root.status == 'retired' %} tag-bad{% endif %}">{{ root.status }}</span></td>
+        <td>{{ root.not_valid_after }}</td>
         <td>{{ root.intermediate_count }}</td>
         <td>{{ root.cross_count }}</td>
       </tr>
+      {% for issuer in root.issuers %}
+      <tr class="row-child">
+        <td><span class="tree" aria-hidden="true">{% if loop.last %}&#9492;{% else %}&#9500;{% endif %}</span><a class="rowlink" href="{{ issuer.href }}">{{ issuer.name }}</a> <span class="tag">{{ issuer.kind }}</span></td>
+        <td><span class="tag{% if issuer.status == 'retired' %} tag-bad{% endif %}">{{ issuer.status }}</span></td>
+        <td>{{ issuer.not_valid_after }}</td>
+        <td></td>
+        <td></td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="5">This hierarchy has no issuer yet, so nothing can be signed under it.</td>
+      </tr>
+      {% endfor %}
       {% endfor %}
     </tbody>
   </table>

@@ -58,6 +58,7 @@ from test_web_design_shell import css_rules, declarations
 from cabin import web as cabin_web
 from cabin.acme import http as acme_http
 from cabin.app import create_app
+from cabin.ca import certs as ca_certs
 from cabin.ca import crl as crl_service
 from cabin.ca import leaf as leaf_mod
 from cabin.ca import service as ca_service
@@ -1800,12 +1801,29 @@ def test_post_renew_on_a_retired_row_is_refused_server_side(
 
 
 def _issue_leaf(client: TestClient, cfg: Config, fix: Fixture) -> tuple[str, list[str]]:
-    """One certificate under alpha's constrained issuer, and its SANs.
+    """One certificate under alpha's constrained issuer, and **the SAN values
+    its page renders**.
+
+    Not the names as posted. `certificates.sans_json` stores a SAN in its
+    prefixed form -- `ca/certs.py`'s `sans` property is documented as "the
+    stored SAN strings (`DNS:nas.lan`, ...)" -- and both `cert_detail.html`'s
+    old comma-joined cell and FR-6's new one-element-per-name cell render
+    exactly those values, unchanged. A fixture that handed back the posted
+    names would have the test compare the page against a string that was
+    never on it; that is what the first draft of this helper did, and it
+    failed AC-7 and AC-16 in two different-looking ways for one reason.
+
+    The values are read back from the model rather than rebuilt by gluing a
+    `DNS:` prefix on, because FR-6's requirement is "the values are the same
+    values", not "the values are prefixed" -- if the model's own form ever
+    changes, this follows it and the criterion still means what it says. The
+    correspondence with what was actually asked for is asserted here instead,
+    so the fixture cannot drift into proving nothing.
 
     Every name is under `PERMITTED`, because alpha's intermediate carries a
     name constraint and an issuance outside it is refused at the door.
     """
-    sans = [
+    requested = [
         f"leaf.{PERMITTED}",
         f"alt-one.{PERMITTED}",
         f"alt-two.{PERMITTED}",
@@ -1813,8 +1831,8 @@ def _issue_leaf(client: TestClient, cfg: Config, fix: Fixture) -> tuple[str, lis
     issued = client.post(
         "/certs/issue",
         data={
-            "subject_cn": sans[0],
-            "sans": "\n".join(sans),
+            "subject_cn": requested[0],
+            "sans": "\n".join(requested),
             "issuer_id": fix.alpha_int,
             "profile": "server",
             "key_type": "ecdsa-p256",
@@ -1823,7 +1841,20 @@ def _issue_leaf(client: TestClient, cfg: Config, fix: Fixture) -> tuple[str, lis
         },
     )
     assert issued.status_code == 303, issued.text
-    return issued.headers["location"], sans
+    location = issued.headers["location"]
+
+    db = _db(cfg)
+    try:
+        row = ca_certs.get_certificate(db, int(location.rsplit("/", 1)[1]))
+        assert row is not None, f"no certificate row behind {location}"
+        stored = row.sans
+    finally:
+        db.close()
+
+    assert [value.split(":", 1)[-1] for value in stored] == requested, (
+        f"the stored SANs are not the names that were asked for: {stored}"
+    )
+    return location, stored
 
 
 # === AC-1: the Kind column exists and costs no width ======================

@@ -76,6 +76,14 @@
   --flat-fg: #b2b6ca;
   --flat-line: #3f424d;
 
+  /* The 2px left edge bar on a hierarchy-list root row (brief section 1's
+     paragraph after the status table). The design draws three states and
+     cabin ships two: `retired` reuses --line-control, which is the design's
+     own value for it, and `expired` is not shipped at all -- a CA row is
+     `active` or `retired`, and inventing a third state behind a colour would
+     be a content change. */
+  --bar-active: #3f7d55;
+
   /* note grounds */
   --note-warn-bg: #1e1c17;
   --note-bad-bg: #1e1a1d;
@@ -152,6 +160,8 @@
     --flat-bg: #e9eaf2;
     --flat-fg: #454a5f;
     --flat-line: #c9ccda;
+
+    --bar-active: #2f6b47;
 
     --note-warn-bg: #fbf5e6;
     --note-bad-bg: #fdeef0;
@@ -681,11 +691,6 @@ thead + tbody tr:first-child th {
   border-top: 0;
 }
 
-tbody tr:hover td,
-tbody tr:hover th {
-  background: var(--surface-hover);
-}
-
 td a,
 th a {
   color: var(--accent-text);
@@ -740,6 +745,226 @@ th a:hover {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* ---- the design's lists: a <table> whose rows are grids (spec 0028) ---- */
+
+/* The design has no <table> at all -- every list in the prototype is a stack
+   of <div>s sharing one grid-template-columns -- and the brief's own advice
+   for real HTML (section 6.2) is to reproduce them as <table> with
+   display:grid on <tr>. That is what ships, so every element and every
+   attribute stays: the markup is still a table to a screen reader, .scroller
+   still wraps it, and spec 0015 FR-4's check passes unchanged. <th> and <td>
+   need no rule of their own -- a grid item's display:table-cell is blockified
+   by CSS Display section 2.7. */
+table.rows,
+table.facts {
+  display: block;
+}
+
+table.rows thead,
+table.rows tbody,
+table.facts tbody {
+  display: block;
+}
+
+table.rows tr,
+table.facts tr {
+  display: grid;
+}
+
+/* On a .rows table the *row* is the box: it carries the design's 12px inset,
+   its 12px column gap and the rule between rows, and the cells carry only
+   their own vertical padding -- which is what makes the rule run the full
+   width of the row as the design draws it (brief section 6.2). */
+.rows tr {
+  column-gap: 12px;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.rows thead th {
+  padding: 7px 0;
+  /* No cell of a list row may refuse to wrap. The body cells are FR-9's
+     subject -- a 25-character timestamp needs 170px and cannot break -- and
+     the last column's *heading* turns out to be the same defect one row up:
+     with `thead th`'s nowrap left in place, `Cross certificates` hangs out of
+     the grouped list's own box by 41px at 390. Measured, both ways. */
+  white-space: normal;
+}
+
+.rows tbody tr {
+  /* The stretched link of the name cell is drawn against this box. Without it
+     the overlay is drawn against the page, covers the whole table, and the
+     last row wins every click -- a defect no markup assertion sees. */
+  position: relative;
+  border-top: 1px solid var(--rule-row);
+}
+
+.rows thead + tbody tr:first-child {
+  border-top: 0;
+}
+
+.rows tbody td {
+  padding: 10px 0;
+  border-top: 0;
+}
+
+/* A per-root empty state is one sentence, not the first cell of five. */
+.rows tbody td[colspan] {
+  grid-column: 1 / -1;
+}
+
+/* Hover is the row tint "only where the row is clickable" (brief section
+   6.2) -- the rule cabin's global tbody tr:hover did not honour, since it
+   also lit up the certificate page's fact rows, which go nowhere. */
+.rows tbody tr:has(.rowlink):hover {
+  background: var(--surface-hover);
+}
+
+/* FR-3's focus treatment is *additive*. Spec 0027 FR-15 forbids `outline:
+   none` anywhere, so the anchor keeps its own 2px ring and the row gains the
+   design's own "this row is the one" idiom (brief section 3, the active nav
+   item): the accent fill and a 2px inset accent bar. The hover tint cannot
+   carry it -- a root row is already drawn in that tint, so a focused root row
+   would look exactly like an unfocused one. */
+.rows tbody tr:has(.rowlink:focus-visible) {
+  background: var(--accent-tint);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* The column templates, one class per screen (brief sections 5.7 and 5.8).
+   Every track is minmax(0, Nfr): a bare Nfr is minmax(auto, Nfr), whose
+   minimum is the content's, and the design's own form bounds each track to
+   the container whatever the cell ends up holding. */
+.cols-hierarchies tr {
+  grid-template-columns:
+    minmax(0, 2fr) minmax(0, 0.8fr) minmax(0, 1fr)
+    minmax(0, 0.9fr) minmax(0, 1.1fr);
+}
+
+.cols-issuers tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(0, 1.1fr);
+}
+
+.cols-crosses tr {
+  grid-template-columns:
+    minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.8fr)
+    minmax(0, 0.9fr) minmax(0, 1fr);
+}
+
+/* The stretched link (brief section 9.4): the whole row is the target, the
+   name cell is still the <a>, and no JavaScript is involved. Exactly one link
+   may sit in such a row, or the overlay covers the others. The overlay starts
+   one pixel above the padding box so that it covers the row's own top border
+   as well -- the row an operator sees is the border box. */
+.rowlink::after {
+  content: "";
+  position: absolute;
+  inset: -1px 0 0;
+}
+
+/* ---- the grouped list (brief sections 5.7 and 6.3) ---- */
+
+/* The design draws each group as one rounded box built from per-row borders.
+   cabin's .scroller already is that box (spec 0015 FR-5) and already wraps the
+   whole table; nesting a second border inside it would draw two. The root
+   row's fill and its status bar are what separate one group from the next.
+   Nothing is dimmed with opacity (FR-14): it composites after
+   getComputedStyle has reported a colour, so a dimmed row passes the contrast
+   probe while being a third less legible than the probe believes. */
+.row-root {
+  background: var(--surface-hover);
+}
+
+.row-root td:first-child a {
+  font-weight: 600;
+}
+
+.state-active {
+  box-shadow: inset 2px 0 0 var(--bar-active);
+}
+
+.state-retired {
+  box-shadow: inset 2px 0 0 var(--line-control);
+}
+
+.row-child {
+  font-size: 0.75rem;
+}
+
+.row-child td:first-child {
+  padding-left: 14px;
+}
+
+/* Decoration, and the only user of that exemption (FR-13): the indentation,
+   the kind tag and the position under the root all carry the structure, so
+   the glyph draws a line and is hidden from assistive technology. */
+.tree {
+  font-family: var(--mono);
+  color: var(--accent-deep);
+  margin-right: 6px;
+}
+
+/* ---- the definition grid (brief section 6.14) ---- */
+
+/* Here the *cell* is the box and not the row: each carries its own 9px 0
+   padding and its own rule. That is why .facts is a second treatment rather
+   than another column set of .rows. It keeps its .scroller, which the design's
+   fact grid has not got -- a table is the one thing wide enough to push a page
+   sideways, and spec 0015 FR-4 wraps every one of them. */
+.facts tr {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.facts tbody th,
+.facts tbody td {
+  padding: 9px 0;
+}
+
+.facts tbody th {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.facts tbody td {
+  font-size: 0.78125rem;
+}
+
+/* The design's 5.4 sets the value column 24px in; its 5.9 leaves it flush. */
+.facts-indent tbody td {
+  padding-left: 24px;
+}
+
+/* ---- panels (brief section 6.9) ---- */
+
+.panel {
+  margin: 14px 0;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+}
+
+.panel > :first-child {
+  margin-top: 0;
+}
+
+.panel > :last-child {
+  margin-bottom: 0;
+}
+
+/* The same box in the design's deeper red, around the one control on a page
+   that cannot be undone. It is a wrapper and not a new parent: the
+   confirmation checkbox spec 0024 FR-9 requires stays inside the <form> its
+   button is in, which is what arms the button. */
+.panel-danger {
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--dead-line);
+  border-radius: var(--r-panel);
+  max-width: 520px;
 }
 
 /* ---- status tags ---- */

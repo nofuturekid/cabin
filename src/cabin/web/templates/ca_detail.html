@@ -23,7 +23,6 @@
   <div>
     <p><a href="/ca/{{ root.id }}.pem">root.pem</a> <span class="help mono">{{ root.subject }} · {{ root.fingerprint }}</span></p>
     {{ constraints_block(root) }}
-    {{ renew_retire(root, "Retiring this root also retires every intermediate under it: certificates already issued keep validating until they expire, but nothing new can be signed under this hierarchy.") }}
   </div>
 </div>
 
@@ -35,10 +34,11 @@
   <div>
     {% if group.intermediates %}
     <div class="scroller">
-      <table>
+      <table class="rows cols-issuers">
         <thead>
           <tr>
             <th>Name</th>
+            <th>Kind</th>
             <th>Status</th>
             <th>Expires</th>
           </tr>
@@ -46,9 +46,10 @@
         <tbody>
           {% for i in group.intermediates %}
           <tr>
-            <td><a href="{{ i.href }}">{{ i.name }}</a></td>
-            <td><span class="tag{% if i.status == "retired" %} tag-bad{% endif %}">{{ i.status }}</span></td>
-            <td class="nowrap">{{ i.not_valid_after }}</td>
+            <td><a class="rowlink" href="{{ i.href }}">{{ i.name }}</a></td>
+            <td><span class="tag">{{ i.kind }}</span></td>
+            <td><span class="tag{% if i.status == 'retired' %} tag-bad{% endif %}">{{ i.status }}</span></td>
+            <td>{{ i.not_valid_after }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -82,7 +83,7 @@
   </div>
   <div>
     <div class="scroller">
-      <table>
+      <table class="rows cols-crosses">
         <thead>
           <tr>
             <th>Name</th>
@@ -95,11 +96,11 @@
         <tbody>
           {% for x in group.cross_certificates %}
           <tr>
-            <td><a href="{{ x.href }}">{{ x.name }}</a></td>
+            <td><a class="rowlink" href="{{ x.href }}">{{ x.name }}</a></td>
             <td>{{ x.signed_by }}</td>
-            <td><span class="tag{% if x.status == "retired" %} tag-bad{% endif %}">{{ x.status }}</span></td>
+            <td><span class="tag{% if x.status == 'retired' %} tag-bad{% endif %}">{{ x.status }}</span></td>
             <td>{% if x.served == "default" %}<span class="tag tag-valid">default</span>{% elif x.served == "alternate" %}<span class="tag">alternate</span>{% else %}<span class="tag tag-warn">not served</span>{% endif %}</td>
-            <td class="nowrap">{{ x.not_valid_after }}</td>
+            <td>{{ x.not_valid_after }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -179,6 +180,18 @@
     {% else %}
     <p class="note">No other root on this instance can sign this one -- cross-signing needs a different root with a stored key and a path_length of at least 2. Widen path_length the next time a root is created, or run two hierarchies side by side instead.</p>
     {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if nav.ca_admin and (root.can_renew or root.can_retire) %}
+<div class="section">
+  <div>
+    <h2>Renew and retire</h2>
+    <p class="help">The two things that can be done to this certificate from here.</p>
+  </div>
+  <div>
+    {{ renew_retire(root, "Retiring this root also retires every intermediate under it: certificates already issued keep validating until they expire, but nothing new can be signed under this hierarchy.") }}
   </div>
 </div>
 {% endif %}

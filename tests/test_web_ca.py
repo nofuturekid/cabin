@@ -677,16 +677,26 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     # -- its own <h2> (spec 0023's per-hierarchy page) is what is actually
     # scoped to the section this test measures.
     generated_window = _row(generated_html, "<h2>generated Root CA</h2>", class_name="section")
-    imported_window = _row(imported_html, "<h2>Imported Root CA</h2>", class_name="section")
     # spec 0024 FR-8: "Add intermediate" is its own headed section now, a
     # sibling of the root's rather than nested inside it -- scoped to that
     # section on its own, not to the root's.
     generated_create_window = _row(generated_html, "Add intermediate", class_name="section")
+    # spec 0028 FR-4: the root's renew and retire forms are their own headed
+    # section, last on the page, rather than the tail of the root's identity
+    # block. The requirement here has not moved -- an imported root offers no
+    # renew -- so the scoping follows the form rather than becoming a
+    # page-wide search, which would pass on a build that offered the form
+    # somewhere else entirely.
+    generated_renew_window = _row(generated_html, "<h2>Renew and retire</h2>", class_name="section")
+    imported_renew_window = _row(imported_html, "<h2>Renew and retire</h2>", class_name="section")
 
     create_intermediate_url = f"/ca/{generated_root.id}/intermediate"
     renew_url = f"/ca/{generated_root.id}/renew"
     assert create_intermediate_url in generated_create_window
-    assert renew_url in generated_window
+    assert renew_url in generated_renew_window
+    assert renew_url not in generated_window, (
+        "the renew form is still inside the root's identity section (spec 0028 FR-4)"
+    )
 
     blocked_create_url = f"/ca/{imported_root.id}/intermediate"
     blocked_renew_url = f"/ca/{imported_root.id}/renew"
@@ -694,7 +704,14 @@ def test_ca_page_hides_unavailable_actions_for_imported_root(
     # included -- is omitted rather than merely emptied.
     assert "Add intermediate" not in imported_html
     assert blocked_create_url not in imported_html
-    assert blocked_renew_url not in imported_window
+    assert blocked_renew_url not in imported_renew_window
+    # ...and nowhere else on the page either: the section moved, so an
+    # absence scoped to one block no longer says much on its own.
+    assert blocked_renew_url not in imported_html
+    # The section itself is there and does carry the imported root's other
+    # control, so this is an absence inside a block that exists rather than
+    # the absence of the block.
+    assert f"/ca/{imported_root.id}/retire" in imported_renew_window
 
 
 # --- AC-11: root path_length is bounded, and the default is unchanged ------

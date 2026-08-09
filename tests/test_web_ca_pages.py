@@ -392,14 +392,24 @@ def test_ca_list_has_no_forms_and_links_each_hierarchy(client: TestClient, cfg: 
     assert f'href="/ca/{alpha_root}"' in html
     assert f'href="/ca/{beta_root}"' in html
 
-    # Intermediates never surface on the list page: the overview only ever
-    # carries a count. Checking for "alpha Intermediate CA" would be dead --
-    # spec 0024 FR-1 dropped that composed suffix, so `_seed_two_hierarchies`
-    # names the row "alpha intermediate" and that string never existed on
-    # this page under any implementation. Check the real, still-moving
-    # value instead: the intermediate's own name and fingerprint.
-    assert "alpha intermediate" not in html
-    assert "beta intermediate" not in html
+    # Spec 0023 AC-1 asserted that an intermediate's *name* never surfaces
+    # here, as one of two proxies for the requirement it actually protects:
+    # `/ca` is a list, and per-hierarchy detail lives on the hierarchy's own
+    # page. Spec 0028 FR-5 supersedes that half -- the grouped list names
+    # every issuer on purpose, because every issuance, every ACME directory
+    # and every grant is named by an issuer and not by a root, and the count
+    # told an operator a number when what they wanted was a name. So the
+    # assertion is inverted rather than deleted: the name is required, and it
+    # is required as a *link to the issuer's own page*, which is the form
+    # FR-5 gives it and which a stray mention of the string would not
+    # satisfy.
+    assert f'href="/ca/{alpha_root}/issuer/{alpha_int}"' in html
+    assert f'href="/ca/{beta_root}/issuer/{beta_int}"' in html
+    assert "alpha intermediate" in html
+    assert "beta intermediate" in html
+    # The other proxy is untouched and is the one still carrying the
+    # requirement: a *detail* of any row -- the thing that belongs on the
+    # hierarchy's own page -- must not appear on the list.
     alpha_fingerprint = _fingerprint(_cert_pem_of(cfg, alpha_root))
     beta_fingerprint = _fingerprint(_cert_pem_of(cfg, beta_root))
     alpha_int_fingerprint = _fingerprint(_cert_pem_of(cfg, alpha_int))

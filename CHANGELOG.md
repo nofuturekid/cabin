@@ -405,6 +405,30 @@ certificate under it, not only the ones the key holder made.
   Sans is replaced by Inter, vendored under `static/fonts/` with its own SIL
   OFL licence and fetched from no CDN, as before; IBM Plex Mono stays,
   trimmed to the one weight the stylesheet actually references.
+- Spec 0028 (detail-pages): the CA pages take the design's own arrangement.
+  `/ca` becomes a **grouped list** — every root with its issuers indented
+  under it, a tree glyph, the kind as a tag beside the name and the issuer's
+  own status in the Status column — so an operator reaches an issuer without
+  opening its root first, which is what every issuance, every ACME directory
+  and every grant is actually named by. The hierarchy page's `Issuers` table
+  gains a **Kind** column, both its tables become clickable by the whole row
+  rather than by the name alone (the name cell is still the link, and the
+  focus treatment is added to the link's own ring rather than replacing it),
+  and the root's **renew and retire move into a section of their own, last on
+  the page**, so the page's one irreversible control is no longer read beside
+  the root's subject and fingerprint. An issuer's facts become a definition
+  grid, and a cross certificate's "signed by X, in place of Y's own
+  signature" sentence becomes a banner above them instead of two cells of a
+  table. Every table stays a `<table>` inside its `.scroller`, with the
+  design's column templates applied through `display: grid` on `<tr>`.
+  **Not one sentence on any of these pages changed.** A defect shipped with
+  the cross-certificate table is fixed on the way past: it overflowed its own
+  box by 78px at 390px wide, because the expiry cell was marked `nowrap` and
+  a 25-character timestamp cannot be made narrower than 170px — no page-level
+  check could see it, since a scroller exists precisely to hold what does not
+  fit. Both widened tables now fit at 390 with nothing to scroll. No route,
+  guard, form field, redirect, audit event, schema, API, MCP or ACME
+  behaviour changes.
 
 ### Changed
 
