@@ -28,6 +28,7 @@ import subprocess
 import threading
 from collections.abc import Iterator
 from functools import partial
+from html import unescape
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -433,13 +434,20 @@ _ERROR_RE = re.compile(r'<div class="error">(.*?)</div>', re.S)
 def _error_box(html: str) -> tuple[str, list[str]] | None:
     """The text and the `href`s of the page's `.error` box, or `None` when
     there is none -- used both to read an error's own message (AC-2..AC-4)
-    and to tell two different error states apart (AC-7/AC-8)."""
+    and to tell two different error states apart (AC-7/AC-8).
+
+    ``text`` is unescaped as well as detagged: Jinja autoescapes the error
+    message it renders (an apostrophe becomes `&#39;`), and a caller
+    matching against the raw sentence -- e.g. cryptography's own
+    "Attribute's length must be ..." -- would otherwise never see it match,
+    whatever the message actually says.
+    """
     match = _ERROR_RE.search(html)
     if match is None:
         return None
     inner = match.group(1)
     hrefs = re.findall(r'href="([^"]*)"', inner)
-    text = re.sub(r"<[^>]+>", "", inner)
+    text = unescape(re.sub(r"<[^>]+>", "", inner))
     return text, hrefs
 
 
@@ -1389,6 +1397,48 @@ def test_fixtures_name_rows_the_way_production_does(
         assert len(ca_service.active_issuers(db)) == 1
     finally:
         db.close()
+
+
+# === FR-13: an intermediate may not carry its parent root's exact subject ==
+
+
+def test_intermediate_cannot_carry_the_root_own_exact_subject(
+    client: TestClient, cfg: Config
+) -> None:
+    """FR-13, reached the way an operator actually would -- through
+    ``POST /ca/{root_id}/intermediate`` -- rather than through
+    ``ca_fixtures.make_hierarchy``, which names its two rows apart on
+    purpose and writes them straight through the ORM, bypassing this
+    refusal by construction (see the fixture-naming test above). Dropping
+    the composed " Root CA"/" Intermediate CA" suffixes (spec 0024 FR-1)
+    made it possible to type the root's name a second time and get an
+    intermediate with the identical subject DN; the guard at
+    ``ca/service.py:598-606`` exists because that state let `openssl`
+    silently pick the wrong one of two identically-named certificates while
+    building a path -- a real bug, not a cosmetic one.
+
+    Checked by effect, not by the guard's message: with the guard in
+    place the row count must not move and the request must not redirect;
+    with it removed the same request would succeed exactly like the
+    differently-named control below.
+    """
+    _setup_superadmin(client)
+    assert _create_root(client, cfg, name="Acme Root CA").status_code == 303
+    root_id = _last_root_id(cfg)
+    before = _row_count(cfg)
+
+    collision = _create_intermediate(client, cfg, root_id, name="Acme Root CA")
+    assert collision.status_code == 400
+    assert _row_count(cfg) == before
+    action = f"/ca/{root_id}/intermediate"
+    assert action in _form_actions(collision.text)
+
+    # control: a differently-named intermediate under the same root succeeds,
+    # so the refusal above is about the name collision and not some other
+    # reason intermediate creation might fail on this root.
+    ok = _create_intermediate(client, cfg, root_id, name="Acme Issuing CA")
+    assert ok.status_code == 303
+    assert _row_count(cfg) == before + 1
 
 
 # === AC-17 (0015, re-run): no page scrolls sideways =========================

@@ -382,13 +382,22 @@ def test_ca_list_has_no_forms_and_links_each_hierarchy(client: TestClient, cfg: 
     assert f'href="/ca/{alpha_root}"' in html
     assert f'href="/ca/{beta_root}"' in html
 
-    assert "alpha Intermediate CA" not in html
-    assert "beta Intermediate CA" not in html
+    # Intermediates never surface on the list page: the overview only ever
+    # carries a count. Checking for "alpha Intermediate CA" would be dead --
+    # spec 0024 FR-1 dropped that composed suffix, so `_seed_two_hierarchies`
+    # names the row "alpha intermediate" and that string never existed on
+    # this page under any implementation. Check the real, still-moving
+    # value instead: the intermediate's own name and fingerprint.
+    assert "alpha intermediate" not in html
+    assert "beta intermediate" not in html
     alpha_fingerprint = _fingerprint(_cert_pem_of(cfg, alpha_root))
     beta_fingerprint = _fingerprint(_cert_pem_of(cfg, beta_root))
+    alpha_int_fingerprint = _fingerprint(_cert_pem_of(cfg, alpha_int))
+    beta_int_fingerprint = _fingerprint(_cert_pem_of(cfg, beta_int))
     assert alpha_fingerprint not in html
     assert beta_fingerprint not in html
-    _ = alpha_int, beta_int  # not shown on the list; ids only used above
+    assert alpha_int_fingerprint not in html
+    assert beta_int_fingerprint not in html
 
 
 # === AC-9: no hierarchy at all is not a dead end, and is admin/viewer aware
@@ -421,26 +430,38 @@ def test_ca_list_empty_state_links_for_admin_and_not_for_viewer(
 
 def test_ca_detail_shows_only_its_own_hierarchy(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
-    alpha_root, _alpha_int, beta_root, _beta_int = _seed_two_hierarchies(cfg)
+    alpha_root, alpha_int, beta_root, beta_int = _seed_two_hierarchies(cfg)
     alpha_root_fingerprint = _fingerprint(_cert_pem_of(cfg, alpha_root))
     beta_root_fingerprint = _fingerprint(_cert_pem_of(cfg, beta_root))
+    alpha_int_fingerprint = _fingerprint(_cert_pem_of(cfg, alpha_int))
+    beta_int_fingerprint = _fingerprint(_cert_pem_of(cfg, beta_int))
 
     alpha_page = client.get(f"/ca/{alpha_root}")
     assert alpha_page.status_code == 200
     assert "alpha" in alpha_page.text
     assert alpha_root_fingerprint in alpha_page.text
+    assert alpha_int_fingerprint in alpha_page.text
     # spec 0024 FR-1: alpha and beta's rows are no longer distinguished by a
     # " Intermediate CA" suffix (both hierarchies are literally named just
     # "alpha"/"beta" now), so cross-hierarchy isolation is checked against
-    # beta's own fingerprint -- unambiguous, unlike a name that could now
-    # collide -- rather than a marker string that no longer exists.
+    # beta's own fingerprints -- unambiguous, unlike a name that could now
+    # collide -- rather than a marker string that no longer exists. The root
+    # fingerprint alone is not a sufficient check: `_group` takes its root
+    # row straight from its own `root` argument, so a bug that drops the
+    # `parent_id == root.id` filter on `_group`'s intermediate list would
+    # leak beta's INTERMEDIATE onto alpha's page while beta's root
+    # fingerprint stayed correctly absent -- only the intermediate
+    # fingerprint (rendered per row at ca_detail.html) actually moves.
     assert beta_root_fingerprint not in alpha_page.text
+    assert beta_int_fingerprint not in alpha_page.text
 
     beta_page = client.get(f"/ca/{beta_root}")
     assert beta_page.status_code == 200
     assert "beta" in beta_page.text
     assert beta_root_fingerprint in beta_page.text
+    assert beta_int_fingerprint in beta_page.text
     assert alpha_root_fingerprint not in beta_page.text
+    assert alpha_int_fingerprint not in beta_page.text
 
 
 def test_ca_detail_404_for_a_non_root_id(client: TestClient, cfg: Config) -> None:
