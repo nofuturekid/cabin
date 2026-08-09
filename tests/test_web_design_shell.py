@@ -173,6 +173,7 @@ def tokens_in(block: str) -> dict[str, str]:
 
 def dark_tokens(text: str) -> dict[str, str]:
     """The default ``:root`` -- which is the dark scheme now (FR-8)."""
+    text = strip_comments(text)
     return tokens_in(token_block(text, text.index(":root")))
 
 

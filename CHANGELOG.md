@@ -395,6 +395,16 @@ certificate under it, not only the ones the key holder made.
   confirmation ticked re-renders that same page rather than the hierarchy
   page that no longer carries the form. No stylesheet change and no schema,
   API, MCP or ACME change.
+- Spec 0027 (shell-and-tokens): cabin's interface now follows a design drawn
+  for it — dark by default, with a light counterpart that activates from the
+  browser's own `prefers-color-scheme: light`, not a switch inside cabin.
+  **Nothing about what any page does has changed**: this step rewrites
+  `cabin.css` and adds one wrapper and one id to `layout.html`'s shell, and
+  touches no content template's markup, so every form, table and action is
+  exactly where and what it was, wearing the new chrome around it. Public
+  Sans is replaced by Inter, vendored under `static/fonts/` with its own SIL
+  OFL licence and fetched from no CDN, as before; IBM Plex Mono stays,
+  trimmed to the one weight the stylesheet actually references.
 
 ### Changed
 
