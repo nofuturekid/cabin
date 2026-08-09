@@ -177,6 +177,23 @@ future one.
   shared helper modules (`ca_fixtures.py`, `live_server.py`,
   `acme_client.py`), so this introduces no new convention.
 
+  `_DANGER_PROBE` moves with it. It too exists in two copies that are
+  byte-identical at `c455922` — `test_ca_issuer_pages.py:662` and
+  `test_ca_names_and_actions.py:546` — and FR-24 gives it a second
+  half.
+
+  > **Correction (test-authoring):** the list above named only the
+  > overflow walker, so the second `_DANGER_PROBE` was left where it is.
+  > That is the hazard this requirement exists to remove, reproduced
+  > inside the change that removes it: FR-24's armed/disarmed assertion
+  > would be applied to the issuer-page copy and the
+  > `test_ca_names_and_actions.py` copy would go on checking the old
+  > half alone, so the pages it covers would report the confirmation
+  > treatment as present while never measuring that it is visible.
+  > Naming it here is the whole correction — no acceptance criterion
+  > changes, and AC-4 keeps anchoring on `function container(`, which is
+  > the overflow walker's own signature.
+
 - FR-3: **What the repaired walker does.** The `scrollable(el)` helper —
   which walks an element's ancestors and returns true if any has a
   computed `overflow-x` of `auto`, `scroll` or `hidden` — is **deleted**
@@ -184,16 +201,35 @@ future one.
 
   ```js
   function excused(el) {
-    return el.closest(".scroller") !== null;
+    return (
+      el.parentElement !== null &&
+      el.parentElement.closest(".scroller") !== null
+    );
   }
   ```
 
-  An element is skipped only when it sits inside the one construct
-  spec 0015 FR-4 permits to scroll horizontally. Computed style is no
+  An element is skipped only when it sits **inside** the one construct
+  spec 0015 FR-4 permits to scroll horizontally. The `.scroller` itself
+  is not excused and is still measured against its own container:
+  the exemption is for what a scroller may hold, not for where a
+  scroller may sit. Computed style is no
   longer consulted for this decision, because computed style is exactly
   what the design's shell falsifies: `overflow:hidden` on an ancestor
   now means "this overflow is invisible", which is the strongest reason
   to report it, not to excuse it.
+
+  > **Correction (test-authoring):** the first form of this helper was
+  > `return el.closest(".scroller") !== null`, which is wrong in one
+  > direction that matters. `closest()` tests the element itself before
+  > its ancestors, so a `.scroller` pushed out of its own grid cell —
+  > wider than the column it sits in, which is the ordinary way a
+  > `.scroller` breaks a page — excused itself and was never reported.
+  > The walker being replaced examined ancestors only and would have
+  > caught it. Written as it stood, this spec would have shipped a
+  > coverage regression while claiming to repair the probe, in the one
+  > test the Context section calls the suite's most valuable. Hence
+  > `el.parentElement.closest(…)`: descendants of a scroller are
+  > excused, the scroller itself is measured.
 
   The rest of the probe is unchanged and keeps working: `container(el)`
   still walks to the first non-inline ancestor with a non-zero width,
@@ -205,10 +241,29 @@ future one.
 - FR-4: **The probe reports what it examined, and a negative control
   proves it can still fail.** The probe's result becomes
   `{"bad": [...], "examined": N, "excused": M}` instead of a bare list.
-  Every caller asserts `bad == []` **and** `examined >= 40` per page.
-  Forty is far below any real cabin page and far above the two or three
-  elements a walker that excuses everything would leave — the exact
-  number the current walker would report once the shell lands.
+  Every caller asserts `bad == []` **and** `examined >= 20` per page.
+
+  What the floor is protecting against is a walker that excuses the
+  page, not a page that is small: once the shell lands, the pre-repair
+  walker leaves **one** element examined, because every element on
+  every page has an `overflow:hidden` ancestor and the one it cannot
+  excuse is the shell itself. So the floor has to be far above one, and
+  it must sit under the thinnest real page or it fails a build that is
+  correct. Measured on the current build with the repaired walker, the
+  thinnest pages are `/ca` (35 examined at 1440, 30 at 390) and
+  `/transfer/trust-bundle` (36 and 31); `certs`, `audit` and
+  `transfer_inventory` report 38 at 390. Twenty is two-thirds of the
+  smallest of those and twenty times the vacuous count.
+
+  > **Correction (test-authoring):** the floor above was 40, which no
+  > page can reach. It was written without measuring — the mistake this
+  > project keeps finding in other people's work — and 0027 cannot fix
+  > it by growing the pages: it adds two elements to the shell and FR-18
+  > forbids touching content markup, so `/ca` at 390 tops out around 32.
+  > A criterion no correct build can satisfy is not a stricter
+  > criterion, it is a broken one, and it would have been "fixed" under
+  > time pressure by whatever number made it green. Hence 20, derived
+  > from the measurements above and stated with what it is guarding.
 
   In addition, one test injects a `<div style="width:4000px">` into a
   rendered page and asserts the probe names it. A probe that cannot be
@@ -313,8 +368,13 @@ future one.
   applies the divergence register from that file's header (FR-1), and
   asserts that every resulting `name: value` pair appears in `:root`
   exactly. Both directions: a token in the brief and missing from
-  `:root` fails, and a colour-valued token in `:root` that the brief
-  does not name fails unless it is in the register.
+  `:root` fails, and a colour-valued token in `:root` whose provenance
+  the brief does not carry fails. Provenance is one of three things,
+  and the third is narrow on purpose: §10's block names the token, or
+  the register names the token, or — for a token §10's block does
+  **not** name at all — the brief's §1 body names the shipped value as
+  a colour of this design. AC-6 states the rule and records why the
+  third clause is there.
 
   This is the criterion that turns "follow the design as closely as
   possible" into something a suite can hold. Without it, the palette is
@@ -363,11 +423,44 @@ future one.
 - FR-12: **The light palette is derived, not inverted.** It has never
   existed as a design; the prototype is dark-only. Three rules govern
   it, and all three are checkable:
-  1. **The ground order is preserved, not mirrored.** In both schemes
-     `luminance(--surface-low) < luminance(--bg) < luminance(--surface)`.
-     A naive inversion breaks exactly this — it puts the recessed
-     surface above the page and the raised panel below it, so every
-     input looks raised and every card looks sunken.
+  1. **The three grounds stay three grounds, and each carries the text
+     drawn on it.** In both schemes `--bg`, `--surface-low` and
+     `--surface` are mutually distinct: every one of the three pairs is
+     at least **1.04:1** apart by the WCAG ratio, so no two of them can
+     collapse into one colour or into a step no screen resolves. And
+     each of the three is a ground its own text clears: every text
+     token FR-11 places on it reaches 4.5:1 there — the six body-text
+     tokens on `--bg`; `--text-faint` and `--text-hint` on
+     `--surface-low` and on `--surface-hover`; `--text-faint` and
+     `--danger-disarmed-fg` on `--surface`. AC-7 asserts the second
+     half for the dark scheme; this rule is what carries it into the
+     light one, where the values are derived rather than given.
+
+     > **Correction (test-authoring):** this rule was "the ground order
+     > is preserved, not mirrored", and it required
+     > `luminance(--surface-low) < luminance(--bg) < luminance(--surface)`
+     > in both schemes. It is false of the design it claims to
+     > describe. Recomputed from the brief's §1 anchors, which AC-6
+     > pins exactly: `--bg` #161826 has luminance 0.00964,
+     > `--surface-low` #1b1d29 has **0.01272**, `--surface` #232532 has
+     > 0.01911. The sidebar tone is _lighter_ than the page, so the
+     > dark scheme's order is `--bg` < `--surface-low` < `--surface`.
+     > The light anchors of this FR do satisfy the old wording
+     > (0.81785 < 0.89933 < 1.0), which is exactly how an assumption
+     > about how dark interfaces ought to be built survives being
+     > written down as a rule that is "checkable in both schemes". The
+     > design is the authority and the rule was the assumption, so the
+     > rule goes. Its replacement was verified against the same anchors
+     > before it was written: pairwise, dark is 1.0517
+     > (`--bg`/`--surface-low`), 1.1588 (`--bg`/`--surface`) and 1.1019
+     > (`--surface-low`/`--surface`); light is 1.0939, 1.1060 and
+     > 1.2099; and the text half holds on the tightest pair in the
+     > dark scheme, `--text-faint` on `--surface` at 4.5002:1.
+     > `--surface-hover` #1d1f2c is deliberately **not** in the
+     > distinctness clause: it is 1.0241 from `--surface-low`, being a
+     > hover tint rather than a fourth ground, and folding it in would
+     > have replaced one rule the design violates with another.
+
   2. **The text ramp stays a ramp.** In both schemes the six body-text
      tokens are strictly ordered by contrast against `--bg`:
      `--text` > `--text-2` > `--text-3` > `--text-muted` >
@@ -582,6 +675,16 @@ SFMono-Regular, Menlo, monospace` behind it as fallback rather than in
   (`test_ca_names_and_actions.py:1265`) protects spec 0024 AC-12. Today
   its forward direction covers 7 CA pages and its reverse direction is
   three hard-coded string checks (`details`, `.inline-form`, `.ca-row`).
+  - **What "used" means**, once, for both directions: the union of the
+    class names appearing in a `class="…"` attribute on any of the 19
+    rendered pages and the class names the templates carry **literally**
+    in a `class="…"` attribute. Literally means the static tokens only —
+    a `{{ … }}` or `{% … %}` fragment contributes no name, so
+    `class="tag-{{ kind }}"` contributes nothing and the interpolated
+    `tag-*` values stay out of the set. Verified against the working
+    tree: the union adds no class to the forward direction beyond the
+    two named below, and it is what makes the reverse direction's
+    residue the `tag-*` set and nothing else.
   - **Forward**: the page list becomes the same 19 screens the overflow
     probe uses. Every class in a rendered `class="…"` attribute must
     have a rule. This immediately finds two: `tile-label`
@@ -600,6 +703,27 @@ SFMono-Regular, Menlo, monospace` behind it as fallback rather than in
     interpolation in some template; any other name in the list fails the
     test. The three string checks stay as they are: they are cheap and
     they forbid specific things by name.
+
+  > **Correction (test-authoring):** "used" was left to mean the
+  > rendered pages alone, and read that way the reverse direction
+  > contradicts AC-16. Computed over the 19 pages as the fixture
+  > reaches them, `defined - used` today contains `card-narrow`,
+  > `constraints` and `error` — three of the eleven names AC-16
+  > requires to have a rule and to appear in a template. One criterion
+  > would demand the rules and the other would call them dead, and
+  > whichever an implementer resolved by hand would be an
+  > implementer's judgement standing in for the contract. The naive
+  > reading fails because a rendered page is evidence of use and its
+  > absence is not evidence of disuse: a page that only renders under a
+  > configuration the fixture does not reach — a CA with name
+  > constraints, a form that has just been rejected — makes its classes
+  > look unused, and the answer to that is to delete the rule, which
+  > breaks the page nobody's fixture visits. Hence the union: the
+  > templates say what the classes are for and the rendered pages say
+  > what a rule may not be missing for. With it the residue is exactly
+  > the `tag-*` names FR-20's exemption list describes, and FR-18's
+  > "no class without a user" still bites, because a rule written here
+  > for a component 0028 will render is in neither half of the union.
 
 - FR-21: **No colour literal outside the token blocks, and no
   `color-mix()`.** Every `#rrggbb`, `#rgb` and `rgba(` in `cabin.css`
@@ -709,14 +833,14 @@ SFMono-Regular, Menlo, monospace` behind it as fallback rather than in
 
 ### Files
 
-| File                                  | Change                                                 |
-| ------------------------------------- | ------------------------------------------------------ |
-| `src/cabin/web/static/cabin.css`      | rewritten                                              |
-| `src/cabin/web/templates/layout.html` | `.shell` wrapper, `id="main"` — nothing else           |
-| `src/cabin/web/static/fonts/`         | Inter in, Public Sans out, IBM Plex Mono unchanged     |
-| `docs/design/0027-brief.md`           | new — the checked-in brief and its divergence register |
-| `tests/probes.py`                     | new — the one definition of the overflow probe         |
-| every other template                  | **byte-identical** (FR-18, AC-1)                       |
+| File                                  | Change                                                     |
+| ------------------------------------- | ---------------------------------------------------------- |
+| `src/cabin/web/static/cabin.css`      | rewritten                                                  |
+| `src/cabin/web/templates/layout.html` | `.shell` wrapper, `id="main"` — nothing else               |
+| `src/cabin/web/static/fonts/`         | Inter in, Public Sans out, IBM Plex Mono unchanged         |
+| `docs/design/0027-brief.md`           | new — the checked-in brief and its divergence register     |
+| `tests/probes.py`                     | new — the one definition of the overflow and danger probes |
+| every other template                  | **byte-identical** (FR-18, AC-1)                           |
 
 No route, no handler, no guard, no wording, no schema, no migration, no
 audit action, no API, MCP or ACME change. No Python outside `tests/`
@@ -802,6 +926,7 @@ defined** here, because their first user arrives later: `.panel`,
 OVERFLOW_PROBE: str
 CONTRAST_PROBE: str
 FOCUS_PROBE: str
+DANGER_PROBE: str
 
 
 def serve(root: Path) -> tuple[ThreadingHTTPServer, int]: ...
@@ -846,7 +971,7 @@ and the 19 pages of `test_web_layout.py:722-743`.
 
 - AC-2: **The overflow probe can still fail, and it examines the
   page.** On a rendered `/certs` with the shell in place, at 1440: the
-  probe reports `bad == []` and `examined >= 40`. The same page with
+  probe reports `bad == []` and `examined >= 20` (FR-4). The same page with
   `<div style="width:4000px">x</div>` appended to `main` reports that
   div in `bad`. In the same test, the pre-repair walker — the
   `scrollable()` function as it stands at `c455922`, kept in the test
@@ -860,8 +985,8 @@ and the 19 pages of `test_web_layout.py:722-743`.
 - AC-3: **No page scrolls sideways, at either width, in either
   scheme.** Spec 0015 AC-1/AC-2 re-run with the repaired probe over all
   19 pages at 1440×1150 and 390×900, in both the dark and the light
-  stylesheet of FR-14: `bad == []` and `examined >= 40` for each of the
-  76 runs.
+  stylesheet of FR-14: `bad == []` and `examined >= 20` (FR-4) for each
+  of the 76 runs.
   _Goes red if_: the shell's `overflow:hidden` hides a real overflow
   rather than removing it — which is the whole reason the probe had to
   be repaired first.
@@ -887,12 +1012,46 @@ and the 19 pages of `test_web_layout.py:722-743`.
   `docs/design/0027-brief.md` and its header's palette register: every
   token the brief names appears in `:root` with the register's value
   where there is one and the brief's value where there is not; and
-  every colour-valued token in `:root` is named by one of the two. In
-  the same test the palette register has exactly three rows, each
-  naming a token, both values and a non-empty reason.
+  every colour-valued token in `:root` has its provenance in the file,
+  which means one of exactly three things:
+  1. §10's block names the token — the value must then match, with the
+     register's override applied where there is one;
+  2. the register names the token;
+  3. §10's block does not name the token **at all**, and the token's
+     shipped value appears verbatim as a colour literal in a table row
+     of the brief's §1.
+
+  Clause 3 cannot re-value a token §10 already names, so a nudged
+  colour still fails; and it takes the value from §1's own inventory of
+  what this design is made of, which is where the colours actually come
+  from — §10 calls itself a "suggested token set". In the same test the
+  palette register has exactly three rows, each naming a token, both
+  values and a non-empty reason.
   _Goes red if_: a colour is nudged in the stylesheet without the file
   being told, or the register is used to launder an undocumented
   change.
+
+  > **Correction (test-authoring):** clause 3 did not exist, and
+  > without it `--danger-disarmed-line: #3a2b30` — which the Interface
+  > Contract requires — cannot legally be in the stylesheet: §10's
+  > block omits it, and the register is pinned at exactly three rows,
+  > which are FR-11's three lifts. The brief does carry the colour, in
+  > §1's text table: "`#3a2b30` — Disarmed danger-button border, paired
+  > with `#6d5259`". It is the only token in the Interface Contract's
+  > new-token list that §10 omits, so clause 3 has exactly one user
+  > today.
+  >
+  > The alternative was to add a fourth register row, and it was
+  > rejected. The register is a **divergence** register — token, brief
+  > value, shipped value, reason — and this token does not diverge:
+  > it ships the brief's own value. A row saying "#3a2b30 → #3a2b30,
+  > reason: §10 forgot it" records a change that was not made, and it
+  > turns the register from the short list of departures a reviewer can
+  > read into the place where undocumented colours are parked, which is
+  > what the exactly-three-rows pin exists to prevent. The point of
+  > AC-6 is that no colour enters the stylesheet without provenance;
+  > §1 is provenance, and clause 3 says so without widening what the
+  > register may hold.
 
 - AC-7: **The three lifted colours reach 4.5:1 and the unlifted ones
   are exempt for a checkable reason.** Computed with the WCAG 2.x
@@ -908,17 +1067,23 @@ and the 19 pages of `test_web_layout.py:722-743`.
   ones that catch it.
 
 - AC-8: **The light palette is derived, not inverted.** In both
-  schemes: `luminance(--surface-low) < luminance(--bg) <
-luminance(--surface)`; the six body-text tokens are strictly ordered by
-  contrast against `--bg`; and each light text token's ratio against
-  its light ground is ≥ its dark counterpart's against the dark one. In
-  the same test `--accent` ≥ 3:1 and `--accent-text` ≥ 4.5:1 against
-  `--bg`, `--surface-low` and `--surface` in both schemes, and the
-  light `--accent` is not `#9184d9`.
-  _Goes red if_: the light block is produced by inverting the dark one —
-  the ground order flips, and the first assertion says so in one line —
-  or if the accent is mirrored rather than re-solved, which the last
-  clause names directly.
+  schemes, by FR-12 rule 1: each of the three pairs among `--bg`,
+  `--surface-low` and `--surface` is ≥ 1.04:1 apart, and every text
+  token FR-11 places on one of those grounds reaches 4.5:1 there —
+  which is AC-7's list of pairs, re-run against the light values. By
+  rule 2, the six body-text tokens are strictly ordered by contrast
+  against `--bg`, and each light text token's ratio against its light
+  ground is ≥ its dark counterpart's against the dark one. In the same
+  test `--accent` ≥ 3:1 and `--accent-text` ≥ 4.5:1 against `--bg`,
+  `--surface-low` and `--surface` in both schemes, and the light
+  `--accent` is not `#9184d9`.
+  _Goes red if_: the light block is produced by inverting the dark one.
+  Inversion does not disturb the three grounds' distinctness — an
+  inverted palette still has three distinct tones — so what catches it
+  is the ramp clause, where dark-scheme greys inverted onto a light
+  ground come out below their dark counterparts' ratios, together with
+  AC-9's no-repeat clause. It also goes red if the accent is mirrored
+  rather than re-solved, which the last clause names directly.
 
 - AC-9: **Both schemes are complete, in both directions, with no
   repeats.** FR-13's rewritten test: every colour-valued token in the
@@ -980,11 +1145,12 @@ clientHeight + 1`, and `#main.scrollHeight > #main.clientHeight`.
   `h4 > h1` clause is what catches that.
 
 - AC-15: **The stylesheet and the templates agree, over every page, in
-  both directions.** FR-20's widened test: no class used on any of the
-  19 pages lacks a rule, no rule lacks a user, the exemption list
-  contains only `tag-*` names each of which is produced by a
-  `tag-{{ … }}` interpolation in a template, and `.tile-label` and
-  `.warning` both have rules.
+  both directions.** FR-20's widened test, over FR-20's definition of
+  "used" — the union of the 19 rendered pages and the classes the
+  templates carry literally: no class used lacks a rule, no rule lacks
+  a user, the exemption list contains only `tag-*` names each of which
+  is produced by a `tag-{{ … }}` interpolation in a template, and
+  `.tile-label` and `.warning` both have rules.
   _Goes red if_: a rule is written for a component 0028 will render but
   0027 does not — FR-18's decision — or if the exemption list is used
   to park an ordinary unused class.
