@@ -33,10 +33,14 @@ is what this spec does (FR-8), and it is what makes the rest possible:
 
 - a `<table>`'s columns size to their content and refuse to shrink,
   which is why spec 0026 argued that a fourth column costs too much at
-  390 pixels. A grid row's `minmax(0, Nfr)` tracks have a zero minimum
-  and shrink to whatever the container gives them. The fourth column
-  therefore costs layout nothing, and FR-2 is re-proved by the overflow
-  probe at 390 rather than asserted;
+  390 pixels. A grid row's `minmax(0, Nfr)` tracks do have a zero
+  minimum and do shrink to whatever the container gives them — but that
+  is **not** what makes the fourth column affordable, and the first
+  draft of this spec said it was. Shrinking the track only moves the
+  problem into the cell: what makes the column affordable is that the
+  cell's content is allowed to **wrap** (FR-9). The measurement that
+  disproved the original claim, and the measurement that replaced it,
+  are both recorded in FR-9;
 - a `<tr>` that is a grid container is a real box, so it can be
   `position: relative` and carry the stretched link of FR-3;
 - `<table>`, `<thead>`, `<tbody>`, `<th>` and `<td>` all stay, so the
@@ -116,22 +120,40 @@ two criteria failing with no argument beside them.
   | Name    | the row's name, and it is the link to its page |
   | Kind    | the row's kind, as a `.tag`                    |
   | Status  | the status tag, `tag-bad` when retired         |
-  | Expires | `not_valid_after`, `class="nowrap"`            |
+  | Expires | `not_valid_after`, **and it may wrap** (FR-9)  |
+
+  **`class="nowrap"` comes off the Expires cell**, on this table and on
+  the other two (FR-9). It is what made the fourth column unaffordable:
+  `not_valid_after` renders as a full 25-character timestamp
+  (`2036-08-06 15:53:37+00:00`), which needs 170px and cannot break, so
+  in an 84px track it hangs 86px out of the cell and takes the table
+  with it. Measured, both ways, in FR-9. Nobody is to put it back for
+  tidiness: a date on two lines at 390 pixels is the design working, and
+  a table that scrolls sideways is not.
 
   0026 FR-2 gave two reasons for three columns. The first — that an
   `Open` column "would repeat the name as a target" — is about an
   `Open` column and does not reach this one: Kind repeats nothing. The
   second is the real one, and it is overturned: a fourth column "would
   cost a fourth column at 390 pixels, where the table has the least
-  room". That was true of a `<table>`, whose columns size to their
-  content and cannot be made narrower than their widest unbreakable
-  word. It is not true of a grid row whose tracks are `minmax(0, Nfr)`
-  (FR-8): those have a zero minimum and divide whatever width the
-  container has, so a fourth column costs no width at all, only share.
-  **This is re-proved, not asserted**: AC-1 runs the repaired overflow
-  probe (spec 0027 FR-3) over the hierarchy page at 390 with the
-  four-column table on it and requires `bad == []` with `examined >= 20`,
-  which is the same evidence 0026 would have had to produce.
+  room". That is true of a `<table>`, whose columns cannot be made
+  narrower than their widest unbreakable word — and it stays true of a
+  grid row for exactly the same reason, because a track that shrinks
+  under an unbreakable word does not make the word any narrower. What
+  overturns it is FR-9: the widest unbreakable word on this table was a
+  timestamp cabin itself made unbreakable with `class="nowrap"`, and
+  once that comes off there is no such word left. Then, and only then,
+  the tracks' zero minimum means a fourth column costs no width, only
+  share.
+
+  **This is re-proved, not asserted**, and by an instrument that can
+  fail: AC-1 measures the table against **its own `.scroller` box** at
+  390 and requires it to fit without scrolling. The page-level overflow
+  probe is run there too, but it answers a different question and cannot
+  answer this one — it excuses everything inside a `.scroller` by
+  design, which is what a scroller is for. The first draft of this spec
+  asked that probe to carry FR-2's whole argument; FR-9 records what
+  happened when that was measured.
 
   **The cost, stated rather than glossed.** On this table every row is
   an intermediate, so every Kind cell reads the same word. A column
@@ -159,9 +181,11 @@ two criteria failing with no argument beside them.
   **The name cell is still the link**, so spec 0026 AC-2's assertion —
   the row's first cell contains an `<a>` whose `href` is the row's page
   and whose text is the row's name — passes unchanged, and so do the
-  `_row(..., tag="tr")` scopings in `test_web_ca.py`,
-  `test_cross_chains.py` and `test_web_name_constraints.py`, which find
-  a row by the link inside it.
+  four `_row(..., tag="tr")` scopings — two in `test_web_ca.py`, one in
+  `test_cross_chains.py`, one in `test_ca_issuer_pages.py` — which find
+  a row by the link inside it. (The plan said five and named
+  `test_web_name_constraints.py`; that file scopes by `.section` and
+  `.constraints` and uses no `tag="tr"` at all. Counted, not assumed.)
 
   **It earns a focus treatment, and the treatment is additive.** Spec
   0027 FR-15 gives every focusable element a 2px accent ring, which on
@@ -235,10 +259,25 @@ two criteria failing with no argument beside them.
     its name at weight 600 with the `root` tag beside it, and a 2px
     left status bar (FR-11);
   - each **issuer row** carries `.row-child`: the name column indented,
-    preceded by a mono `├`/`└` tree glyph (FR-13), the name linking to
-    `_page_of(row)`, the `intermediate` tag in the Status column's
-    place taken by its own kind tag beside the name, and the two count
-    columns empty;
+    preceded by a mono `├`/`└` tree glyph (FR-13); the name linking to
+    `_page_of(row)`, with its own `intermediate` kind tag **beside the
+    name**; the **Status column carrying the row's status**, `active` or
+    `retired`, as the same tag with the same `tag-bad` on `retired` that
+    every other status in cabin uses; and the two count columns empty.
+
+    An earlier draft of this clause was mis-punctuated into saying the
+    kind tag takes the Status column's place, which would have left the
+    child rows with no status at all. They keep it, and the reason is
+    the point of the page: `/ca` is where an operator looks to see what
+    is **active**. A child row is the row you would most want to see
+    marked — a retired issuer disappearing into a list of live ones is
+    how someone signs against the wrong hierarchy, or believes they
+    cannot sign at all when an issuer is merely retired. The design
+    draws the kind tag beside the name (brief §5.7) and says nothing
+    about dropping the status; reading it as a replacement would make
+    this list less informative than the one it replaces, which is the
+    opposite of why FR-5 exists. AC-5 asserts it by effect;
+
   - a root with no intermediate gets a single row in their place
     reading **"This hierarchy has no issuer yet, so nothing can be
     signed under it."** — lifted verbatim from
@@ -380,9 +419,9 @@ two criteria failing with no argument beside them.
   not honour: it highlights the certificate page's fact rows, which go
   nowhere.
 
-- FR-9: **The column templates, exactly.** Each is a class on the
-  `<table>`, and every track is `minmax(0, Nfr)` so that FR-2's
-  argument holds:
+- FR-9: **The column templates, exactly — and the cell content wraps.**
+  Each template is a class on the `<table>`, and every track is
+  `minmax(0, Nfr)`:
 
   | Class               | Page              | Tracks (brief)              | Columns                                                      |
   | ------------------- | ----------------- | --------------------------- | ------------------------------------------------------------ |
@@ -391,12 +430,59 @@ two criteria failing with no argument beside them.
   | `.cols-crosses`     | `/ca/{id}` (§5.8) | `1.7fr 1.3fr .8fr .9fr 1fr` | Name / Signed by / Status / Serving / Expires                |
   | `.facts`            | §5.9, §5.4, §6.14 | `auto minmax(0,1fr)`        | label / value                                                |
 
-  A bare `Nfr` track is `minmax(auto, Nfr)`, whose minimum is the
-  content's own minimum width — which is a `<table>`'s behaviour
-  written in grid syntax and would reproduce the very problem spec 0026
-  FR-2 was avoiding. The `minmax(0, …)` form is therefore load-bearing
-  and AC-9 reads it back off the computed style rather than off the
-  file.
+  **No `<td>` of a `.rows` table is `white-space: nowrap`.** This is the
+  requirement that makes FR-2's fourth column affordable, and the one
+  the first draft of this spec got wrong. `class="nowrap"` comes off the
+  `Expires` cell of all three tables; the `.tag` chips inside a cell
+  stay nowrap (they are two short words and they fit), and `thead th`
+  stays as it is.
+
+  **The measurement, because the argument this replaces was wrong.**
+  All figures are headless Chrome at 390×900, on the real page with the
+  real stylesheet, reading each table's own `.scroller`:
+  `scrollWidth − clientWidth`, i.e. how far the table fails to fit the
+  box it is in. The fixture is the long-name one
+  (`test_web_layout._populate`, names of 43–56 characters):
+
+  | Build                                 | Issuers | Crosses |
+  | ------------------------------------- | ------- | ------- |
+  | today: plain `<table>`, 3-col issuers | 0       | **78**  |
+  | plain `<table>`, 4-col, `nowrap` kept | **18**  | 78      |
+  | grid, `minmax(0, …)`, `nowrap` kept   | **75**  | **90**  |
+  | grid, bare `Nfr`, `nowrap` kept       | 0       | 18      |
+  | grid, `minmax(0, …)`, wrapping        | **0**   | **0**   |
+  | grid, bare `Nfr`, wrapping            | 0       | 0       |
+
+  All six rows are one run of one script against one fixture, so they
+  are comparable with each other; the figures move by a pixel or two
+  with the rendered timestamp's own width.
+
+  Three things follow, and the first two contradict this spec's first
+  draft:
+  1. `minmax(0, …)` with the timestamp still `nowrap` is the **worst**
+     of every option measured — four times worse than simply adding the
+     fourth column to the plain `<table>` spec 0026 kept (75 against
+     18), and worse on the cross table too (90 against 78). That is the
+     row someone will disbelieve, and it is why it is in the table: the
+     construct this spec introduced to make a fourth column affordable,
+     measured against the construct it replaced, lost. The zero minimum
+     shrinks the track to 84px; the 170px timestamp inside it does not
+     shrink at all, and 86px of it hangs out of the cell. "The fourth
+     column costs no width, only share" was true of the tracks and false
+     of the table.
+  2. A bare `Nfr` track does **not** reproduce the `<table>`'s refusal
+     to shrink at this width — it fits, in both the `nowrap` and the
+     wrapping build. The claim that it "would reproduce the very problem
+     spec 0026 FR-2 was avoiding" was asserted, not measured, and it is
+     wrong. `minmax(0, …)` is kept because it is the design's own form
+     (brief §6.14) and because it bounds the tracks to the container for
+     any content, including content this fixture does not contain; it is
+     no longer claimed to be what makes the column affordable.
+  3. Wrapping is what makes it affordable, and it does so for **both**
+     tables at once — including the pre-existing defect FR-16 records.
+
+  AC-9 reads the `minmax(0, …)` form off both the computed style and
+  the file, because only the file says which form was written.
 
 - FR-10: **Every class this spec renders is defined here, and nothing
   else is.** Spec 0027 FR-18 settled the rule: a class is defined by
@@ -499,9 +585,16 @@ two criteria failing with no argument beside them.
   `<span class="tree" aria-hidden="true">`, and spec 0027's
   `CONTRAST_PROBE` — which walks every element with its own non-empty
   text node and would otherwise report it on every render of `/ca` —
-  already skips `[aria-hidden="true"]` through its existing
-  `el.closest(':disabled, [disabled], [aria-disabled="true"]')` clause
-  only for `aria-disabled`, so the clause gains `[aria-hidden="true"]`.
+  **gains** `[aria-hidden="true"]` in its
+  `el.closest(':disabled, [disabled], [aria-disabled="true"]')` clause.
+  An earlier draft of this requirement said the probe "already skips
+  `[aria-hidden="true"]`" through that clause. It did not: the clause
+  named `aria-disabled`, which is a different attribute, and nothing in
+  the probe looked at `aria-hidden` at all. The skip is a change this
+  spec makes, and it is verified by the counter-check AC-14 carries —
+  the planted element is reported without the attribute and not reported
+  with it. A requirement that describes the world wrongly is how spec
+  0024's defect got in.
 
   **The exemption is guarded rather than trusted.** WCAG 1.4.3 exempts
   text that is pure decoration, and an exemption keyed on an attribute
@@ -556,10 +649,28 @@ two criteria failing with no argument beside them.
   when it set that floor (30 examined); the grouped list adds rows, so
   the floor is safe and stays where it is.
 
-  This is FR-2's evidence and FR-9's. A four-column and a five-column
-  table at 390 pixels is precisely the thing spec 0026 declined to
-  build, and the only honest answer to "the columns shrink now" is the
-  probe that would have caught it if they did not.
+  **That probe owns the page, and only the page.** It excuses every
+  element inside a `.scroller`, which is correct and deliberate — a
+  scroller exists so that a wide table scrolls instead of breaking the
+  page (spec 0015 FR-4). So it is evidence that no page scrolls
+  sideways, and it is not evidence for FR-2 or FR-9: it reports
+  `bad == []` at 390 for the three-column table shipping today, for a
+  four-column plain `<table>`, and for a four-column grid with the
+  timestamp still `nowrap` — the build FR-9 measured at 75px of
+  overflow. Every table's fit inside its own scroller is measured
+  separately, by AC-1, on all three `.rows` tables.
+
+  **A pre-existing defect this makes visible, and fixes.** The
+  five-column `Cross certificates` table spec 0026 shipped **does not
+  fit at 390 today**: measured on the long-name fixture, its scroller
+  needs 78px more than it has, so the table scrolls sideways inside its
+  box on a phone. Nothing caught it, because the only instrument pointed
+  at it was the page probe, and the page probe excuses exactly this.
+  Spec 0026 declined a fourth column to protect a width its own
+  five-column table was already over. FR-9's wrapping requirement brings
+  that table to **0** as well, so AC-1 covers all three tables and this
+  spec either fixes the defect or fails loudly. The criterion is not
+  widened to let the cross table pass.
 
 - FR-17: **What changes in `ca_ui.py`, exactly.** The Interface
   Contract enumerates every key, including the ones inside the
@@ -699,12 +810,33 @@ certificate for beta's root signed by alpha's root, and a base URL set.
   `GET /ca/{alpha_root}` the `Issuers` table's `<thead>` has exactly
   four `<th>` elements reading `Name`, `Kind`, `Status`, `Expires` in
   that order, and the one `<tr>` in its `<tbody>` has four cells whose
-  second contains a `.tag` reading `intermediate`. In the same test the
-  overflow probe runs over that page at **390×900** and reports
-  `bad == []` with `examined >= 20`.
-  _Goes red if_: the column is added and the table stops fitting at
-  390, which is exactly what spec 0026 FR-2 predicted would happen and
-  is the only reason that requirement is being overturned.
+  second contains a `.tag` reading `intermediate`.
+
+  Then **two measurements at 390×900, both of which can fail**, because
+  the single measurement the first draft asked for could not:
+  1. **The page does not overflow.** The overflow probe over that page
+     reports `bad == []` with `examined >= 20`. This is the question
+     that probe genuinely owns, and it is worth asking — but it is not
+     evidence about the table, because it excuses everything inside a
+     `.scroller` (FR-16).
+  2. **Each table fits its own box.** For every `.rows` table on `/ca`
+     and `/ca/{root}` — the four-column `Issuers`, the five-column
+     `Cross certificates` and `/ca`'s five-column grouped list — its
+     `.scroller`'s `scrollWidth` is at most its `clientWidth`: the table
+     fits without scrolling. In the same test, no `<td>` of a `.rows`
+     table computes `white-space: nowrap` (FR-9's mechanism, measured on
+     the computed style rather than on the markup). The failure names
+     the offending cell, what it needs and what it has.
+
+  Both are counter-checked in the test rather than trusted: a 4000px
+  element planted **inside** the scroller must be reported by clause 2
+  and is invisible to clause 1, which is the difference between the two
+  stated as an experiment.
+  _Goes red if_: the column is added and the table stops fitting at 390
+  — which is what spec 0026 FR-2 predicted, what the `nowrap` timestamp
+  actually caused (FR-9), and what clause 1 on its own reports as
+  perfectly green. Clause 2 also goes red for the cross table's
+  pre-existing 78px overflow (FR-16) unless this spec fixes it.
 
 - AC-2: **The whole row is the target and the name cell is still the
   link.** On `GET /ca/{alpha_root}`, the issuers row's first cell
@@ -756,9 +888,21 @@ certificate for beta's root signed by alpha's root, and a base URL set.
   `Cross certificates` counts. For a root created with no intermediate,
   one row in place of the children reads the sentence lifted from
   `#ca-no-intermediates`, and the root row's count column reads `0`.
+
+  **A child row carries its status, and the test proves it by effect**
+  (FR-5). One issuer is retired through the real `POST /ca/{id}/retire`,
+  and afterwards: that issuer's own `.row-child` on `/ca` has a
+  `tag-bad` tag reading `retired` in the `Status` column, and every
+  other child row on the page still reads `active` there. Both halves,
+  because a build that marks every row retired and a build that marks
+  none would otherwise each pass.
   _Goes red if_: the children are rendered under the wrong root — the
   positional assertion is the only thing that catches it, since every
-  name and link would still be present somewhere on the page.
+  name and link would still be present somewhere on the page — or if
+  the kind tag is rendered _instead of_ the status, which was the
+  mis-punctuated reading of FR-5 and which leaves a retired issuer
+  indistinguishable from a live one on the page an operator opens to
+  find out which is which.
 
 - AC-6: **`/ca` does the work its output needs and no more.** With
   `crl_service.distribution_url`, `crl_service.ca_issuers_url`,
@@ -803,10 +947,18 @@ certificate for beta's root signed by alpha's root, and a base URL set.
   the track widths are in the brief's ratios within 2%. In the same
   test the stylesheet's declaration for each `.cols-*` class is parsed
   and every track is asserted to be a `minmax(0, …)` form.
-  _Goes red if_: a bare `Nfr` is used, which renders identically at
-  1440 and reproduces the `<table>`'s refusal to shrink at 390 — the
-  computed widths would pass and AC-1's probe would fail, and this
-  criterion says why in one line.
+  _Goes red if_: the design's ratios are not what ships, or a track is
+  written in a form that does not bound itself to the container. The
+  first draft of this clause said a bare `Nfr` "reproduces the
+  `<table>`'s refusal to shrink at 390 — the computed widths would pass
+  and AC-1's probe would fail". Both halves were wrong and both are
+  measured in FR-9: a bare `Nfr` fits at 390 on this content, and AC-1's
+  probe cannot fail for that reason at all. What this criterion actually
+  protects is that the file says `minmax(0, …)` — the design's own form,
+  which holds for content this fixture does not contain — and that the
+  rendered ratios are the brief's. The claim that a bare `Nfr` breaks
+  390 is not made here any more; AC-1 clause 2 measures the fit
+  directly, whatever the tracks are written as.
 
 - AC-10: **Every table is still a table, and still wrapped.**
   `test_every_table_is_wrapped_in_scroller` passes unmodified. Across
@@ -876,21 +1028,44 @@ certificate for beta's root signed by alpha's root, and a base URL set.
 - AC-16: **Not one sentence changed.** For each of `/ca`,
   `/ca/{root}`, an issuer page, a cross page and a certificate page,
   the multiset of non-empty visible text nodes is compared against the
-  same page's before this spec, and is equal — modulo the tree glyphs,
-  which are new characters and are named in the comparison rather than
-  filtered by a wildcard.
+  same page rendered through the templates as they stood at this spec's
+  base commit — one instance, one database, one set of rows, so that
+  every difference is a difference of markup and not of data.
+
+  The comparison is **not** an equality, and an earlier draft of this
+  criterion asked for one ("equal — modulo the tree glyphs"). It cannot
+  be equal: FR-2 adds a `Kind` heading and a kind cell, FR-5 adds a row
+  per intermediate, FR-4 gives `ca_detail.html` a section heading and
+  its help line, FR-6 splits `cert_detail.html`'s comma-joined SANs into
+  one element per name, and FR-7 takes two labels off the cross page.
+  Four of those five are this spec's own requirements. So the comparison
+  is exact in the direction that carries FR-15 and named in the other:
+  - **nothing is lost.** Every text node the page had before is still
+    there, with the same multiplicity. The only permitted removals are
+    the two labels FR-7 moves (`Signed by`, `Serving`) and the one
+    comma-joined SAN string FR-6 splits — listed literally, per page.
+  - **every addition is named**, per page, from the fixture's own data:
+    the tree glyphs, the `Kind` heading, the kind and status words, the
+    issuer names and expiries FR-5's rows carry, and FR-4's heading and
+    help line. An addition that is not in the list fails.
+
   _Goes red if_: a heading is "improved" while the markup around it is
-  rewritten, which is the change that costs several hundred text
-  assertions and that no other criterion here would see.
+  rewritten — which fails both halves at once, since the old wording
+  disappears and the new wording is in nobody's list. This is the change
+  that costs several hundred text assertions and that no other criterion
+  here would see.
 
 - AC-17: **No page scrolls sideways, at either width, in either
   scheme.** The overflow probe over `/ca`, `/ca/{root}`, the issuer
   page, the cross page and the certificate page at 1440×1150 and
   390×900, in the dark and the light stylesheet: `bad == []` and
   `examined >= 20` for each of the 20 runs. The full 19-screen run of
-  spec 0027 AC-3 also still passes.
-  _Goes red if_: a grid track is given a non-zero minimum, or a
-  `.scroller` is dropped from something that still needs one.
+  spec 0027 AC-3 also still passes. This criterion is about the **page**
+  — whether a table fits inside its own scroller is AC-1 clause 2, and
+  neither criterion can stand in for the other.
+  _Goes red if_: a `.scroller` is dropped from something that still
+  needs one, or a page draws something outside the viewport that no
+  scroller is holding.
 
 - AC-18: **The view builders return exactly what the contract says.**
   `_child_view(row)` returns exactly the keys
