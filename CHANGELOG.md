@@ -6,149 +6,20 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
-Four specifications, 0023–0026, have landed since 0.2.0 was tagged and are
-not yet released. Together they split `/ca` into four pages and then a
-hierarchy page into a list plus a page per row, stop composing a name for a
-hierarchy cabin creates, separate creating a root from creating its first
-intermediate, and give every CA import and export its own page under a new
-"Transfer" rail group.
+## [0.2.0] - Unreleased
 
-Two things to know before upgrading an instance already running cabin.
-
-**A CA created from now on is named exactly what was typed, with no suffix
-appended.** `create_hierarchy` and `create_intermediate_under` used to build
-the subject as `f"{name} Root CA"` or `f"{name} Intermediate CA"`; both now
-sign and store `name` verbatim. Anything that relied on the old suffix — a
-script matching a CA by its composed name, an operator who typed `Acme`
-expecting the certificate to say `Acme Root CA` — sees a different name on
-every hierarchy created after this change. Existing rows are untouched:
-`name` was and remains the CN of that row's own certificate, so nothing
-already issued and nothing already in the database changes.
-
-**The CA key export is the first time cabin hands a private signing key to
-anyone.** `POST /transfer/ca-key` packages a CA's certificate and its
-unsealed private key as a password-protected PKCS#12 file. It is
-superadmin-only and writes a `ca_key_exported` audit event — but that event
-only records that an export happened, not what its holder does with the
-file afterward. Whoever receives it can issue certificates as that CA for as
-long as its certificate is valid, and cabin cannot see them doing it:
-cabin's CRL only ever covers what cabin itself issued. The one remedy left
-is retiring or distrusting the whole hierarchy, which invalidates every
-certificate under it, not only the ones the key holder made.
-
-### Added
-
-- Spec 0023 (ca-pages): `/ca` splits into four pages. `GET /ca` is now a
-  bare list — one row per hierarchy with its status, expiry and
-  intermediate/cross counts, no form and no per-hierarchy detail — linking
-  to `GET /ca/{ca_id}`, which shows one hierarchy in full (its root, every
-  intermediate with its CRL/AIA/ACME URLs, every cross certificate) plus,
-  for an admin, every action that applies to it: renew, retire, add an
-  intermediate, cross-sign. `GET /ca/new` carries the create form alone and
-  `GET /ca/import` carries both import forms; `ca_setup.html`, the wizard
-  that used to double as the create/import page, is gone. No POST path,
-  form field or guard changes — a redirect target does:
-  `/ca/{root_id}/intermediate` and `/ca/{ca_id}/cross-sign` now re-render
-  the hierarchy's own detail page on error, with what was typed still in
-  the form and its section open, instead of the removed list-with-forms
-  page and a JSON error document. A new rail group "Certificate authority"
-  holds Hierarchies / Create / Import, gated by a new `ca_admin` nav flag
-  kept deliberately distinct from `issue`. The empty state still explains
-  where to go and stays reachable on a fresh instance and on one still
-  serving a self-signed certificate.
-- Spec 0024 (ca-names-and-actions): **a CA's name is now taken verbatim** —
-  see above. A name is stripped of leading and trailing whitespace, then
-  refused on the form — not reaching cryptography's own exception as a
-  500 — if what's left is empty or exceeds 64 UTF-8 bytes, the same bound
-  `x509.NameAttribute` itself enforces. `POST /ca/create` writes a root and
-  nothing else; adding its first intermediate is a separate action on the
-  hierarchy's own detail page, so "a root with no active issuer yet" is now
-  the ordinary state of a freshly created hierarchy rather than a rare one
-  — the dashboard, the issue form and the two internal error paths
-  (`resolve_issuer`, `resolve_granted_issuer`) all say so explicitly and
-  link to where the fix is, instead of reusing the sentence for "no CA at
-  all". An intermediate is refused if its subject would come out identical
-  to its own parent root's: dropping the composed suffix made that
-  reachable, and a real chain-building bug follows from it — OpenSSL
-  resolves the issuer of a certificate under two identically-named CAs to
-  the wrong one, turning a name-constraint violation into what looks like a
-  signature failure. The two disclosure blocks (`<details>`) for adding an
-  intermediate and for cross-signing become open sections with their own
-  heading, matching every other form in cabin, and every hierarchy row
-  becomes its own section too, so the page reads down the left column
-  instead of leaving it empty. Retiring a hierarchy or an issuer now needs
-  a ticked confirmation checkbox, enforced on the server, in its own form
-  separate from renew — the same two-step pattern certificate revocation
-  already uses.
-- Spec 0025 (transfer): a new "Transfer" rail group collects everything
-  that moves material in or out of cabin, five pages in place of the two
-  import forms `/ca/import` used to carry. `Import a CA` and
-  `Import a cross certificate` move to their own pages
-  (`/transfer/ca-import`, `/transfer/cross-import`) with the same POST
-  paths, fields and guards as before. `Trust bundle`
-  (`/transfer/trust-bundle`) concatenates every active root's certificate
-  into one PEM file, or one hierarchy's root plus its active intermediates
-  with `?ca={root_id}` — open to any logged-in user, since it contains no
-  more than `/ca/{ca_id}.pem` already serves one at a time. `Inventory
-  export` (`/transfer/inventory`) writes the certificate list as CSV or
-  JSON, the whole filtered set rather than one paginated page, with the
-  same fields `/api/v1/certs` already returns. **`CA key`
-  (`/transfer/ca-key`) is the first page in cabin that hands out a CA's own
-  private key** — see above. It offers only rows cabin actually holds a
-  sealed key for (an imported root has none; an imported intermediate
-  does, because its key was uploaded), requires a password of at least 8
-  characters, refuses cleanly rather than with a 500 when the master key
-  can't unseal a row, writes nothing to disk at any point, and records a
-  `ca_key_exported` audit event without the password in it. Per-certificate
-  downloads (`/certs/{id}/download/...`) stay on the certificate's own page
-  and do not move here.
-- Spec 0026 (hierarchy-pages): a hierarchy page is a list again.
-  `GET /ca/{root_id}` renders its root, then an **Issuers** table (name,
-  status, expiry — the name is the link), then a **Cross certificates**
-  table (name, signer, status, serving state, expiry; omitted entirely when
-  the root has none), and only then the *Add intermediate* and *Cross-sign*
-  forms, which used to sit above everything that repeats. An intermediate
-  costs a table row rather than a full section, and a root with no issuer
-  yet says so and links to the form further down its own page instead of
-  showing an empty stretch. Everything a row used to show inline —
-  subject, fingerprint, `cert.pem` and `chain.pem`, the CRL and AIA URLs or
-  the note explaining their absence, the ACME directory URL, the name
-  constraints, and the renew and retire controls — moves to two new pages,
-  `GET /ca/{root_id}/issuer/{issuer_id}` and
-  `GET /ca/{root_id}/cross/{cross_id}`, readable by any logged-in user with
-  the controls still admin-only. A row and its hierarchy that do not belong
-  together answer 404 rather than redirecting to the right one, since the
-  next thing done on such a page renews or retires. `POST /ca/{ca_id}/renew`
-  and `POST /ca/{ca_id}/retire` keep their paths, fields and guards, and now
-  redirect to the row's own page; a retire submitted without its
-  confirmation ticked re-renders that same page rather than the hierarchy
-  page that no longer carries the form. No stylesheet change and no schema,
-  API, MCP or ACME change.
-
-### Fixed
-
-- **Spec 0024's dashboard "no active issuer" notice was computed
-  instance-wide.** `ca_has_issuer` was `bool(ca_service.active_issuers(db))`
-  over the whole instance, so once any one hierarchy had an active issuer the
-  notice stopped rendering at all — a second hierarchy's bare root, or a
-  hierarchy whose only intermediate was later retired, went unmentioned on
-  the dashboard even though its own detail page was unaffected. The context
-  now carries the list of hierarchies that currently lack an active issuer
-  (`ca_no_issuer_roots`), computed from the same `active_issuers` query
-  against the roots the handler already has, and the template names every
-  one of them under `#ca-no-issuer` instead of picking the first root with
-  `| first`. Spec 0024's Interface Contract is corrected to match.
-
-## [0.2.0] - 2026-08-08
-
-Six specifications, 0017–0022. cabin stops assuming there is one CA: it runs
+Ten specifications, 0017–0026. cabin stops assuming there is one CA: it runs
 several hierarchies side by side, rotates between them, restricts who may
 issue from which and what each of them may sign, gives each its own ACME
 directory, and can cross-sign a root so that devices trusting an old one keep
 a path to certificates issued under a new one. It also terminates TLS itself,
 so reaching it over HTTPS no longer requires a reverse proxy in front of it.
+`/ca` then splits into four pages and a hierarchy page becomes a list plus a
+page per row, a CA stops getting a composed name, creating a root is
+separated from creating its first intermediate, and every CA import and
+export gets its own page under a new "Transfer" rail group.
 
-Three things to know before running it, because each of them costs something
+Five things to know before running it, because each of them costs something
 to get wrong.
 
 **A 0.1.x database cannot be brought forward, and the only path is an empty
@@ -196,6 +67,27 @@ from it; what remains is that an account is confined to one hierarchy, which
 is worth having and is not access control. The `/acme` page carries the
 warning next to the switch. "cabin has per-issuer permissions" is the sentence
 someone will quote without this paragraph.
+
+**A CA created from now on is named exactly what was typed, with no suffix
+appended.** `create_hierarchy` and `create_intermediate_under` used to build
+the subject as `f"{name} Root CA"` or `f"{name} Intermediate CA"`; both now
+sign and store `name` verbatim. Anything that relied on the old suffix — a
+script matching a CA by its composed name, an operator who typed `Acme`
+expecting the certificate to say `Acme Root CA` — sees a different name on
+every hierarchy created after this change. Existing rows are untouched:
+`name` was and remains the CN of that row's own certificate, so nothing
+already issued and nothing already in the database changes.
+
+**The CA key export is the first time cabin hands a private signing key to
+anyone.** `POST /transfer/ca-key` packages a CA's certificate and its
+unsealed private key as a password-protected PKCS#12 file. It is
+superadmin-only and writes a `ca_key_exported` audit event — but that event
+only records that an export happened, not what its holder does with the
+file afterward. Whoever receives it can issue certificates as that CA for as
+long as its certificate is valid, and cabin cannot see them doing it:
+cabin's CRL only ever covers what cabin itself issued. The one remedy left
+is retiring or distrusting the whole hierarchy, which invalidates every
+certificate under it, not only the ones the key holder made.
 
 ### Added
 
@@ -414,6 +306,95 @@ someone will quote without this paragraph.
   certificates are perfectly valid while their distribution points are dead,
   which surfaces whenever some relying party first enforces revocation. The
   README's _Security notes_ has the whole sequence in full.
+- Spec 0023 (ca-pages): `/ca` splits into four pages. `GET /ca` is now a
+  bare list — one row per hierarchy with its status, expiry and
+  intermediate/cross counts, no form and no per-hierarchy detail — linking
+  to `GET /ca/{ca_id}`, which shows one hierarchy in full (its root, every
+  intermediate with its CRL/AIA/ACME URLs, every cross certificate) plus,
+  for an admin, every action that applies to it: renew, retire, add an
+  intermediate, cross-sign. `GET /ca/new` carries the create form alone and
+  `GET /ca/import` carries both import forms; `ca_setup.html`, the wizard
+  that used to double as the create/import page, is gone. No POST path,
+  form field or guard changes — a redirect target does:
+  `/ca/{root_id}/intermediate` and `/ca/{ca_id}/cross-sign` now re-render
+  the hierarchy's own detail page on error, with what was typed still in
+  the form and its section open, instead of the removed list-with-forms
+  page and a JSON error document. A new rail group "Certificate authority"
+  holds Hierarchies / Create / Import, gated by a new `ca_admin` nav flag
+  kept deliberately distinct from `issue`. The empty state still explains
+  where to go and stays reachable on a fresh instance and on one still
+  serving a self-signed certificate.
+- Spec 0024 (ca-names-and-actions): **a CA's name is now taken verbatim** —
+  see above. A name is stripped of leading and trailing whitespace, then
+  refused on the form — not reaching cryptography's own exception as a
+  500 — if what's left is empty or exceeds 64 UTF-8 bytes, the same bound
+  `x509.NameAttribute` itself enforces. `POST /ca/create` writes a root and
+  nothing else; adding its first intermediate is a separate action on the
+  hierarchy's own detail page, so "a root with no active issuer yet" is now
+  the ordinary state of a freshly created hierarchy rather than a rare one
+  — the issue form and the two internal error paths (`resolve_issuer`,
+  `resolve_granted_issuer`) say so explicitly and link to where the fix is,
+  instead of reusing the sentence for "no CA at all", and the dashboard
+  names every hierarchy that currently lacks an active issuer
+  (`ca_no_issuer_roots`) rather than a single instance-wide flag that goes
+  dark the moment any other hierarchy gets one. An intermediate is refused
+  if its subject would come out identical to its own parent root's:
+  dropping the composed suffix made that reachable, and a real
+  chain-building bug follows from it — OpenSSL resolves the issuer of a
+  certificate under two identically-named CAs to the wrong one, turning a
+  name-constraint violation into what looks like a signature failure. The
+  two disclosure blocks (`<details>`) for adding an intermediate and for
+  cross-signing become open sections with their own heading, matching
+  every other form in cabin, and every hierarchy row becomes its own
+  section too, so the page reads down the left column instead of leaving
+  it empty. Retiring a hierarchy or an issuer now needs a ticked
+  confirmation checkbox, enforced on the server, in its own form separate
+  from renew — the same two-step pattern certificate revocation already
+  uses.
+- Spec 0025 (transfer): a new "Transfer" rail group collects everything
+  that moves material in or out of cabin, five pages in place of the two
+  import forms `/ca/import` used to carry. `Import a CA` and
+  `Import a cross certificate` move to their own pages
+  (`/transfer/ca-import`, `/transfer/cross-import`) with the same POST
+  paths, fields and guards as before. `Trust bundle`
+  (`/transfer/trust-bundle`) concatenates every active root's certificate
+  into one PEM file, or one hierarchy's root plus its active intermediates
+  with `?ca={root_id}` — open to any logged-in user, since it contains no
+  more than `/ca/{ca_id}.pem` already serves one at a time. `Inventory export`
+  (`/transfer/inventory`) writes the certificate list as CSV or
+  JSON, the whole filtered set rather than one paginated page, with the
+  same fields `/api/v1/certs` already returns. **`CA key`
+  (`/transfer/ca-key`) is the first page in cabin that hands out a CA's own
+  private key** — see above. It offers only rows cabin actually holds a
+  sealed key for (an imported root has none; an imported intermediate
+  does, because its key was uploaded), requires a password of at least 8
+  characters, refuses cleanly rather than with a 500 when the master key
+  can't unseal a row, writes nothing to disk at any point, and records a
+  `ca_key_exported` audit event without the password in it. Per-certificate
+  downloads (`/certs/{id}/download/...`) stay on the certificate's own page
+  and do not move here.
+- Spec 0026 (hierarchy-pages): a hierarchy page is a list again.
+  `GET /ca/{root_id}` renders its root, then an **Issuers** table (name,
+  status, expiry — the name is the link), then a **Cross certificates**
+  table (name, signer, status, serving state, expiry; omitted entirely when
+  the root has none), and only then the _Add intermediate_ and _Cross-sign_
+  forms, which used to sit above everything that repeats. An intermediate
+  costs a table row rather than a full section, and a root with no issuer
+  yet says so and links to the form further down its own page instead of
+  showing an empty stretch. Everything a row used to show inline —
+  subject, fingerprint, `cert.pem` and `chain.pem`, the CRL and AIA URLs or
+  the note explaining their absence, the ACME directory URL, the name
+  constraints, and the renew and retire controls — moves to two new pages,
+  `GET /ca/{root_id}/issuer/{issuer_id}` and
+  `GET /ca/{root_id}/cross/{cross_id}`, readable by any logged-in user with
+  the controls still admin-only. A row and its hierarchy that do not belong
+  together answer 404 rather than redirecting to the right one, since the
+  next thing done on such a page renews or retires. `POST /ca/{ca_id}/renew`
+  and `POST /ca/{ca_id}/retire` keep their paths, fields and guards, and now
+  redirect to the row's own page; a retire submitted without its
+  confirmation ticked re-renders that same page rather than the hierarchy
+  page that no longer carries the form. No stylesheet change and no schema,
+  API, MCP or ACME change.
 
 ### Changed
 
@@ -631,7 +612,7 @@ CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
 - Spec 0012 (acme-finalize-eab): the end of an ACME order, which completes
   the ACME server. `POST /acme/order/{id}/finalize` takes the client's CSR
   (base64url DER), checks its signature and requires its subjectAltName set
-  to be *exactly* the order's identifiers — DNS names compared
+  to be _exactly_ the order's identifiers — DNS names compared
   case-insensitively, IPs compared as addresses, a wildcard identifier
   matching the wildcard SAN — and a common name, if present, to be one of
   them; each mismatch is its own `badCSR` detail (`cabin.acme.csr`). The key
@@ -666,8 +647,7 @@ CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
   the directory's `meta.externalAccountRequired` reflects: the inner JWS is
   verified on a separate, explicit HS256 path that shares no algorithm table
   with the account-key allowlist, with the MAC compared in constant time,
-  and the operator's HMAC keys are stored sealed (`acme_eab_keys`, migration
-  0009) and shown exactly once, base64url, on creation. A key binds one
+  and the operator's HMAC keys are stored sealed (`acme_eab_keys`, migration 0009) and shown exactly once, base64url, on creation. A key binds one
   account, enforced by a conditional UPDATE plus a unique index; revoked and
   already-bound keys — and a second key for an account that already has one,
   which loses against the index — are refused with one wording, so a client
@@ -778,7 +758,7 @@ CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
 - Spec 0016 (dashboard): `/` stops being the stub spec 0003 called it and
   becomes the page an operator opens first. Four counts (valid / expiring /
   expired / revoked), each linking to the inventory filtered to it and backed
-  by a new `status_counts` that runs the *same* filters the inventory runs, so
+  by a new `status_counts` that runs the _same_ filters the inventory runs, so
   a tile and the page behind it cannot disagree. The certificates expiring
   within 30 days, soonest first. The CA's own expiry — flagged a year ahead,
   because replacing an intermediate means touching every trust store it lives

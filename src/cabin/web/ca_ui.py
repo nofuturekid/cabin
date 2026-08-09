@@ -29,6 +29,7 @@ from cabin.ca.service import (
     CANotConfiguredError,
     CrossSignError,
     RetireError,
+    RowRetiredError,
     UnknownIssuerError,
 )
 from cabin.issuer_grants import grant, user_principal
@@ -232,6 +233,12 @@ def _row_view(
     no key of its own, so ``parent_has_key`` -- the *signing* root's key
     state for a cross row, the group's own root's for an intermediate --
     decides ``can_renew`` exactly the way FR-11 moved the guard.
+
+    ``can_renew`` also requires ``row.status == "active"`` (bugfix
+    following spec 0026): a retired row is never served again, so a
+    working Renew form on one would let an operator produce a certificate
+    for nothing. ``renew_in_place`` carries the same check server-side --
+    hiding the form here is not itself the fix.
     """
     has_key = row.key_sealed is not None
     signing_key_available = has_key if row.kind == "root" else parent_has_key
@@ -243,7 +250,7 @@ def _row_view(
         "kind": row.kind,
         "status": row.status,
         "can_create_intermediate": row.kind == "root" and has_key,
-        "can_renew": signing_key_available,
+        "can_renew": signing_key_available and row.status == "active",
         "can_retire": row.status == "active",
         "crl_url": crl_service.distribution_url(db, row.id) if is_intermediate else None,
         "ca_url": crl_service.ca_issuers_url(db, row.id) if is_intermediate else None,
@@ -923,7 +930,7 @@ def ca_renew(
         row = ca_service.renew_in_place(db, request.app.state.secrets, ca_id, years)
     except UnknownIssuerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except CANotConfiguredError as exc:
+    except (CANotConfiguredError, RowRetiredError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit.record(
         db,

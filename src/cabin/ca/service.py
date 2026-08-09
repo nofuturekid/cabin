@@ -52,6 +52,15 @@ class RetireError(Exception):
     ``users.py:75-79``."""
 
 
+class RowRetiredError(Exception):
+    """The row named by ``ca_id`` is retired, so :func:`renew_in_place`
+    refuses to reissue its certificate: a retired row is never served
+    again, so a certificate produced for it is one nothing will ever hand
+    out (bugfix following spec 0026 -- ``can_renew`` in
+    ``web/ca_ui.py:_row_view`` refuses the same way, but hiding the form is
+    not enough on its own; the route must refuse the POST too)."""
+
+
 class CrossSignError(Exception):
     """A cross certificate cannot be produced for these two roots: the
     signing root's path_length cannot carry the subtree (spec 0021 FR-3),
@@ -882,8 +891,15 @@ def renew_in_place(db: Session, secrets: SecretStore, ca_id: int, years: int) ->
     would refuse a cross row's renewal outright. The non-root branch below
     already checks the PARENT's key, which is what really guards the
     signature, so nothing changes for any intermediate that exists today.
+
+    Raises :class:`RowRetiredError` -- checked first, before any key lookup
+    -- when the row itself is retired: a retired row's page offers no
+    renew form, and this is the guard that keeps the route refusing the
+    POST even when a form is submitted anyway (spec 0026 bugfix).
     """
     row = get_ca(db, ca_id)
+    if row.status == "retired":
+        raise RowRetiredError(f"CA certificate {ca_id} is retired and cannot be renewed")
     cert = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
 
     if row.kind == "root":

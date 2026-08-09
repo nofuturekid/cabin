@@ -1256,3 +1256,120 @@ def test_section_and_danger_probes_cover_all_three_pages(
 
     danger = _run_probe(pages, _DANGER_PROBE, tmp_path, "ca_danger")
     assert danger == {name: [] for name in pages}, danger
+
+
+# === bugfix: a retired row's page offers no renew form =====================
+#
+# `_row_view` computes `can_renew` from `signing_key_available` alone, never
+# from `row.status` -- unlike `can_retire`, which requires `status ==
+# "active"`. A retired row still renders a working Renew form even though
+# `renew_in_place` neither reads nor writes `status`, so the certificate it
+# produces is one the row will never serve. `can_renew` must also require an
+# active row.
+#
+# Each test below retires one row through the real POST (so the fixture
+# reaches "retired" the way an operator would put it there, not by poking
+# the column directly) and checks both directions: the retired row's own
+# page loses the form, and a sibling row that is still active keeps it --
+# otherwise a fix that removed the form unconditionally would also pass.
+
+
+def test_retired_intermediate_page_offers_no_renew_form(client: TestClient, cfg: Config) -> None:
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    retire_resp = client.post(
+        f"/ca/{fix.alpha_int}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
+    assert retire_resp.status_code == 303, retire_resp.text
+    assert _status_of(cfg, fix.alpha_int) == "retired"
+
+    retired_html = client.get(f"/ca/{fix.alpha_root}/issuer/{fix.alpha_int}").text
+    assert f"/ca/{fix.alpha_int}/renew" not in _form_actions(retired_html), (
+        "a retired intermediate still offers a renew form"
+    )
+
+    # beta's intermediate was never touched -- an active row keeps the form
+    active_html = client.get(f"/ca/{fix.beta_root}/issuer/{fix.beta_int}").text
+    assert f"/ca/{fix.beta_int}/renew" in _form_actions(active_html)
+
+
+def test_retired_root_page_offers_no_renew_form(client: TestClient, cfg: Config) -> None:
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    # alpha's root cascades to alpha's intermediate on retire
+    # (`retire_targets`), but beta's hierarchy stays active, so this is not
+    # refused as "no active issuer would remain" (`ca/service.py:854`).
+    retire_resp = client.post(
+        f"/ca/{fix.alpha_root}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
+    assert retire_resp.status_code == 303, retire_resp.text
+    assert _status_of(cfg, fix.alpha_root) == "retired"
+
+    retired_html = client.get(f"/ca/{fix.alpha_root}").text
+    assert f"/ca/{fix.alpha_root}/renew" not in _form_actions(retired_html), (
+        "a retired root still offers a renew form"
+    )
+
+    active_html = client.get(f"/ca/{fix.beta_root}").text
+    assert f"/ca/{fix.beta_root}/renew" in _form_actions(active_html)
+
+
+def test_retired_cross_page_offers_no_renew_form(client: TestClient, cfg: Config) -> None:
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+    db = _db(cfg)
+    try:
+        # a second cross certificate for beta's root, signed by a different
+        # root with a stored key, so the active-row counter-check has a
+        # cross row of its own rather than leaning on `fix.cross`.
+        gamma = ca_service.create_root(db, _secrets(cfg), "gamma root", path_length=2)
+        second_cross_id = ca_service.cross_sign_root(db, _secrets(cfg), fix.beta_root, gamma.id).id
+    finally:
+        db.close()
+
+    retire_resp = client.post(
+        f"/ca/{fix.cross}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
+    assert retire_resp.status_code == 303, retire_resp.text
+    assert _status_of(cfg, fix.cross) == "retired"
+
+    retired_html = client.get(f"/ca/{fix.beta_root}/cross/{fix.cross}").text
+    assert f"/ca/{fix.cross}/renew" not in _form_actions(retired_html), (
+        "a retired cross certificate still offers a renew form"
+    )
+
+    active_html = client.get(f"/ca/{fix.beta_root}/cross/{second_cross_id}").text
+    assert f"/ca/{second_cross_id}/renew" in _form_actions(active_html)
+
+
+def test_post_renew_on_a_retired_row_is_refused_server_side(
+    client: TestClient, cfg: Config
+) -> None:
+    """Hiding the form is not the whole fix: `renew_in_place` neither reads
+    nor writes `status`, so the route that answers `POST /ca/{id}/renew`
+    would still carry out a renewal an operator can no longer reach a form
+    for -- the exact shape of defect a hidden-but-still-live control is
+    (`_refuse_retire_of_tls_issuer` exists for the same reason on the retire
+    side). Asserted on effect, not on a status code alone: the stored
+    certificate must be byte-for-byte the one from before the POST, and the
+    row must still read "retired" afterward.
+    """
+    _setup_superadmin(client)
+    fix = _seed(cfg)
+
+    retire_resp = client.post(
+        f"/ca/{fix.alpha_int}/retire", data={"confirm": "on", "csrf_token": _csrf(client, cfg)}
+    )
+    assert retire_resp.status_code == 303, retire_resp.text
+    fingerprint_before = _fingerprint(cfg, fix.alpha_int)
+
+    renew_resp = client.post(
+        f"/ca/{fix.alpha_int}/renew", data={"years": 5, "csrf_token": _csrf(client, cfg)}
+    )
+    assert renew_resp.status_code == 400, renew_resp.text
+    assert _status_of(cfg, fix.alpha_int) == "retired"
+    assert _fingerprint(cfg, fix.alpha_int) == fingerprint_before, (
+        "the certificate was reissued even though the row is retired"
+    )
