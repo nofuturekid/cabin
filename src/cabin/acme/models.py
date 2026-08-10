@@ -73,6 +73,12 @@ class AcmeAccount(Base):
     contacts_json: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     tos_agreed_at: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
     created_at: Mapped[str] = mapped_column(sa.String(40), nullable=False)
+    #: Which issuer this account registered against (spec 0019 FR-1/FR-5).
+    #: Set once, at creation, and never written again -- a key rollover
+    #: (``key-change``) proves possession of a new key, not a change of CA.
+    issuer_id: Mapped[int] = mapped_column(
+        sa.Integer, sa.ForeignKey("ca_certificates.id"), nullable=False, index=True
+    )
 
 
 class AcmeNonce(Base):

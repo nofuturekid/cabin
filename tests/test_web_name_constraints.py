@@ -1,0 +1,795 @@
+"""Tests for spec 0020 (name constraints): the CA-creation and display
+surfaces -- the HTTP creation routes (``POST /ca/create`` and
+``POST /ca/{root_id}/intermediate``), the import form, what ``GET /ca``
+displays, the creation forms' rejections, and the ``ca_created`` audit
+detail.
+
+The matching rules and the crypto layer (``cabin.ca.leaf``'s
+``NameConstraintSpec``/``parse_name_constraints``/``check_name_constraints``,
+and ``cabin.ca.x509``'s handling of the extension) live in
+``tests/test_name_constraints.py``. Enforcement reaching every issuance
+door -- the two UI forms, the two REST endpoints, the two MCP tools, ACME
+finalize, cabin's own TLS certificate, and a renewal's carry-over of the
+extension including a route that ignores posted constraint fields -- lives
+in ``tests/test_name_constraints_doors.py`` and is not repeated here.
+
+This branch is red by design: none of ``cabin.ca.leaf``'s new names
+(``NameConstraintSpec``, ``parse_name_constraints``,
+``name_constraints_extension``, ``constraints_of``) exist on disk yet, and
+neither ``ca_service.create_hierarchy``/``create_intermediate_under`` nor
+``web/ca_ui.py``'s routes accept a constraint yet. ``cabin.ca.leaf`` is
+imported as a module (``leaf_mod``), following the same technique the two
+files above already use, so a missing symbol fails the one test that
+touches it rather than collection of the whole file.
+
+Real DOM parsing (``html.parser.HTMLParser``), never a bare substring
+search, for two reasons this project has been burned by before: a
+constraints block that "appears somewhere on the page" could just as well
+be the create form's own textarea, and an absent form field has to be
+proven absent from the *right* form, not merely absent as a page-wide
+string (the create form gains ``permitted_names`` right next to the import
+form that must never have it).
+"""
+
+import re
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
+from pathlib import Path
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from cabin.app import create_app
+from cabin.audit import AuditAction, AuditEvent
+from cabin.ca import leaf as leaf_mod
+from cabin.ca import service as ca_service
+from cabin.ca.service import CACertificate
+from cabin.ca.x509 import create_intermediate, create_root
+from cabin.config import Config
+from cabin.secrets import SecretStore
+from cabin.sessions import get_session
+from cabin.store import create_session_factory
+
+_PASSWORD = "whatever12345"
+
+
+# --- fixtures / helpers, mirroring tests/test_web_ca.py's own -----------------
+
+
+def make_config(tmp_path: Path) -> Config:
+    data_dir = tmp_path / "data"
+    return Config(port=8080, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db")
+
+
+@pytest.fixture
+def cfg(tmp_path: Path) -> Config:
+    return make_config(tmp_path)
+
+
+@pytest.fixture
+def client(cfg: Config) -> Iterator[TestClient]:
+    with TestClient(create_app(cfg), follow_redirects=False) as c:
+        yield c
+
+
+def _db(cfg: Config) -> Session:
+    return create_session_factory(cfg.db_url)()
+
+
+def _secrets(cfg: Config) -> SecretStore:
+    return SecretStore.open(cfg.data_dir, cfg.master_passphrase)
+
+
+def _setup_superadmin(client: TestClient) -> None:
+    resp = client.post("/setup", data={"username": "root", "password": _PASSWORD})
+    assert resp.status_code == 303
+
+
+def _csrf(client: TestClient, cfg: Config) -> str:
+    db = _db(cfg)
+    try:
+        row = get_session(db, client.cookies["cabin_session"])
+        assert row is not None
+        return row.csrf_token
+    finally:
+        db.close()
+
+
+def _rows(cfg: Config) -> list[CACertificate]:
+    db = _db(cfg)
+    try:
+        rows = ca_service.list_cas(db)
+        for row in rows:
+            _ = row.id, row.kind, row.name, row.status, row.parent_id, row.cert_pem
+        db.expunge_all()
+        return rows
+    finally:
+        db.close()
+
+
+def _by_name(cfg: Config, name: str) -> CACertificate:
+    matches = [row for row in _rows(cfg) if row.name == name]
+    assert len(matches) == 1, f"expected exactly one row named {name!r}, got {len(matches)}"
+    return matches[0]
+
+
+def _cert_of(row: CACertificate) -> x509.Certificate:
+    return x509.load_pem_x509_certificate(row.cert_pem.encode("ascii"))
+
+
+def _no_name_constraints(cert: x509.Certificate) -> None:
+    with pytest.raises(x509.ExtensionNotFound):
+        cert.extensions.get_extension_for_class(x509.NameConstraints)
+
+
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(CACertificate)
+            .where(CACertificate.kind == "root")
+            .order_by(CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
+def _create_ca(client: TestClient, cfg: Config, name: str = "cabin") -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names (``name`` with
+    " Root CA"/" Intermediate CA" appended by *this test file*, not by
+    production) so this file's many ``_by_name(cfg, "... Root CA")``-style
+    lookups keep finding exactly one row each.
+    """
+    resp = client.post(
+        "/ca/create",
+        data={
+            "name": f"{name} Root CA",
+            "key_type": "ecdsa-p256",
+            "root_years": 20,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": f"{name} Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+
+def _pem_cert(cert: x509.Certificate) -> str:
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+def _pem_key(key: object) -> str:
+    return key.private_bytes(  # type: ignore[attr-defined]
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+
+
+def _ca_created_event(cfg: Config, target_id: int) -> AuditEvent | None:
+    db = _db(cfg)
+    try:
+        event = db.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == AuditAction.ca_created.value,
+                AuditEvent.target_id == str(target_id),
+            )
+        )
+        if event is not None:
+            _ = event.detail  # decode while the session is open
+        return event
+    finally:
+        db.close()
+
+
+#: FR-3's four rejection shapes, shared between the /ca/create and
+#: /ca/{root_id}/intermediate loops below.
+_BAD_CONSTRAINT_INPUTS: list[tuple[str, str]] = [
+    ("wildcard", "*.example.com"),
+    ("host_bits_set", "10.1.2.3/8"),
+    ("not_a_hostname", "not a hostname"),
+    (
+        "too_many_entries",
+        "\n".join(f"h{i}.example.com" for i in range(leaf_mod.MAX_NAME_CONSTRAINTS + 1)),
+    ),
+]
+
+
+# --- a self-signed root that itself carries constraints (Out of Scope's own
+#     configuration: an imported root's constraints, which create_root
+#     cannot produce since FR-1 gives create_root no constraint argument
+#     at all) ----------------------------------------------------------------
+
+
+def _root_with_constraints(
+    subject_cn: str, permitted_dns: tuple[str, ...]
+) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)])
+    now = datetime.now(UTC)
+    key_usage = x509.KeyUsage(
+        digital_signature=False,
+        content_commitment=False,
+        key_encipherment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=True,
+        crl_sign=True,
+        encipher_only=False,
+        decipher_only=False,
+    )
+    nc = x509.NameConstraints(
+        permitted_subtrees=[x509.DNSName(d) for d in permitted_dns], excluded_subtrees=None
+    )
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=365 * 20))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+        .add_extension(key_usage, critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(nc, critical=True)
+    )
+    cert = builder.sign(key, algorithm=hashes.SHA256())
+    return cert, key
+
+
+# --- element scoping, mirroring test_web_ca.py's own helper -----------------
+#
+# spec 0023 moved per-hierarchy detail onto /ca/{ca_id}, where an
+# intermediate's own row (and only that row) carries its constraints block --
+# scoped by parsing actual tag nesting, never by slicing a fixed number of
+# characters after a marker (this project has been burned by that before).
+
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_TAG_RE = re.compile(r"""<(/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>""")
+_CLASS_RE = re.compile(r'class="([^"]*)"')
+
+
+def _row(html: str, marker: str, *, class_name: str | None = None, tag: str = "div") -> str:
+    """The full outer HTML of the innermost ``<tag class="class_name">``
+    element that contains ``marker``'s first occurrence."""
+    # A marker that is not on the page at all is a distinct failure from
+    # "no element of that class wraps it"; `html.index` alone would report
+    # it as a bare ValueError from inside this helper.
+    if marker not in html:
+        raise AssertionError(f"marker {marker!r} is not on the page at all")
+    marker_idx = html.index(marker)
+    stack: list[tuple[str, str, int]] = []  # (tag name, attrs text, start offset)
+    for m in _TAG_RE.finditer(html):
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue  # void or self-closing: no nesting depth to track
+        if not closing:
+            stack.append((name, attrs, m.start()))
+            continue
+        if not stack or stack[-1][0] != name:
+            continue  # not well-formed at this point; nothing to close
+        open_name, open_attrs, open_start = stack.pop()
+        if open_start <= marker_idx < m.end():
+            classes = _CLASS_RE.search(open_attrs)
+            # spec 0026: `class_name=None` scopes a `<tr>` by a marker inside
+            # it -- the two hierarchy tables' rows deliberately carry no class.
+            matches_class = class_name is None or (
+                classes is not None and class_name in classes.group(1).split()
+            )
+            if open_name == tag and matches_class:
+                return html[open_start : m.end()]
+    raise AssertionError(f"no <{tag} class={class_name!r}> element wraps {marker!r}")
+
+
+# --- real DOM parsing --------------------------------------------------------
+
+
+class _FormFieldNames(HTMLParser):
+    """The ``name`` attribute of every ``<input>``/``<textarea>`` inside the
+    ``<form>`` whose ``action`` equals ``action`` -- so "this field is
+    absent" can be asserted against the *right* form. The create form gains
+    exactly the field the import form must never have, so a page-wide
+    substring search would prove nothing (AC-10)."""
+
+    def __init__(self, action: str) -> None:
+        super().__init__()
+        self._action = action
+        self.found_form = False
+        self.field_names: list[str] = []
+        self._depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        if tag == "form" and attrs_dict.get("action") == self._action:
+            self.found_form = True
+            self._depth = 1
+            return
+        if self._depth > 0:
+            if tag == "form":
+                self._depth += 1
+            elif tag in ("input", "textarea"):
+                name = attrs_dict.get("name")
+                if name is not None:
+                    self.field_names.append(name)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._depth > 0 and tag == "form":
+            self._depth -= 1
+
+
+def _fields_of_form(html: str, action: str) -> _FormFieldNames:
+    parser = _FormFieldNames(action)
+    parser.feed(html)
+    return parser
+
+
+# === HTTP creation routes: both take constraints (FR-1, AC-1) ==================
+
+
+def test_ca_create_route_applies_constraints_to_the_intermediate(
+    client: TestClient, cfg: Config
+) -> None:
+    """AC-1, the ``permitted_names`` side specifically: the intermediate
+    carries a critical ``NameConstraints`` extension matching what was
+    posted -- read with ``cryptography`` off the stored ``cert_pem``, never
+    through a chain check. Constraints moved off ``/ca/create`` entirely
+    (FR-3: a root never takes one, proven separately by
+    ``test_import_form_offers_no_constraint_field``'s field-absence check),
+    so this now posts to ``/ca/{root_id}/intermediate`` -- the same route
+    ``test_ca_create_intermediate_route_applies_constraints`` covers with
+    ``excluded_names``; that sibling never exercises ``permitted_names``,
+    which is what this test still guards."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "wired")
+    root = _by_name(cfg, "wired Root CA")
+
+    resp = client.post(
+        f"/ca/{root.id}/intermediate",
+        data={
+            "name": "wired-child",
+            "key_type": "ecdsa-p256",
+            "years": 10,
+            "permitted_names": "example.com",
+            "excluded_names": "",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+    intermediate = _cert_of(_by_name(cfg, "wired-child"))
+    extension = intermediate.extensions.get_extension_for_class(x509.NameConstraints)
+    assert extension.critical is True
+    assert extension.value.permitted_subtrees == [x509.DNSName("example.com")]
+    assert extension.value.excluded_subtrees is None
+
+
+def test_ca_create_intermediate_route_applies_constraints(client: TestClient, cfg: Config) -> None:
+    """AC-1 via ``POST /ca/{root_id}/intermediate`` -- the rotation path,
+    which is 0017's only other way to add a further intermediate, and the
+    one FR-1 warns is easy to leave unwired while the wizard's own path
+    gets fixed."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "rotation-base")
+    root = _by_name(cfg, "rotation-base Root CA")
+
+    resp = client.post(
+        f"/ca/{root.id}/intermediate",
+        data={
+            "name": "rotated",
+            "key_type": "ecdsa-p256",
+            "years": 5,
+            "permitted_names": "",
+            "excluded_names": "lab.internal",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+    rotated = _cert_of(_by_name(cfg, "rotated"))
+    extension = rotated.extensions.get_extension_for_class(x509.NameConstraints)
+    assert extension.critical is True
+    assert extension.value.excluded_subtrees == [x509.DNSName("lab.internal")]
+    assert extension.value.permitted_subtrees is None
+
+
+def test_ca_create_intermediate_route_with_empty_constraint_fields_stays_unconstrained(
+    client: TestClient, cfg: Config
+) -> None:
+    """The counter-check for the same route: blank ``permitted_names`` and
+    ``excluded_names`` (the form's own default) must not be read as "empty
+    strings", i.e. an empty-but-present ``NameConstraints`` extension --
+    RFC 5280 forbids one with both sides absent, and FR-2 requires *no*
+    extension at all here."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "plain-base")
+    root = _by_name(cfg, "plain-base Root CA")
+
+    resp = client.post(
+        f"/ca/{root.id}/intermediate",
+        data={
+            "name": "plain-child",
+            "key_type": "ecdsa-p256",
+            "years": 5,
+            "permitted_names": "",
+            "excluded_names": "",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+    _no_name_constraints(_cert_of(_by_name(cfg, "plain-child")))
+
+
+# === Bad input is refused at the route, before anything is written (AC-11) =====
+
+
+def test_ca_create_intermediate_rejects_bad_constraint_input_and_writes_no_row(
+    client: TestClient, cfg: Config
+) -> None:
+    """The same four inputs at the rotation path: 400, and no new row under
+    the root -- the row count that matters here is the *total*, since a
+    silently-written unconstrained fallback would also leave the count
+    looking right for the wrong reason."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "guarded-base")
+    root = _by_name(cfg, "guarded-base Root CA")
+    csrf = _csrf(client, cfg)
+    baseline = len(_rows(cfg))
+
+    for label, bad_value in _BAD_CONSTRAINT_INPUTS:
+        resp = client.post(
+            f"/ca/{root.id}/intermediate",
+            data={
+                "name": f"bad-{label}",
+                "key_type": "ecdsa-p256",
+                "years": 5,
+                "permitted_names": bad_value,
+                "excluded_names": "",
+                "csrf_token": csrf,
+            },
+        )
+        assert resp.status_code == 400, f"{label}: expected 400, got {resp.status_code}"
+        assert len(_rows(cfg)) == baseline, f"{label}: a row was written by a rejected creation"
+
+
+def test_ca_create_route_names_the_offending_line_for_host_bits(
+    client: TestClient, cfg: Config
+) -> None:
+    """FR-3's host-bits rule specifically: ``10.1.2.3/8`` is refused rather
+    than silently widened to ``10.0.0.0/8``, and the operator is told
+    *which line* was wrong -- not just that the form failed -- so they can
+    find and fix it (AC-6). Constraints moved off ``/ca/create`` entirely
+    (FR-3: a root never takes one), so this is posted to
+    ``/ca/{root_id}/intermediate`` now; the sibling test
+    ``test_ca_create_intermediate_rejects_bad_constraint_input_and_writes_no_row``
+    covers the same route's 400/no-row behaviour for every bad input but
+    never checks the response names the offending line, which is this
+    test's whole point."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "hostbits")
+    root = _by_name(cfg, "hostbits Root CA")
+    before = len(_rows(cfg))
+
+    resp = client.post(
+        f"/ca/{root.id}/intermediate",
+        data={
+            "name": "hostbits-child",
+            "key_type": "ecdsa-p256",
+            "years": 10,
+            "permitted_names": "10.1.2.3/8",
+            "excluded_names": "",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 400
+    assert "10.1.2.3/8" in resp.text
+    assert len(_rows(cfg)) == before
+
+
+# === /ca shows what each certificate carries (AC-12) ============================
+
+
+def _seed_alpha_beta(cfg: Config) -> None:
+    """A constrained hierarchy and an unconstrained one, seeded directly
+    through ``ca_service`` -- this test is about what the page *renders*,
+    not about the creation route (already covered above)."""
+    db = _db(cfg)
+    try:
+        secrets = _secrets(cfg)
+        ca_service.create_hierarchy(
+            db,
+            secrets,
+            "alpha Root CA",
+            "alpha Intermediate CA",
+            constraints=leaf_mod.NameConstraintSpec(permitted_dns=("example.com",)),
+        )
+        ca_service.create_hierarchy(db, secrets, "beta Root CA", "beta Intermediate CA")
+    finally:
+        db.close()
+
+
+def test_ca_page_shows_constraints_per_row(client: TestClient, cfg: Config) -> None:
+    """AC-12's positive half: alpha's intermediate renders ``example.com`` as
+    visible text, scoped to the ``.constraints`` block on that
+    intermediate's own page (spec 0023 moved per-row detail off ``/ca``,
+    spec 0024 FR-8 made every action its own headed ``.section``, spec 0026
+    moved everything about one intermediate onto its own page) -- not found
+    by searching the whole page, which would pass even if it were rendered
+    somewhere else entirely."""
+    _setup_superadmin(client)
+    _seed_alpha_beta(cfg)
+
+    alpha_root = _by_name(cfg, "alpha Root CA")
+    alpha_intermediate = _by_name(cfg, "alpha Intermediate CA")
+    page = client.get(f"/ca/{alpha_root.id}/issuer/{alpha_intermediate.id}")
+    assert page.status_code == 200, page.text
+    alpha_block = _row(page.text, "example.com", class_name="constraints", tag="div")
+    assert "example.com" in alpha_block
+
+    expected = leaf_mod.constraints_of(_cert_of(alpha_intermediate))
+    assert expected.permitted_dns == ("example.com",)
+
+
+def test_ca_page_shows_no_block_for_an_unconstrained_row(client: TestClient, cfg: Config) -> None:
+    """AC-12's negative half: beta's row renders no constraints block at
+    all. Checked as the absence of the block's own vocabulary
+    ("permitted"/"excluded", the words FR-9's UI uses and the words
+    ``permitted_names``/``excluded_names`` are built from) inside beta's own
+    ``.section`` block on its hierarchy's own detail page -- not an empty
+    string, which a block rendering ``""`` for an empty tuple would also
+    satisfy."""
+    _setup_superadmin(client)
+    _seed_alpha_beta(cfg)
+
+    beta_root = _by_name(cfg, "beta Root CA")
+    beta_intermediate = _by_name(cfg, "beta Intermediate CA")
+    beta_page = client.get(f"/ca/{beta_root.id}/issuer/{beta_intermediate.id}")
+    assert beta_page.status_code == 200, beta_page.text
+    beta_html = beta_page.text.lower()
+    assert "permitted" not in beta_html
+    assert "excluded" not in beta_html
+
+    # ...and the counter-check, without which the two assertions above would
+    # equally pass on a page that renders no constraints block for anybody:
+    # the constrained intermediate's own page does carry that vocabulary.
+    alpha_root = _by_name(cfg, "alpha Root CA")
+    alpha_intermediate = _by_name(cfg, "alpha Intermediate CA")
+    alpha_html = client.get(f"/ca/{alpha_root.id}/issuer/{alpha_intermediate.id}").text.lower()
+    assert "permitted" in alpha_html
+
+    assert leaf_mod.constraints_of(_cert_of(beta_intermediate)).is_empty()
+
+
+def test_ca_page_shows_an_imported_roots_constraints(client: TestClient, cfg: Config) -> None:
+    """Out of Scope's own configuration, made visible: cabin never writes
+    constraints on a root it generates (FR-1), but an *imported* root may
+    carry them -- decided by whoever signed it, not by cabin. AC-12 requires
+    that they show up on the root's own row, on its hierarchy's own detail
+    page."""
+    _setup_superadmin(client)
+    root_cert, root_key = _root_with_constraints("Delegated Root CA", ("partner.example",))
+    intermediate_cert, intermediate_key = create_intermediate(
+        root_cert, root_key, "Delegated Intermediate CA", "ecdsa-p256"
+    )
+    resp = client.post(
+        "/ca/import",
+        data={
+            "cert_pem": _pem_cert(intermediate_cert),
+            "key_pem": _pem_key(intermediate_key),
+            "chain_pem": _pem_cert(root_cert),
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+    root = _by_name(cfg, "Delegated Root CA")
+    html = client.get(f"/ca/{root.id}").text
+    # spec 0026: the root section does not move (FR-1), so this requirement
+    # stays on this page -- but its scoping does change. The old window
+    # `html[root_i:intermediate_i]` only worked because the intermediate's
+    # own `.section` followed the root's; an intermediate is a table row
+    # now. Scoped to the root's own `.section`, by its `<h2>`, the way
+    # `test_web_ca.py`'s imported-root test already does.
+    root_block = _row(html, f"<h2>{root.name}</h2>", class_name="section")
+    assert "partner.example" in root_block
+
+    expected = leaf_mod.constraints_of(_cert_of(_by_name(cfg, "Delegated Root CA")))
+    assert expected.permitted_dns == ("partner.example",)
+
+
+# === The import form offers no constraint field (FR-9, AC-10) ==================
+
+
+def test_import_form_offers_no_constraint_field(client: TestClient, cfg: Config) -> None:
+    """An imported certificate is already signed; its constraints were
+    decided by whoever signed it, and a field that appeared to change them
+    would change nothing. Spec 0024 FR-3 also removed ``permitted_names``/
+    ``excluded_names`` from ``/ca/new`` itself -- a root never takes a
+    constraint -- so the counter-proof that the parser is actually scoped
+    to the right form (not merely failing to find either) now has to come
+    from the intermediate-add form on a hierarchy's own detail page, the
+    only place those fields still live.
+    """
+    _setup_superadmin(client)
+
+    import_html = client.get("/transfer/ca-import").text
+    import_form = _fields_of_form(import_html, "/ca/import")
+    assert import_form.found_form is True
+    assert "permitted_names" not in import_form.field_names
+    assert "excluded_names" not in import_form.field_names
+
+    # the intermediate-add form, on a hierarchy's own detail page, DOES
+    # carry the fields -- proving the parser is actually scoped to the
+    # right form, not failing to find either.
+    resp = client.post(
+        "/ca/create",
+        data={
+            "name": "any",
+            "key_type": "ecdsa-p256",
+            "root_years": 20,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+    root_id = _last_root_id(cfg)
+    # spec 0029 FR-13 re-points this read. The requirement is unchanged --
+    # `permitted_names`/`excluded_names` live on the intermediate-add form and
+    # nowhere else, which is what makes the two absences above scoped rather
+    # than vacuous -- but that form is now behind a URL, and this is the URL.
+    detail_html = client.get(f"/ca/{root_id}?add=intermediate").text
+    intermediate_form = _fields_of_form(detail_html, f"/ca/{root_id}/intermediate")
+    assert intermediate_form.found_form is True
+    assert "permitted_names" in intermediate_form.field_names
+    assert "excluded_names" in intermediate_form.field_names
+
+    # unchanged once a hierarchy exists too -- the import page is not
+    # conditional on there being anything to import alongside.
+    import_html_after = client.get("/transfer/ca-import").text
+    import_form_after = _fields_of_form(import_html_after, "/ca/import")
+    assert import_form_after.found_form is True
+    assert "permitted_names" not in import_form_after.field_names
+    assert "excluded_names" not in import_form_after.field_names
+
+
+def test_imported_intermediate_constraint_is_displayed_on_ca(
+    client: TestClient, cfg: Config
+) -> None:
+    """AC-10's display half: an imported *intermediate* (not just an
+    imported root, covered separately above) shows its own constraint on
+    its hierarchy's own detail page, read from its certificate. Enforcement
+    of this same
+    certificate -- issuing inside the permitted set and refusing outside it,
+    at every door -- is already proven by
+    ``tests/test_name_constraints_doors.py::test_imported_intermediate_is_enforced_from_its_certificate``;
+    repeating it here would only duplicate that file. What is new here is
+    that the page shows what that test relies on being true."""
+    _setup_superadmin(client)
+    root_cert, root_key = create_root("Delegating Root CA", "ecdsa-p256")
+    spec = leaf_mod.NameConstraintSpec(permitted_dns=("delegated.example",))
+    intermediate_cert, intermediate_key = create_intermediate(
+        root_cert,
+        root_key,
+        "Delegated Partner Intermediate CA",
+        "ecdsa-p256",
+        name_constraints=leaf_mod.name_constraints_extension(spec),
+    )
+    resp = client.post(
+        "/ca/import",
+        data={
+            "cert_pem": _pem_cert(intermediate_cert),
+            "key_pem": _pem_key(intermediate_key),
+            "chain_pem": _pem_cert(root_cert),
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+    root = _by_name(cfg, "Delegating Root CA")
+    intermediate = _by_name(cfg, "Delegated Partner Intermediate CA")
+    # spec 0026: an imported intermediate's constraints, read from its
+    # certificate, are displayed on that intermediate's own page.
+    page = client.get(f"/ca/{root.id}/issuer/{intermediate.id}")
+    assert page.status_code == 200, page.text
+    block = _row(page.text, "delegated.example", class_name="constraints", tag="div")
+    assert "delegated.example" in block
+
+
+# === Audit: ca_created records the constraints that were actually produced =====
+# (AC-16, FR-10)
+
+
+def test_audit_ca_created_records_the_constraints_via_intermediate_route(
+    client: TestClient, cfg: Config
+) -> None:
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "audit-base")
+    root = _by_name(cfg, "audit-base Root CA")
+    resp = client.post(
+        f"/ca/{root.id}/intermediate",
+        data={
+            "name": "audited-child",
+            "key_type": "ecdsa-p256",
+            "years": 5,
+            "permitted_names": "child.audit.example",
+            "excluded_names": "",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+    child = _by_name(cfg, "audited-child")
+    event = _ca_created_event(cfg, child.id)
+    assert event is not None
+    assert event.detail is not None
+    assert event.detail["permitted"] == ["child.audit.example"]
+    assert event.detail["excluded"] == []
+
+
+def test_audit_records_empty_lists_for_an_unconstrained_ca(client: TestClient, cfg: Config) -> None:
+    """FR-10: present and empty, not absent -- so the log can tell "this CA
+    was created unconstrained" apart from "this cabin version didn't record
+    it". Checked on the intermediate: FR-4 drops `permitted`/`excluded`
+    from a bare root's own `ca_created` detail entirely (a root never takes
+    a constraint), so the intermediate route -- posted with both fields
+    blank -- is the only place left this can be observed."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, "unaudited-plain")
+    root = _by_name(cfg, "unaudited-plain Root CA")
+
+    resp = client.post(
+        f"/ca/{root.id}/intermediate",
+        data={
+            "name": "unaudited-plain-child",
+            "key_type": "ecdsa-p256",
+            "years": 10,
+            "permitted_names": "",
+            "excluded_names": "",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303, resp.text
+
+    intermediate = _by_name(cfg, "unaudited-plain-child")
+    event = _ca_created_event(cfg, intermediate.id)
+    assert event is not None
+    assert event.detail is not None
+    assert event.detail["permitted"] == []
+    assert event.detail["excluded"] == []

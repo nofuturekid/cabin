@@ -63,6 +63,13 @@ DNS_RESOLVERS = "dns_resolvers"
 #: rather than improve the answer.
 MAX_DNS_RESOLVERS = 4
 
+#: Which CA issuer signs cabin's own TLS certificate (spec 0022 FR-17).
+#: Holds a ``ca_certificates.id`` as text; empty means unchosen. Stored here
+#: rather than derived, so that a rotation which would otherwise change the
+#: chain a fleet already trusts is always a recorded decision, never an
+#: implicit re-pick on the next renewal.
+TLS_ISSUER_ID = "tls_issuer_id"
+
 #: What a checkbox-style setting stores when it is on / off.
 TRUE = "true"
 FALSE = "false"
@@ -174,3 +181,32 @@ def validate_base_url(raw: str) -> str:
     if canonical.endswith("/"):
         raise SettingError("the base URL must not end with a slash")
     return canonical
+
+
+def validate_base_url_port_for_tls(base_url: str, *, tls: bool) -> None:
+    """Spec 0022 FR-13: refuse an explicit port other than 443 on the base
+    URL while TLS is on.
+
+    ``public_http_origin`` (``ca/leaf.py``) forces every CDP/AIA URL to
+    ``http`` and drops an explicit ``:443``, but keeps any other port
+    (spec 0017 AC-9). With TLS on, that port is cabin's *TLS* port, so
+    ``base_url=https://host:8443`` would bake ``http://host:8443/crl/...``
+    into every certificate cabin issues -- a plaintext URL aimed at a TLS
+    listener, unreachable by any relying party.
+
+    Takes the caller's ``config.tls`` rather than reading it itself: this
+    module has no ``Config`` to read, by design (see the module docstring),
+    so the route calling this is what has to know whether TLS is on. Call it
+    with the value :func:`validate_base_url` already returned, after that
+    call has succeeded -- it does not repeat that validation.
+    """
+    if not tls or not base_url:
+        return
+    port = urlparse(base_url).port
+    if port is not None and port != 443:
+        raise SettingError(
+            f"the base URL must not name a port other than 443 while TLS is on "
+            f"(got :{port}): with TLS on, that port is cabin's TLS listener, and the "
+            "CRL/CA-certificate URLs baked into new certificates would point at it "
+            "instead of the plaintext PKI listener"
+        )

@@ -1,0 +1,20 @@
+{% extends "layout.html" %}
+{% set nav_current = "" %}
+{% block title %}Not permitted{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Not permitted</h1>
+  </div>
+</div>
+<p class="note">
+  {% if csrf_mismatch %}
+  This form was submitted with a token this session does not recognise. Open the page again and retry.
+  {% else %}
+  Your role does not allow this page. Ask a superadmin if you need it.
+  {% endif %}
+</p>
+<div class="actions">
+  <a class="button-link" href="/certs">Back to the inventory</a>
+</div>
+{% endblock %}

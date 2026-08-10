@@ -1,0 +1,27 @@
+{
+  "_": "The selectors naming spec 0028's grouped-list classes in src/cabin/web/static/cabin.css, recorded at spec 0030's base commit 964a208. FR-9 reuses that component rather than re-implementing it, so a rule added for one of these names is the component written twice. Regenerated only by a deliberate act.",
+  "selectors": {
+    "row-root": [
+      ".row-root",
+      ".row-root td:first-child a"
+    ],
+    "row-child": [
+      ".row-child",
+      ".row-child td:first-child"
+    ],
+    "tree": [
+      ".tree"
+    ],
+    "state-active": [
+      ".state-active"
+    ],
+    "state-retired": [
+      ".state-retired"
+    ],
+    "rowlink": [
+      ".rows tbody tr:has(.rowlink):hover",
+      ".rows tbody tr:has(.rowlink:focus-visible)",
+      ".rowlink::after"
+    ]
+  }
+}

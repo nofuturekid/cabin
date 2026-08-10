@@ -75,7 +75,12 @@ USER 65532:65532
 
 # stdlib only -- the image has no curl and no wget, and adding one just for
 # the healthcheck would grow it for nothing.
+#
+# Spec 0022 FR-15: $PORT speaks TLS once CABIN_TLS is on, so the probe has to
+# pick its scheme from the same flag cabin itself reads, with verification
+# off -- stage 1 is self-signed by definition and this is a liveness check
+# against 127.0.0.1, not a trust decision.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('PORT','8080'), timeout=3).status == 200 else 1)"]
+    CMD ["python", "-c", "import os,ssl,urllib.request,sys; tls=os.environ.get('CABIN_TLS','').strip().lower() in ('true','1'); scheme='https' if tls else 'http'; ctx=ssl._create_unverified_context() if tls else None; sys.exit(0 if urllib.request.urlopen('%s://127.0.0.1:%s/healthz' % (scheme, os.environ.get('PORT','8080')), timeout=3, context=ctx).status == 200 else 1)"]
 
 ENTRYPOINT ["cabin"]

@@ -10,19 +10,24 @@
   {% if can_issue %}<a class="button-link" href="/certs/new">Issue certificate</a>{% endif %}
 </div>
 
+<div class="filters">
+  <div class="seg">
+    {% for option in statuses %}
+    <a class="{% if option == status %} seg-on {% endif %}" href="{{ status_urls[option] }}" hx-get="{{ status_urls[option] }}" hx-select="#inventory" hx-target="#inventory" hx-swap="outerHTML" hx-push-url="true">{{ option }}</a>
+    {% endfor %}
+  </div>
+</div>
+
 <form method="get" action="/certs" class="filters">
   <input type="search" name="q" value="{{ q }}" placeholder="common name, SAN or serial" />
-  <select name="status">
-    {% for option in statuses %}
-    <option value="{{ option }}" {% if option == status %}selected{% endif %}>{{ option }}</option>
-    {% endfor %}
-  </select>
+  <input type="hidden" name="status" value="{{ status }}" />
   <button type="submit">Filter</button>
 </form>
 
+<div id="inventory">
 {% if certs %}
 <div class="scroller">
-  <table>
+  <table class="rows cols-certs">
     <thead>
       <tr>
         <th>Common name</th>
@@ -37,17 +42,17 @@
     <tbody>
       {% for cert in certs %}
       <tr>
-        <td><a href="/certs/{{ cert.id }}">{{ cert.subject_cn or "(no subject)" }}</a></td>
-        <td class="nowrap">{{ cert.profile }}</td>
+        <td><a class="rowlink" href="/certs/{{ cert.id }}">{{ cert.subject_cn or "(no subject)" }}</a></td>
+        <td>{{ cert.profile }}</td>
         <td><span class="tag tag-source-{{ cert.source }}">{{ cert.source }}</span></td>
         <td class="sans-list">
           {% for san in cert.sans %}<span>{{ san }}</span>{% endfor %}
           {% if cert.sans_more %}<span class="more">+{{ cert.sans_more }} more</span>{% endif %}
         </td>
-        <td class="mono nowrap">{{ cert.serial_short }}…</td>
-        <td class="nowrap">{{ "yes" if cert.has_key else "no" }}</td>
+        <td class="mono">{{ cert.serial_short }}…</td>
+        <td>{{ "yes" if cert.has_key else "no" }}</td>
         <td>
-          <span class="nowrap">{{ cert.not_after }}</span>
+          <span>{{ cert.not_after }}</span>
           <span class="tag tag-{{ cert.status }}">{{ cert.status }}</span>
         </td>
       </tr>
@@ -67,8 +72,9 @@
 <div class="meta">
   <span>{% if certs %}{{ total }} certificate(s) — page {{ page }} of {{ pages }}{% endif %}</span>
   <span class="pager">
-    {% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %}
-    {% if next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}
+    {% if prev_url %}<a href="{{ prev_url }}" hx-get="{{ prev_url }}" hx-select="#inventory" hx-target="#inventory" hx-swap="outerHTML" hx-push-url="true">← Previous</a>{% endif %}
+    {% if next_url %}<a href="{{ next_url }}" hx-get="{{ next_url }}" hx-select="#inventory" hx-target="#inventory" hx-swap="outerHTML" hx-push-url="true">Next →</a>{% endif %}
   </span>
+</div>
 </div>
 {% endblock %}

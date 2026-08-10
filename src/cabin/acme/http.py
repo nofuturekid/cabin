@@ -42,9 +42,12 @@ from cabin.settings import ACME_ENABLED, BASE_URL, get_flag, get_setting
 from cabin.web.deps import get_db
 
 ACME_PREFIX = "/acme"
-DIRECTORY_PATH = f"{ACME_PREFIX}/directory"
+#: The per-issuer segment (spec 0019 FR-2): the only place an issuer appears
+#: in a URL. Everything else -- accounts, orders, authorizations,
+#: challenges, certificates -- is an opaque object URL that already knows
+#: its issuer through the account that owns it.
+CA_PREFIX = f"{ACME_PREFIX}/ca/"
 NEW_NONCE_PATH = f"{ACME_PREFIX}/new-nonce"
-NEW_ACCOUNT_PATH = f"{ACME_PREFIX}/new-account"
 NEW_ORDER_PATH = f"{ACME_PREFIX}/new-order"
 KEY_CHANGE_PATH = f"{ACME_PREFIX}/key-change"
 REVOKE_CERT_PATH = f"{ACME_PREFIX}/revoke-cert"
@@ -65,13 +68,52 @@ CERT_PREFIX = f"{ACME_PREFIX}/cert/"
 PEM_CHAIN_CONTENT_TYPE = "application/pem-certificate-chain"
 
 
-def directory_url(db: Session) -> str | None:
-    """The URL to hand an ACME client, or None while no base URL is set
-    (FR-5). Mirrors :func:`cabin.ca.crl.distribution_url`: a URL cabin puts
-    in front of an operator has to be one that works from elsewhere, and
-    only the configured base URL is known to be that."""
+def directory_path(issuer_id: int) -> str:
+    """Spec 0019 FR-2: this issuer's directory path. Not validated against
+    the database here -- ``issuer_id`` may name nothing at all -- because
+    this function is a pure path builder used both by the route that
+    resolves it for real and by :func:`issuer_in_path`'s counterpart at the
+    boundary, where a wrong id has to become a 404, not an exception raised
+    two layers away from the request."""
+    return f"{CA_PREFIX}{issuer_id}/directory"
+
+
+def new_account_path(issuer_id: int) -> str:
+    """Spec 0019 FR-2: this issuer's new-account path. See
+    :func:`directory_path` for why ``issuer_id`` is not checked here."""
+    return f"{CA_PREFIX}{issuer_id}/new-account"
+
+
+def directory_url(db: Session, issuer_id: int) -> str | None:
+    """The URL to hand an ACME client for one issuer, or None while no base
+    URL is set (FR-5). Mirrors :func:`cabin.ca.crl.distribution_url`: a URL
+    cabin puts in front of an operator has to be one that works from
+    elsewhere, and only the configured base URL is known to be that."""
     base = get_setting(db, BASE_URL)
-    return f"{base}{DIRECTORY_PATH}" if base else None
+    return f"{base}{directory_path(issuer_id)}" if base else None
+
+
+def issuer_in_path(path: str) -> int | None:
+    """Spec 0019 FR-11: which issuer, if any, this request path names --
+    a pure function of the path string, so :func:`require_acme_enabled` is
+    its only caller and the middleware below never parses a URL of its own.
+
+    Returns the id for any path under :data:`CA_PREFIX` with a numeric
+    second segment, and ``None`` for every resource prefix
+    (``/acme/cert/…``, ``/acme/account/…``) and for a non-numeric one
+    (``/acme/ca/abc/directory``) -- the latter falls through to the
+    catch-all's 404 before FR-4 ever gets a say, and this function does not
+    know or care whether the id resolves to a real row. That last point
+    decides R7: a 404 for an unknown or non-numeric id under the prefix
+    still carries an ``index`` link naming the directory the client asked
+    about, because resolving it here would mean this function stops being
+    pure -- it would need the database to decide a header on a request that
+    is about to fail anyway.
+    """
+    if not path.startswith(CA_PREFIX):
+        return None
+    segment = path[len(CA_PREFIX) :].split("/", 1)[0]
+    return int(segment) if segment.isdigit() else None
 
 
 def origin(db: Session) -> str:
@@ -115,6 +157,12 @@ def require_acme_enabled(request: Request, db: Session = Depends(get_db)) -> Non
     # and cannot observe a different answer if it changed in between.
     request.state.acme_enabled = True
     request.state.acme_origin = base
+    # Spec 0019 FR-11: only a request under CA_PREFIX gets an `index` link,
+    # and only to its own directory -- see acme_response_headers below for
+    # why this is a path parse rather than a lookup through the account.
+    issuer_id = issuer_in_path(request.url.path)
+    if issuer_id is not None:
+        request.state.acme_directory_path = directory_path(issuer_id)
 
 
 #: What RFC 8555 6.2 requires an ACME POST to announce.
@@ -167,22 +215,42 @@ def _wants_nonce(request: Request) -> bool:
 async def acme_response_headers(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
-    """FR-4: the directory ``Link`` on every ACME response, and a fresh
-    ``Replay-Nonce`` on every response that could be followed by a POST --
-    success or failure alike.
+    """FR-11: the directory ``Link`` on the two per-issuer responses, and a
+    fresh ``Replay-Nonce`` on every response that could be followed by a
+    POST -- success or failure alike.
 
     Middleware rather than a response helper: an error raised anywhere -- in
     a dependency, in the JWS layer, in a route -- still has to come back with
     a usable nonce, or the client cannot even retry. Requests that never
     passed the gate are left alone, so a disabled cabin still says nothing.
+
+    Spec 0019 removed the single shared directory this header used to name
+    unconditionally, and there is no longer one URL to put in its place: an
+    account URL, an order URL and so on all know their issuer through the
+    account, not through the path, so there is nothing in the request to
+    build a link from except when :func:`require_acme_enabled` parsed one
+    out of the path itself (``request.state.acme_directory_path``). RFC 8555
+    7.1 describes ``index`` as present on resources other than the
+    directory; deriving it from the account instead -- which would cover
+    those other resources too -- means threading the request through
+    :func:`verified` and its eleven call sites for a header the interop gate
+    (AC-13) proves no client actually reads: certbot and acme.sh complete a
+    full issuance with it absent from nine of their ten responses. So the
+    two per-issuer routes carry a link to their own directory, and every
+    other ACME response carries none -- a deliberate, partial deviation
+    rather than a bug.
     """
     response = await call_next(request)
     if getattr(request.state, "acme_enabled", False) is not True:
         return response
-    # Appended, never assigned: a route may have set a Link of its own --
-    # spec 0011's challenge trigger owes the client an ``up`` link to the
-    # authorization -- and overwriting it here would take that away.
-    response.headers.append("Link", f'<{request.state.acme_origin}{DIRECTORY_PATH}>;rel="index"')
+    directory_for_link = getattr(request.state, "acme_directory_path", None)
+    if directory_for_link is not None:
+        # Appended, never assigned: a route may have set a Link of its own --
+        # spec 0011's challenge trigger owes the client an ``up`` link to the
+        # authorization -- and overwriting it here would take that away.
+        response.headers.append(
+            "Link", f'<{request.state.acme_origin}{directory_for_link}>;rel="index"'
+        )
     if not _wants_nonce(request):
         return response
     db: Session = request.app.state.db()

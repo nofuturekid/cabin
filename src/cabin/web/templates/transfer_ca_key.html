@@ -1,0 +1,78 @@
+{% extends "layout.html" %}
+{% set nav_current = "ca_key" %}
+{% block title %}CA key — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>CA key</h1>
+    <p class="sub">
+      Export a CA's certificate and private key as a password-protected
+      PKCS#12 file. Whoever receives it can issue as that CA, for as long as
+      its certificate is valid, and cabin will not see any of it -- it can
+      only revoke what it knows about. Superadmin only, and audited.
+    </p>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="scroller">
+  <table class="rows cols-ca-keys">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Kind</th>
+        <th>Key</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr class="row-root state-active">
+        <td>{{ row.name }}</td>
+        <td>{{ row.kind }}</td>
+        <td>{% if row.exportable %}<span class="tag tag-valid">stored on this instance</span>{% else %}<span class="tag">no private key on this instance</span>{% endif %}</td>
+      </tr>
+      {% for issuer in row.issuers %}
+      <tr class="row-child state-active">
+        <td><span class="tree" aria-hidden="true">{{ "└" if loop.last else "├" }}</span>{{ issuer.name }}</td>
+        <td>{{ issuer.kind }}</td>
+        <td>{% if issuer.exportable %}<span class="tag tag-valid">stored on this instance</span>{% else %}<span class="tag">no private key on this instance</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if exportable_rows %}
+<div class="section">
+  <div>
+    <h2>Export</h2>
+    <p class="help">
+      One CA, one file, one password. Nothing is written to disk -- the
+      bundle is built in memory and streamed straight back.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/transfer/ca-key">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="ca_id">CA</label>
+        <select id="ca_id" name="ca_id" required>
+          {% for row in exportable_rows %}
+          <option value="{{ row.id }}" {% if values.get('ca_id')|string == row.id|string %}selected{% endif %}>{{ row.name }} ({{ row.kind }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="password">Bundle password (at least 8 characters)</label>
+        <input id="password" type="password" name="password" minlength="8" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Export CA key</button></div>
+    </form>
+  </div>
+</div>
+{% else %}
+<p class="note">No CA certificate on this instance has a private key stored.</p>
+{% endif %}
+{% endblock %}

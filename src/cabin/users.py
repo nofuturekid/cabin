@@ -152,9 +152,24 @@ def reset_password(db: Session, user_id: int, new_password: str) -> User:
 
 
 def delete_user(db: Session, user_id: int) -> None:
-    """Delete a user, refusing to delete the last superadmin."""
+    """Delete a user, refusing to delete the last superadmin.
+
+    Clears the user's issuer grants first, in the same transaction
+    (spec 0018 FR-10). ``user_issuers.user_id`` declares no ``ondelete`` --
+    deliberately, so that cabin's SQLite foreign-key enforcement
+    (``store/__init__.py``) turns a forgotten cleanup here into a loud
+    ``IntegrityError`` on the delete below rather than a silent orphan row.
+    This is that cleanup, not a defensive extra: without it, a user who
+    holds even one grant becomes permanently undeletable.
+    """
+    # Imported here, not at module level: cabin.issuer_grants imports
+    # cabin.users to build a Principal from a User row, so a top-level
+    # import here would make the two modules import each other circularly.
+    from cabin.issuer_grants import UserIssuer
+
     user = get_user(db, user_id)
     if user.role == Role.superadmin.value and _count_superadmins(db, exclude_id=user.id) == 0:
         raise LastSuperadminError("cannot delete the last superadmin")
+    db.execute(sa.delete(UserIssuer).where(UserIssuer.user_id == user_id))
     db.delete(user)
     db.commit()

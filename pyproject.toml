@@ -1,6 +1,6 @@
 [project]
 name = "cabin"
-version = "0.1.0"
+version = "0.2.0"
 description = "All-in-one internal CA: web UI, REST API, ACME server, direct issuance and CSR signing in a single container"
 readme = "README.md"
 license = { file = "LICENSE" }

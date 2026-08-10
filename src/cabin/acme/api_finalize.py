@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
-from cabin import audit
+from cabin import audit, issuer_grants
 from cabin.acme import csr as csr_policy
 from cabin.acme import service
 from cabin.acme.errors import AcmeError, ErrorType
@@ -42,18 +42,24 @@ from cabin.acme.http import (
     not_found,
     order_json,
     owned_order,
+    url,
     verified,
 )
 from cabin.acme.jws import KeyMode, VerifiedRequest, b64decode, key_mode
-from cabin.acme.models import AcmeOrder, OrderStatus
+from cabin.acme.models import AcmeAccount, AcmeOrder, OrderStatus
 from cabin.audit import AuditAction, acme_actor
 from cabin.ca import certs as certs_service
 from cabin.ca import crl as crl_service
 from cabin.ca import service as ca_service
-from cabin.ca.certs import Certificate, CertSource
-from cabin.ca.leaf import MAX_CN_LENGTH, IssueError, Profile
+from cabin.ca.certs import Certificate, CertSource, Issued
+from cabin.ca.leaf import DEFAULT_DAYS, MAX_CN_LENGTH, IssueError, NameConstraintError, Profile
 from cabin.ca.revocation import RevocationReason
-from cabin.ca.service import CANotConfiguredError
+from cabin.ca.service import (
+    CANotConfiguredError,
+    IssuerRequiredError,
+    IssuerRetiredError,
+    UnknownIssuerError,
+)
 from cabin.secrets import SecretsError
 from cabin.web.deps import client_ip, get_db
 
@@ -153,7 +159,8 @@ def finalize_order(
         processing.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
         return processing
 
-    row = _issue(request, db, order, der)
+    issued = _issue(request, db, account, order, der)
+    row = issued.row
     # Two commits, and a crash between them leaves the order ``processing``
     # with a certificate nobody can reach: it exists in the inventory (where
     # an operator can see and revoke it), but the order never names it and
@@ -173,8 +180,17 @@ def finalize_order(
         target_id=row.id,
         # The CSR itself stays out of the log, as it does for the UI and the
         # API (spec 0009 FR-3): it is bulky, and what it asked for is already
-        # described by the certificate that came out of it.
-        detail={**audit.certificate_detail(row), "order": order.id},
+        # described by the certificate that came out of it. Spec 0017 FR-7:
+        # ACME requests no explicit validity, so DEFAULT_DAYS is what was
+        # implicitly asked for when the clamp fired.
+        detail={
+            **audit.certificate_detail(
+                row,
+                days_requested=DEFAULT_DAYS if issued.capped_from is not None else None,
+                validity_capped_from=issued.capped_from,
+            ),
+            "order": order.id,
+        },
         ip=client_ip(request, db),
     )
     return json_response(order_json(db, order))
@@ -202,7 +218,9 @@ def _subject_cn(identifiers: list[dict[str, str]]) -> str | None:
     return None
 
 
-def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certificate:
+def _issue(
+    request: Request, db: Session, account: AcmeAccount, order: AcmeOrder, der: bytes
+) -> Issued:
     """Sign the CSR through the spec-0005 path, or give the order back.
 
     The SANs are taken from the *order*, not from the CSR: they are the
@@ -211,6 +229,20 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certi
     issued certificate. They are equal by the time this runs -- that is what
     :func:`cabin.acme.csr.check_identifiers` established -- so this is
     belt and braces, and cheap.
+
+    ``issuer_id=account.issuer_id`` (spec 0019 FR-9): the certificate is
+    signed by the issuer the account registered against, never resolved from
+    whatever else exists on the instance. That is what takes ACME out of
+    spec 0017's default rule entirely -- there is nothing left for
+    :func:`cabin.ca.service.resolve_issuer` to guess, so
+    :class:`~cabin.ca.service.IssuerRequiredError` cannot be raised from this
+    call any more (it stays in the ``isinstance`` tuple below regardless,
+    since removing it would be a second change with no test behind it).
+    :class:`~cabin.ca.service.UnknownIssuerError` and
+    :class:`~cabin.ca.service.IssuerRetiredError` are reachable here for the
+    first time instead: the account's issuer can have been deleted or
+    retired since registration, and both are handled below like any other
+    issuance failure.
     """
     identifiers = service.order_identifiers(order)
     sans = [
@@ -222,10 +254,16 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certi
         return certs_service.sign_csr_and_store(
             db,
             request.app.state.secrets,
+            # Spec 0018 FR-7: no cabin identity is behind an ACME request --
+            # the account is a key thumbprint, not a user or a token -- so
+            # this rides the named exemption rather than a grant lookup.
+            principal=issuer_grants.ACME_PRINCIPAL,
+            # Spec 0019 FR-9: the account's own issuer, explicitly -- never
+            # resolved from whatever else exists on the instance.
+            issuer_id=account.issuer_id,
             csr_pem=pem,
             profile=ACME_PROFILE,
             sans_override=sans,
-            crl_url=crl_service.distribution_url(db),
             subject_cn_fallback=_subject_cn(identifiers),
             # ...and if none of them fits, no subject at all rather than no
             # certificate; see :func:`_subject_cn`.
@@ -243,7 +281,24 @@ def _issue(request: Request, db: Session, order: AcmeOrder, der: bytes) -> Certi
         # nothing about the request was wrong.
         db.rollback()
         service.release_claim(db, order)
-        if isinstance(exc, IssueError | CANotConfiguredError | SecretsError | ValueError):
+        if isinstance(exc, NameConstraintError):
+            # Spec 0020 FR-8: matched before the general IssueError arm
+            # below, and answered as the client's problem, not the
+            # server's. The client asked for a name this CA may not sign;
+            # serverInternal is a 500-class type that invites a correctly
+            # behaving client to keep retrying a request that can never
+            # succeed.
+            raise AcmeError(ErrorType.rejected_identifier, str(exc)) from exc
+        if isinstance(
+            exc,
+            IssueError
+            | CANotConfiguredError
+            | SecretsError
+            | ValueError
+            | IssuerRequiredError
+            | UnknownIssuerError
+            | IssuerRetiredError,
+        ):
             raise AcmeError(
                 ErrorType.server_internal,
                 f"this certificate could not be issued: {exc}"[:400],
@@ -304,18 +359,38 @@ def _certificate_of(db: Session, raw_id: str, account_id: str) -> Certificate:
     return row
 
 
-def chain_pem(db: Session, row: Certificate) -> str:
-    """FR-2: leaf, then intermediate, then root.
+def _chain_set(db: Session, row: Certificate) -> "ca_service.ChainSet":
+    """Spec 0021 FR-6: the leaf's full set of paths -- the default and its
+    alternates -- built from *its own* issuer, root last."""
+    try:
+        return ca_service.chains_for(db, row.issuer_id)
+    except ca_service.UnknownIssuerError as exc:  # pragma: no cover - FK guarantees the row
+        raise AcmeError(
+            ErrorType.server_internal, "no CA is configured on this cabin instance"
+        ) from exc
+
+
+def chain_pem(db: Session, row: Certificate, chain: "ca_service.Chain | None" = None) -> str:
+    """FR-2/FR-8: leaf, then a chain of *its own* issuer's ancestors, nearest
+    first, root last. ``chain`` defaults to the leaf's default path (spec
+    0021 FR-6); the alternate route below passes a specific one instead.
 
     The root is included. For a public CA it would be redundant, but cabin's
     root is exactly what a client's trust store may not have yet, and an
     operator pointing a service at ``fullchain.pem`` should not have to go
     and fetch it separately.
     """
-    hierarchy = ca_service.get_ca(db)
-    if hierarchy is None:  # pragma: no cover - a certificate implies a CA
-        raise AcmeError(ErrorType.server_internal, "no CA is configured on this cabin instance")
-    return row.cert_pem + hierarchy.intermediate.cert_pem + hierarchy.root.cert_pem
+    if chain is None:
+        chain = _chain_set(db, row).default
+    return row.cert_pem + "".join(ca.cert_pem for ca in chain.rows)
+
+
+def _alternate_url(db: Session, cert_id: str, anchor_id: int) -> str:
+    """FR-9: the URL an alternate path is fetched from -- built by the same
+    helper that verifies a POST-as-GET against it below, so the two can
+    never drift apart (the JWS ``url`` header is compared against exactly
+    what cabin publishes, RFC 8555 6.4)."""
+    return url(db, f"{CERT_PREFIX}{cert_id}/{anchor_id}")
 
 
 @router.post("/cert/{cert_id}")
@@ -334,13 +409,57 @@ def certificate_resource(
             "a certificate is fetched with a POST-as-GET request, which carries no payload",
         )
     row = _certificate_of(db, cert_id, account.id)
-    return Response(
-        content=chain_pem(db, row),
+    chain_set = _chain_set(db, row)
+    response = Response(
+        content=chain_pem(db, row, chain_set.default),
         media_type=PEM_CHAIN_CONTENT_TYPE,
-        # No Link rel="alternate": cabin publishes one chain (see the spec's
-        # Out of Scope), and offering a link to nothing would be worse than
-        # offering none.
     )
+    # Spec 0021 FR-9: one Link rel="alternate" per surviving alternate path.
+    # Appended, never assigned -- the response middleware appends a
+    # rel="index" link of its own (acme/http.py:246-252), and several
+    # alternates each need their own header line.
+    for alt in chain_set.alternates:
+        response.headers.append(
+            "Link", f'<{_alternate_url(db, cert_id, alt.anchor_id)}>;rel="alternate"'
+        )
+    return response
+
+
+@router.post("/cert/{cert_id}/{anchor_id}")
+def certificate_alternate(
+    cert_id: str,
+    anchor_id: str,
+    request: Request,
+    body: bytes = Depends(acme_body),
+    db: Session = Depends(get_db),
+) -> Response:
+    """RFC 8555 7.4.2's alternate link, fetched (spec 0021 FR-9).
+
+    Same JWS verification and the same ownership check as
+    :func:`certificate_resource`; the only difference is which of the
+    leaf's paths goes in the body. ``anchor_id`` is parsed by the
+    **existing** :func:`_certificate_id` -- not a second copy of the same
+    idea -- because a superscript digit, a zero-padded number and an
+    oversized integer each escape as a bare 500 with no problem document
+    and no ``Replay-Nonce`` otherwise, stranding a client that has already
+    spent one.
+    """
+    verification = verified(db, body, f"{CERT_PREFIX}{cert_id}/{anchor_id}", KeyMode.kid)
+    account = account_of(verification)
+    if verification.payload is not None:
+        raise AcmeError(
+            ErrorType.malformed,
+            "a certificate is fetched with a POST-as-GET request, which carries no payload",
+        )
+    row = _certificate_of(db, cert_id, account.id)
+    anchor_id_int = _certificate_id(anchor_id)
+    chain = _chain_set(db, row).by_anchor(anchor_id_int)
+    if chain is None:
+        # A cross certificate that expired between the Link header being
+        # read and this URL being fetched lands here too (FR-9) -- that is
+        # the correct outcome, not a fallback to the default.
+        raise not_found("certificate chain")
+    return Response(content=chain_pem(db, row, chain), media_type=PEM_CHAIN_CONTENT_TYPE)
 
 
 # --- FR-3: revocation ----------------------------------------------------------------
@@ -459,7 +578,15 @@ def revoke_cert(
             "this certificate has already been revoked",
         )
     try:
-        crl_service.revoke_certificate(db, request.app.state.secrets, row.id, reason)
+        crl_service.revoke_certificate(
+            db,
+            request.app.state.secrets,
+            row.id,
+            reason,
+            # Same exemption as _issue above: no cabin identity to check a
+            # grant against.
+            principal=issuer_grants.ACME_PRINCIPAL,
+        )
     except (CANotConfiguredError, crl_service.RevocationError, SecretsError) as exc:
         raise AcmeError(
             ErrorType.server_internal,

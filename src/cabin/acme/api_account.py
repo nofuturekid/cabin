@@ -8,6 +8,7 @@ operation that may change which key that handle answers to.
 """
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.exc import IntegrityError
@@ -20,12 +21,13 @@ from cabin.acme.errors import AcmeError, ErrorType
 from cabin.acme.http import (
     ACCOUNT_PREFIX,
     KEY_CHANGE_PATH,
-    NEW_ACCOUNT_PATH,
     ORDER_PREFIX,
     account_json,
     account_of,
     acme_body,
     json_response,
+    new_account_path,
+    not_found,
     own_account_or_403,
     url,
     verified,
@@ -33,8 +35,11 @@ from cabin.acme.http import (
 from cabin.acme.jws import KeyMode
 from cabin.acme.models import AccountStatus, AcmeAccount
 from cabin.audit import AuditAction, acme_actor
+from cabin.ca import service as ca_service
 from cabin.settings import ACME_REQUIRE_EAB, get_flag
 from cabin.web.deps import client_ip, get_db
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -51,9 +56,10 @@ def _external_account(
     request: Request,
     verification: jws.VerifiedRequest,
     payload: dict[str, object],
+    issuer_id: int,
 ) -> eab.AcmeEabKey | None:
-    """Spec 0012 FR-4: the external account binding, verified but not yet
-    spent.
+    """Spec 0012 FR-4, spec 0019 FR-7: the external account binding, verified
+    but not yet spent.
 
     Runs only for a registration that will actually create an account: an
     existing account has already returned above, which is what keeps a
@@ -64,6 +70,13 @@ def _external_account(
     setting requires one. Accepting an unverified binding would be worse
     than accepting none: it would tell the operator, in the UI, that a key
     was used by an account that never proved it held it.
+
+    ``issuer_id`` is passed straight through to :func:`eab.verify`, which is
+    where FR-7's refusal actually happens: a key minted for another issuer
+    can still be re-signed by its holder over *this* path's URL, so the
+    inner JWS's own ``url`` check (already run by
+    :func:`jws.parse_external_binding`) is not a substitute for comparing
+    the key's stored issuer against this one.
     """
     binding = payload.get("externalAccountBinding")
     if binding is None:
@@ -78,8 +91,48 @@ def _external_account(
         db,
         request.app.state.secrets,
         binding,
-        new_account_url=url(db, NEW_ACCOUNT_PATH),
+        new_account_url=url(db, new_account_path(issuer_id)),
         account_jwk=verification.key.jwk,
+        issuer_id=issuer_id,
+    )
+
+
+def _reject_other_issuer(account: AcmeAccount, issuer_id: int) -> None:
+    """Spec 0019 FR-6: the re-registration trap.
+
+    The early return above -- an existing key answers 200 with no EAB check
+    at all -- exists so that certbot's routine re-registration keeps working
+    without a credential it used once and no longer stores. Left alone, that
+    is a silent cross-issuer escalation: a key registered at A, replayed at
+    B's directory, would find A's account and hand it back with B's
+    ``Location`` -- no error, no binding asked for.
+
+    So the found account's issuer must equal the path's, checked here --
+    after :func:`_reject_unusable`, before the 200, before
+    ``onlyReturnExisting`` and before :func:`_external_account` is ever
+    reached (Interface Contract's eight-step order). Placed anywhere later,
+    a re-registration with no binding at all would slip past this check
+    exactly because no binding is required to reach the found-account
+    branch. Placed on the *path's* issuer instead of the *account's* -- the
+    "obvious" fix -- would let a bare account key move itself between
+    hierarchies by visiting a URL, which is the escalation this function
+    exists to refuse, not a fix for it.
+
+    Re-registering at the account's own directory does not reach the raise
+    below at all: that is the behaviour :func:`_external_account`'s
+    docstring already explains, kept intact here.
+    """
+    if account.issuer_id == issuer_id:
+        return
+    _log.warning(
+        "acme: account %s (issuer %s) re-registration refused at issuer %s's directory",
+        account.jwk_thumbprint,
+        account.issuer_id,
+        issuer_id,
+    )
+    raise AcmeError(
+        ErrorType.unauthorized,
+        "this account key is registered against another issuer's directory",
     )
 
 
@@ -120,13 +173,28 @@ def _spend_binding(
         raise eab.refused()
 
 
-@router.post("/new-account")
+@router.post("/ca/{issuer_id:int}/new-account")
 def new_account(
+    issuer_id: int,
     request: Request,
     body: bytes = Depends(acme_body),
     db: Session = Depends(get_db),
 ) -> Response:
-    verification = verified(db, body, NEW_ACCOUNT_PATH, KeyMode.jwk)
+    """Spec 0019 FR-5/FR-6: the eight-step order the Interface Contract
+    fixes, because FR-6 is a statement about where exactly one line goes.
+    Resolve the issuer, verify the JWS against *this* path, then -- for an
+    existing key -- reject if it is unusable or bound elsewhere before ever
+    returning 200; only a request that will actually create an account goes
+    on to the retirement check, the EAB binding and account creation.
+    """
+    try:
+        issuer = ca_service.get_ca(db, issuer_id)
+    except ca_service.UnknownIssuerError as exc:
+        raise not_found("ACME resource") from exc
+    if issuer.kind != "intermediate":
+        raise not_found("ACME resource")
+
+    verification = verified(db, body, new_account_path(issuer_id), KeyMode.jwk)
     payload = verification.payload
     if payload is None:
         raise AcmeError(ErrorType.malformed, "new-account needs a payload")
@@ -134,6 +202,7 @@ def new_account(
     existing = service.find_account_by_key(db, verification.key.thumbprint)
     if existing is not None:
         _reject_unusable(existing)
+        _reject_other_issuer(existing, issuer_id)
         return json_response(
             account_json(db, existing),
             Location=url(db, f"{ACCOUNT_PREFIX}{existing.id}"),
@@ -141,11 +210,21 @@ def new_account(
     if payload.get("onlyReturnExisting"):
         raise AcmeError(ErrorType.account_does_not_exist, "no account is registered for this key")
 
-    binding = _external_account(db, request, verification, payload)
+    if issuer.status != "active":
+        # FR-5: refused on the creation path only -- an account already
+        # bound here (the branch above) keeps re-registering and keeps
+        # reading what it already has.
+        raise AcmeError(
+            ErrorType.unauthorized,
+            f"issuer {issuer_id} is retired and cannot register new accounts",
+        )
+
+    binding = _external_account(db, request, verification, payload, issuer_id)
     contacts = service.parse_contacts(payload["contact"]) if "contact" in payload else None
     account, created = service.get_or_create_account(
         db,
         verification.key,
+        issuer_id=issuer_id,
         contacts=contacts,
         tos_agreed=bool(payload.get("termsOfServiceAgreed")),
     )
@@ -159,7 +238,7 @@ def new_account(
             summary="registered ACME account",
             target_type="acme_account",
             target_id=account.id,
-            detail={"thumbprint": account.jwk_thumbprint},
+            detail={"thumbprint": account.jwk_thumbprint, "issuer_id": issuer_id},
             ip=client_ip(request, db),
         )
     return json_response(

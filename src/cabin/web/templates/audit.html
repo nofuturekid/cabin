@@ -9,6 +9,12 @@
   </div>
 </div>
 
+<div class="filters">
+  {% for option in actor_kinds %}
+  <a class="pill {% if option == actor_kind %} pill-on {% endif %}" href="{{ kind_urls[option] }}" hx-get="{{ kind_urls[option] }}" hx-select="#audit-log" hx-target="#audit-log" hx-swap="outerHTML" hx-push-url="true">{{ option }}</a>
+  {% endfor %}
+</div>
+
 <form method="get" action="/audit" class="filters">
   <input type="search" name="q" value="{{ q }}" placeholder="actor, action or summary" />
   <select name="action">
@@ -16,17 +22,14 @@
     <option value="{{ option }}" {{ "selected" if option == action else "" }}>{{ option }}</option>
     {% endfor %}
   </select>
-  <select name="actor_kind">
-    {% for option in actor_kinds %}
-    <option value="{{ option }}" {{ "selected" if option == actor_kind else "" }}>{{ option }}</option>
-    {% endfor %}
-  </select>
+  <input type="hidden" name="actor_kind" value="{{ actor_kind }}" />
   <button type="submit">Filter</button>
 </form>
 
+<div id="audit-log">
 {% if events %}
 <div class="scroller">
-  <table>
+  <table class="rows cols-audit">
     <thead>
       <tr>
         <th>Time</th>
@@ -39,8 +42,8 @@
     <tbody>
       {% for event in events %}
       <tr>
-        <td class="nowrap">{{ event.occurred_at }}</td>
-        <td class="nowrap">
+        <td class="mono">{{ event.occurred_at }}</td>
+        <td>
           {{ event.actor_label }} <span class="tag">{{ event.actor_kind }}</span>
         </td>
         <td><code>{{ event.action }}</code></td>
@@ -49,7 +52,7 @@
           <a href="/certs/{{ event.cert_id }}">{{ event.summary }}</a>
           {% else %}{{ event.summary }}{% endif %}
         </td>
-        <td class="mono nowrap">{{ event.ip }}</td>
+        <td class="mono">{{ event.ip }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -63,8 +66,9 @@
 <div class="meta">
   <span>{% if events %}{{ total }} event(s) — page {{ page }} of {{ pages }}{% endif %}</span>
   <span class="pager">
-    {% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %}
-    {% if next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}
+    {% if prev_url %}<a href="{{ prev_url }}" hx-get="{{ prev_url }}" hx-select="#audit-log" hx-target="#audit-log" hx-swap="outerHTML" hx-push-url="true">← Previous</a>{% endif %}
+    {% if next_url %}<a href="{{ next_url }}" hx-get="{{ next_url }}" hx-select="#audit-log" hx-target="#audit-log" hx-swap="outerHTML" hx-push-url="true">Next →</a>{% endif %}
   </span>
+</div>
 </div>
 {% endblock %}

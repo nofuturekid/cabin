@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 
+import dom
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -337,6 +338,162 @@ def test_role_can_view_users_list(client: TestClient, cfg: Config, role: str) ->
 
     resp = client.get("/users")
     assert resp.status_code == 200
+
+    # Spec 0030 re-points spec 0003 FR-7's "a viewer is offered none" here.
+    # That half was believed to be protected already; it was not -- this test
+    # asserted a status code and nothing about what the page offers, so a
+    # build that rendered every management form to an admin would have passed
+    # it. FR-11 turns the open row into URL state, which is the one hole a
+    # server-decided boolean did not have, so the assertion is made at both
+    # URLs: the plain one and the one that would open a row.
+    for url in ("/users", f"/users?edit={_user_id(cfg, 'alice')}"):
+        page = client.get(url)
+        assert page.status_code == 200, f"{url} -> {page.status_code}"
+        body = dom.parse(page.text).find_all(tag="tbody")
+        offered = [form for table in body for form in table.find_all(tag="form")]
+        assert offered == [], (
+            f"a {role} is offered {[form.get('action') for form in offered]} at {url}. "
+            f"`can_manage` still gates every control; `?edit=` is a request to open a "
+            f"row, never a grant (spec 0030 AC-11 clause 4)"
+        )
+
+
+def _user_id(cfg: Config, username: str) -> int:
+    db = _db(cfg)
+    try:
+        return next(user.id for user in list_users(db) if user.username == username)
+    finally:
+        db.close()
+
+
+# === spec 0030 AC-11: the users row edit is URL state =====================
+
+#: FR-11: the four mutations cabin's users page already offers, at the four
+#: routes they already post to. One `Save` would be a new endpoint and one
+#: log entry where there are four.
+ROW_FORMS = ("issuers", "role", "password", "delete")
+
+
+def _rows_of_users_page(html: str) -> dict[str, dom.Node]:
+    """The users table's `<tr>` elements by their `id`.
+
+    The id is asserted here rather than assumed: FR-11 puts `id="user-{id}"`
+    on the row in *both* states, because it is at once the anchor the
+    `Edit` link targets and the element htmx swaps.
+    """
+    tree = dom.parse(html)
+    bodies = tree.find_all(tag="tbody")
+    assert bodies, "the users page has no <tbody>"
+    rows = [node for node in bodies[0].children if node.tag == "tr"]
+    assert rows, "the users page rendered no rows"
+    found = {}
+    for index, row in enumerate(rows):
+        row_id = row.get("id")
+        assert row_id is not None, f"row {index} carries no id (FR-11): {row.attrs}"
+        found[row_id] = row
+    return found
+
+
+def test_the_users_row_edit_is_url_state(client: TestClient, cfg: Config) -> None:
+    """AC-11, five clauses.
+
+    Clause 4 is the one that closes a hole rather than describing a feature.
+    URL state means the request decides which row is open, and a build that
+    reads `?edit=` before `can_manage` would offer a viewer every management
+    form on a page they may only read. Spec 0029 found that shape in review;
+    this is the one place spec 0030 repeats it.
+
+    Clauses 1 and 2 both name `user-{id}` on purpose: an id that moved with
+    the state would break the anchor and the swap target at once, and
+    neither of them is visible in a screenshot.
+    """
+    _setup_superadmin(client)
+    _create_user_as_superadmin(client, cfg, "vera", "viewer")
+    alice = _user_id(cfg, "alice")
+    vera = _user_id(cfg, "vera")
+
+    # 1. closed: no form in the table at all, and every row offers an Edit
+    closed = client.get("/users")
+    assert closed.status_code == 200
+    rows = _rows_of_users_page(closed.text)
+    assert set(rows) == {f"user-{alice}", f"user-{vera}"}, sorted(rows)
+    forms = [form for row in rows.values() for form in row.find_all(tag="form")]
+    assert forms == [], (
+        f"the closed users page carries {[form.get('action') for form in forms]} "
+        f"inside its rows. FR-11 makes the open row a disclosure at its own URL"
+    )
+    for user_id, row in ((alice, rows[f"user-{alice}"]), (vera, rows[f"user-{vera}"])):
+        anchors = [node for node in row.find_all(tag="a") if node.text() == "Edit"]
+        assert len(anchors) == 1, (
+            f"row user-{user_id} carries {len(anchors)} `Edit` links; FR-11 gives it one"
+        )
+        anchor = anchors[0]
+        assert anchor.get("href") == f"/users?edit={user_id}#user-{user_id}", anchor.get("href")
+        assert anchor.get("hx-get") == f"/users?edit={user_id}", anchor.get("hx-get")
+        assert anchor.get("hx-select") == f"#user-{user_id}", anchor.get("hx-select")
+        assert anchor.get("hx-target") == f"#user-{user_id}", anchor.get("hx-target")
+    assert rows[f"user-{vera}"].find_all(tag="input") == [], (
+        "the Issuers cell of a closed row still holds a checkbox; closed, it is the "
+        "text branch `users.html` already renders for a reader who cannot manage"
+    )
+
+    # 2. open: one row, the four forms it stands open with, every other closed
+    opened = client.get(f"/users?edit={vera}")
+    assert opened.status_code == 200
+    rows = _rows_of_users_page(opened.text)
+    editing = [row_id for row_id, row in rows.items() if "editing" in row.classes]
+    assert editing == [f"user-{vera}"], (
+        f"`editing` is on {editing}; FR-11 opens exactly the row `?edit=` names"
+    )
+    open_row = rows[f"user-{vera}"]
+    actions = [form.get("action") for form in open_row.find_all(tag="form")]
+    assert actions == [f"/users/{vera}/{name}" for name in ROW_FORMS], (
+        f"the open row holds {actions}. cabin's four mutations are four routes with "
+        f"four audit actions and four guards; the design's single `Save` would be a "
+        f"new endpoint collapsing four log entries into one"
+    )
+    for form in open_row.find_all(tag="form"):
+        assert (form.get("method") or "").lower() == "post", form.attrs
+        hidden = [
+            node
+            for node in form.find_all(tag="input")
+            if node.get("name") == "csrf_token" and node.get("type") == "hidden"
+        ]
+        assert len(hidden) == 1, f"{form.get('action')} lost its csrf_token field"
+    other = rows[f"user-{alice}"]
+    assert other.find_all(tag="form") == [], "opening one row opened another"
+    cancels = [node for node in open_row.find_all(tag="a") if node.text() == "Cancel"]
+    assert len(cancels) == 1 and cancels[0].get("href") == "/users", (
+        f"the open row's way back out is {[node.get('href') for node in cancels]}"
+    )
+
+    # 3. an unrecognised ?edit= is a typo, not an error
+    for value in ("999999", "banana"):
+        odd = client.get(f"/users?edit={value}")
+        assert odd.status_code == 200, f"?edit={value} -> {odd.status_code}"
+        assert [
+            row_id
+            for row_id, row in _rows_of_users_page(odd.text).items()
+            if "editing" in row.classes
+        ] == [], f"?edit={value} opened a row"
+
+    # 5. an error re-render opens the row that caused it
+    csrf = _csrf_token_for(cfg, client.cookies["cabin_session"])
+    refused = client.post(f"/users/{alice}/role", data={"role": "admin", "csrf_token": csrf})
+    assert refused.status_code == 400, (
+        f"demoting the last superadmin answered {refused.status_code}; spec 0003's "
+        f"guard is what this clause needs to reach the 400 re-render"
+    )
+    reopened = [
+        row_id
+        for row_id, row in _rows_of_users_page(refused.text).items()
+        if "editing" in row.classes
+    ]
+    assert reopened == [f"user-{alice}"], (
+        f"the 400 re-render has {reopened} open; spec 0023 AC-3 requires the error to "
+        f"be next to the field that caused it, which in FR-11's shape means the row "
+        f"stays open"
+    )
 
 
 # --- AC-6: last superadmin protection -----------------------------------------

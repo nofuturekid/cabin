@@ -1,0 +1,32 @@
+{% extends "layout.html" %}
+{% set nav_current = "inventory_export" %}
+{% block title %}Inventory export — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Inventory export</h1>
+    <p class="sub">The certificate inventory as a file, the whole filtered set at once.</p>
+  </div>
+</div>
+
+<div class="filters">
+  <div class="seg">
+    {% for option in statuses %}
+    <a class="{% if option == status %} seg-on {% endif %}" href="{{ status_urls[option] }}">{{ option }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+<form method="get" action="/transfer/inventory" class="filters">
+  <input type="search" name="q" value="{{ q }}" placeholder="common name, SAN or serial" />
+  <input type="hidden" name="status" value="{{ status }}" />
+  <button type="submit">Filter</button>
+</form>
+
+<p class="note">{{ total }} certificate(s) match this filter.</p>
+
+<p class="row-actions">
+  <a href="/transfer/inventory.csv?q={{ q | urlencode }}&amp;status={{ status | urlencode }}">Download CSV</a>
+  <a href="/transfer/inventory.json?q={{ q | urlencode }}&amp;status={{ status | urlencode }}">Download JSON</a>
+</p>
+{% endblock %}

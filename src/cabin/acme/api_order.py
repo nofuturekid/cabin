@@ -54,13 +54,25 @@ def new_order(
     identifiers = service.parse_identifiers(payload.get("identifiers"))
     not_before = service.parse_timestamp(payload.get("notBefore"), "notBefore")
     not_after = service.parse_timestamp(payload.get("notAfter"), "notAfter")
-    if ca_service.get_ca(db) is None:
-        # FR-5: the directory still answers without a CA, but an order that
-        # could never become a certificate is refused with a reason an
-        # operator can act on rather than accepted and left to rot.
+    # Spec 0019 FR-9: the question is no longer "does *any* active issuer
+    # exist" (0017's rule) but "is *this account's* issuer active" -- an
+    # instance can have several active issuers while the one this account
+    # registered against is retired, which the old check would sail past and
+    # only fail confusingly, three steps later, at finalize. Checked here
+    # instead, where the answer is also the only place a client gets a
+    # problem document it can act on rather than a surprise at finalize.
+    try:
+        issuer = service.account_issuer(db, account)
+    except ca_service.UnknownIssuerError as exc:
         raise AcmeError(
             ErrorType.server_internal,
-            "no CA is configured on this cabin instance, so it cannot issue certificates yet",
+            f"this account's issuer no longer exists on this cabin instance: {exc}"[:400],
+        ) from exc
+    if issuer.status != "active":
+        raise AcmeError(
+            ErrorType.server_internal,
+            f"this account's issuer (CA certificate {issuer.id}) has been retired and can no "
+            "longer sign new certificates",
         )
 
     order = service.create_order(

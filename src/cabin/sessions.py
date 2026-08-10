@@ -30,6 +30,10 @@ class UserSession(Base):
     csrf_token: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(sa.DateTime, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(sa.DateTime, nullable=False)
+    # Spec 0030 FR-2: the one message a mutation leaves for the render that
+    # follows its redirect. Nullable, because "nothing pending" is the
+    # normal state of every row for almost all of its life.
+    flash: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
 
 
 def _utcnow() -> datetime:
@@ -99,6 +103,35 @@ def delete_sessions_for_user(db: Session, user_id: int) -> None:
     """
     db.execute(sa.delete(UserSession).where(UserSession.user_id == user_id))
     db.commit()
+
+
+def set_flash(db: Session, row: UserSession, message: str) -> None:
+    """Spec 0030 FR-2: leave one sentence for the next render of this session.
+
+    Writes and commits, because the request that calls this answers a 303 and
+    the render that shows the message is a *different* request: an uncommitted
+    message is a message nobody sees.
+    """
+    row.flash = message
+    db.commit()
+
+
+def pop_flash(db: Session, row: UserSession) -> str | None:
+    """Spec 0030 FR-2: read the pending message and clear it, in one call.
+
+    The clear is here rather than in a second call a caller can forget: a
+    flash that is shown and not cleared is shown on every page for the rest of
+    the session, which is a defect nobody reports as one. The commit is what
+    makes the clear survive the response -- clearing the attribute alone
+    satisfies every check made in this process and none made by the next
+    request.
+    """
+    message = row.flash
+    if message is None:
+        return None
+    row.flash = None
+    db.commit()
+    return message
 
 
 def purge_expired(db: Session) -> None:

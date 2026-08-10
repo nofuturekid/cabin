@@ -1,0 +1,204 @@
+{% extends "layout.html" %}
+{% set nav_current = "ca" %}
+{% block title %}{{ group.root.name }} — cabin{% endblock %}
+{% block content %}
+{% from "ca_macros.html" import constraints_block, renew_retire with context %}
+<div class="page-head">
+  <div>
+    <h1>{{ group.root.name }}</h1>
+    <p class="sub">One hierarchy: its root, its issuers and its cross certificates.</p>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+{% set root = group.root %}
+
+<div class="section">
+  <div>
+    <h2>{{ root.name }}</h2>
+    <p><span class="tag">root</span> <span class="tag{% if root.status == "retired" %} tag-bad{% endif %}">{{ root.status }}</span> <span class="nowrap">until {{ root.not_valid_after }}</span></p>
+    <p class="help">Serving: {% if group.chain.default_via_cross %}the long chain, via <b>{{ group.chain.default_name }}</b>{% else %}the short chain (this root, self-signed){% endif %}.{% if group.chain.alternates %} Also available: {% for alt in group.chain.alternates %}{% if alt.via_cross %}the long chain via <b>{{ alt.name }}</b>{% else %}the short chain{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.{% endif %}</p>
+  </div>
+  <div>
+    <p><a href="/ca/{{ root.id }}.pem">root.pem</a> <span class="help mono">{{ root.subject }} · {{ root.fingerprint }}</span></p>
+    {{ constraints_block(root) }}
+  </div>
+</div>
+
+<div class="section">
+  <div>
+    <h2>Issuers</h2>
+    <p class="help">Every intermediate under this root. Open one for its subject and fingerprint, its downloads, the URLs it publishes, its name constraints and its own controls.</p>
+  </div>
+  <div>
+    {% if group.intermediates %}
+    <div class="scroller">
+      <table class="rows cols-issuers">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Kind</th>
+            <th>Status</th>
+            <th>Expires</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i in group.intermediates %}
+          <tr>
+            <td><a class="rowlink" href="{{ i.href }}">{{ i.name }}</a></td>
+            <td><span class="tag">{{ i.kind }}</span></td>
+            <td><span class="tag{% if i.status == 'retired' %} tag-bad{% endif %}">{{ i.status }}</span></td>
+            <td>{{ i.not_valid_after }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% elif nav.ca_admin and root.can_create_intermediate %}
+    <p id="ca-no-intermediates" class="note">
+      This hierarchy has no issuer yet, so nothing can be signed under it.
+      <a href="/ca/{{ root.id }}?add=intermediate#add-intermediate">Add an intermediate</a> further down this page to start issuing.
+    </p>
+    {% elif nav.ca_admin %}
+    <p id="ca-no-intermediates" class="note">
+      This hierarchy has no issuer yet, and cabin holds no private key for this root, so it cannot
+      create one here. Import an intermediate this root has already signed, or bring in the root's
+      own key first.
+    </p>
+    {% else %}
+    <p id="ca-no-intermediates" class="note">
+      This hierarchy has no issuer yet, so nothing can be signed under it. An administrator has to
+      add one before there is anything here to see.
+    </p>
+    {% endif %}
+  </div>
+</div>
+
+{% if group.cross_certificates %}
+<div class="section">
+  <div>
+    <h2>Cross certificates</h2>
+    <p class="help">Second certificates for this root, each signed by another root. Open one for what it means for the chains cabin serves, and for its own controls.</p>
+  </div>
+  <div>
+    <div class="scroller">
+      <table class="rows cols-crosses">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Signed by</th>
+            <th>Status</th>
+            <th>Serving</th>
+            <th>Expires</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for x in group.cross_certificates %}
+          <tr>
+            <td><a class="rowlink" href="{{ x.href }}">{{ x.name }}</a></td>
+            <td>{{ x.signed_by }}</td>
+            <td><span class="tag{% if x.status == 'retired' %} tag-bad{% endif %}">{{ x.status }}</span></td>
+            <td>{% if x.served == "default" %}<span class="tag tag-valid">default</span>{% elif x.served == "alternate" %}<span class="tag">alternate</span>{% else %}<span class="tag tag-warn">not served</span>{% endif %}</td>
+            <td>{{ x.not_valid_after }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if nav.ca_admin and root.can_create_intermediate %}
+<div class="section" id="add-intermediate">
+  <div>
+    <h2>Add intermediate</h2>
+    <p class="help">A further issuer under this root, active immediately, alongside whatever intermediates it already has.</p>
+  </div>
+  <div>
+    {% if open_form == "intermediate" %}
+    <form method="post" action="/ca/{{ root.id }}/intermediate">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="int-name">Name</label>
+        <input id="int-name" name="name" value="{{ values.get('name', '') }}" required />
+      </div>
+      <div class="field">
+        <label for="int-key-type">Key type</label>
+        <select id="int-key-type" name="key_type">
+          <option value="ecdsa-p256" {% if values.get('key_type', 'ecdsa-p256') == "ecdsa-p256" %}selected{% endif %}>ECDSA P-256</option>
+          <option value="ecdsa-p384" {% if values.get('key_type') == "ecdsa-p384" %}selected{% endif %}>ECDSA P-384</option>
+          <option value="rsa-4096" {% if values.get('key_type') == "rsa-4096" %}selected{% endif %}>RSA 4096</option>
+          <option value="ed25519" {% if values.get('key_type') == "ed25519" %}selected{% endif %}>Ed25519</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="int-years">Validity (years)</label>
+        <input id="int-years" type="number" name="years" min="1" max="50" value="{{ values.get('years', 10) }}" required />
+      </div>
+      <div class="field">
+        <label for="int-permitted">Permitted names</label>
+        <textarea id="int-permitted" name="permitted_names" rows="4" placeholder="example.com&#10;10.0.0.0/8">
+{{ values.get('permitted_names', '') }}</textarea>
+        <span class="hint">One DNS suffix or IP network per line. Empty means every name of that form is permitted. Fixed once the intermediate is created.</span>
+      </div>
+      <div class="field">
+        <label for="int-excluded">Excluded names</label>
+        <textarea id="int-excluded" name="excluded_names" rows="4" placeholder="secret.example.com">
+{{ values.get('excluded_names', '') }}</textarea>
+        <span class="hint">One DNS suffix or IP network per line. Refused even if covered by a permitted entry above.</span>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create intermediate</button></div>
+    </form>
+    {% else %}
+    <p><a href="/ca/{{ root.id }}?add=intermediate#add-intermediate" hx-get="/ca/{{ root.id }}?add=intermediate" hx-select="#add-intermediate" hx-target="#add-intermediate" hx-swap="outerHTML" hx-push-url="true">Add an intermediate</a></p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if nav.ca_admin %}
+<div class="section" id="cross-sign">
+  <div>
+    <h2>Cross-sign with another root</h2>
+    <p class="help">Creates a second certificate for this root, signed by the chosen one, so relying parties that trust only the older root can still build a path to this one. Two hierarchies side by side is the better transition; this is for devices whose trust store cannot be reached.</p>
+  </div>
+  <div>
+    {% if open_form != "cross-sign" %}
+    <p><a href="/ca/{{ root.id }}?add=cross-sign#cross-sign" hx-get="/ca/{{ root.id }}?add=cross-sign" hx-select="#cross-sign" hx-target="#cross-sign" hx-swap="outerHTML" hx-push-url="true">Cross-sign with another root</a></p>
+    {% elif group.cross_sign_candidates %}
+    <form method="post" action="/ca/{{ root.id }}/cross-sign">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="xs-signer">Signing root</label>
+        <select id="xs-signer" name="signing_root_id" required>
+          {% for c in group.cross_sign_candidates %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="xs-years">Validity (years)</label>
+        <input id="xs-years" type="number" name="years" min="1" max="50" value="10" required />
+        <span class="hint">Clamped to the signing root's own expiry -- a cross certificate that outlived the root that signed it would look like a path and never be one.</span>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Cross-sign</button></div>
+    </form>
+    {% else %}
+    <p class="note">No other root on this instance can sign this one -- cross-signing needs a different root with a stored key and a path_length of at least 2. Widen path_length the next time a root is created, or run two hierarchies side by side instead.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if nav.ca_admin and (root.can_renew or root.can_retire) %}
+<div class="section">
+  <div>
+    <h2>Renew and retire</h2>
+    <p class="help">The two things that can be done to this certificate from here.</p>
+  </div>
+  <div>
+    {{ renew_retire(root, "Retiring this root also retires every intermediate under it: certificates already issued keep validating until they expire, but nothing new can be signed under this hierarchy.") }}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

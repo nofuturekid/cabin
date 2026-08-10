@@ -69,6 +69,13 @@ class AcmeEabKey(Base):
     )
     bound_at: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
     revoked_at: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
+    #: Which issuer this key authorizes registration against (spec 0019
+    #: FR-1/FR-7). Set once, at creation, and never written again -- named
+    #: for the column it references rather than ``issuer_id``, matching
+    #: 0018's join tables (``user_issuers``, ``token_issuers``).
+    ca_certificate_id: Mapped[int] = mapped_column(
+        sa.Integer, sa.ForeignKey("ca_certificates.id"), nullable=False
+    )
 
     @property
     def is_usable(self) -> bool:
@@ -86,16 +93,31 @@ def _b64(data: bytes) -> str:
 
 
 def create_key(
-    db: Session, secrets: SecretStore, *, label: str, now: datetime | None = None
+    db: Session,
+    secrets: SecretStore,
+    *,
+    label: str,
+    ca_certificate_id: int,
+    now: datetime | None = None,
 ) -> tuple[AcmeEabKey, str]:
-    """Mint one credential. Returns the row and the base64url secret -- the
-    only time that string exists outside the client's configuration."""
+    """Mint one credential, bound to ``ca_certificate_id`` for its whole
+    life (spec 0019 FR-1/FR-7). Returns the row and the base64url secret --
+    the only time that string exists outside the client's configuration.
+
+    ``ca_certificate_id`` is keyword-only with no default, for the same
+    reason 0018 FR-5 gives about ``principal``: a call site that forgets
+    which issuer a key belongs to must not compile. The caller is
+    responsible for having already checked that this issuer exists, is an
+    intermediate, and that the principal minting the key is granted it
+    (spec 0019 FR-8) -- this function only stores what it is given.
+    """
     secret = _secrets.token_bytes(_SECRET_BYTES)
     row = AcmeEabKey(
         id=_secrets.token_urlsafe(_ID_BYTES),
         hmac_sealed=secrets.seal(secret),
         label=label.strip()[:MAX_LABEL_LENGTH],
         created_at=_iso(now or datetime.now(UTC)),
+        ca_certificate_id=ca_certificate_id,
     )
     db.add(row)
     db.commit()
@@ -135,10 +157,24 @@ def verify(
     *,
     new_account_url: str,
     account_jwk: dict[str, Any],
+    issuer_id: int,
 ) -> AcmeEabKey:
     """Check one ``externalAccountBinding`` and return the key it names.
 
     Does not bind it -- :func:`bind` does that, once the account exists.
+
+    ``issuer_id`` is keyword-only with no default (spec 0019 FR-7): a
+    parameter that can be omitted is a check that can be skipped. It is
+    compared against the row's own :attr:`AcmeEabKey.ca_certificate_id`, and
+    that comparison -- not the inner JWS's ``url``, which
+    :func:`cabin.acme.jws.parse_external_binding` already checked above --
+    is what refuses a key at the wrong directory. The inner JWS is built and
+    MACed by the client itself, with the secret the client holds, so a
+    client holding this key's id and secret can trivially sign a fresh
+    binding over a *different* issuer's new-account URL; that binding is
+    structurally perfect and would pass the ``url`` check on its own. Only
+    the stored ``ca_certificate_id`` says which issuer this key was ever
+    handed out for.
     """
     if not isinstance(binding, dict):
         raise AcmeError(ErrorType.malformed, "externalAccountBinding must be a JSON object")
@@ -150,6 +186,12 @@ def verify(
         # It cannot learn anything from the answer itself either -- see
         # _REFUSED above.
         raise AcmeError(ErrorType.unauthorized, _REFUSED)
+    if row.ca_certificate_id != issuer_id:
+        # Checked before the MAC, alongside is_usable above: a key for the
+        # wrong issuer cannot succeed regardless of what the MAC says, so
+        # there is no reason to unseal a secret for it, and the refusal
+        # carries the same wording as every other one here.
+        raise refused()
     try:
         mac_key = secrets.unseal(row.hmac_sealed)
     except SecretsError as exc:
@@ -190,6 +232,7 @@ def bind(db: Session, row: AcmeEabKey, account: AcmeAccount, now: datetime | Non
 
 
 def refused() -> AcmeError:
-    """The error for a client that lost the race in :func:`bind` -- same
-    wording as every other refusal, for the same reason."""
+    """The error for a client that lost the race in :func:`bind`, or whose
+    key named the wrong issuer in :func:`verify` -- same wording as every
+    other refusal, for the same reason."""
     return AcmeError(ErrorType.unauthorized, _REFUSED)

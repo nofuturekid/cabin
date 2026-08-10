@@ -6,6 +6,558 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
+Ten specifications, 0017–0026. cabin stops assuming there is one CA: it runs
+several hierarchies side by side, rotates between them, restricts who may
+issue from which and what each of them may sign, gives each its own ACME
+directory, and can cross-sign a root so that devices trusting an old one keep
+a path to certificates issued under a new one. It also terminates TLS itself,
+so reaching it over HTTPS no longer requires a reverse proxy in front of it.
+`/ca` then splits into four pages and a hierarchy page becomes a list plus a
+page per row, a CA stops getting a composed name, creating a root is
+separated from creating its first intermediate, and every CA import and
+export gets its own page under a new "Transfer" rail group.
+
+Five things to know before running it, because each of them costs something
+to get wrong.
+
+**A 0.1.x database cannot be brought forward, and the only path is an empty
+data directory.** Migrations 0003, 0004, 0005, 0008 and 0009 were rewritten in
+place rather than superseded. Alembic tracks the revision id and nothing about
+the schema behind it, so against a 0.1.0 database it applies the one genuinely
+new revision (0010), reports the database as current, and leaves five earlier
+revisions describing tables that no longer look like that. Nothing fails at
+startup — the first query fails instead, which is the worse of the two places
+to find out. This is safe only because 0.1.0 was never deployed and there is
+no instance to carry forward. That is the entire justification, and it is not
+available again after this release.
+
+If you did run 0.1.0, the procedure is: stop cabin, empty `DATA_DIR` —
+`cabin.db` and `secret.key` both — and start again from the setup wizard.
+There is no export, no partial carry-over and no repair. `secret.key` encrypts
+every private key in the database, so discarding it discards the CA: the old
+root has to come out of every trust store that holds it, the new one has to go
+in, and every certificate 0.1.0 issued has to be issued again. Those old
+certificates also become unrevocable in the same moment, because the CRL that
+would carry them is signed by a key that no longer exists — they stay valid
+until they expire. Keeping the database instead and pointing 0.2.0 at it is
+the one option that is not available, however much it looks like it is.
+
+**Cross-signing has to be planned a root generation ahead.** The cross path is
+one certificate longer than any other path cabin builds, so the signing root
+needs a `pathLenConstraint` of at least 2. cabin's default is 1, and renewal
+carries BasicConstraints over unchanged — so a root created with the default
+can never cross-sign anything, and no operation cabin has repairs it. The
+attempt is refused with an error naming `path_length` and the value the root
+actually carries, rather than producing a certificate no validator would build
+a path through. A root that may ever have to cross-sign another has to be
+created with at least 2, and the hint under the field now says so. An operator
+who did not plan it has 0017's two hierarchies running in parallel, which is
+the honest answer and for most transitions the better one anyway.
+
+**Per-issuer permissions do not bind ACME unless external account binding is
+required.** With `acme_require_eab` on, every link holds: only an identity
+granted an issuer can mint an EAB key for it, only such a key registers an
+account at that issuer's directory, that account is bound to that issuer for
+life, and every certificate it obtains is signed by it — an administrator
+holding no grant obtains no certificate over ACME. With it off, they still do.
+Anyone who can reach the port registers at any issuer's directory and orders
+from it; what remains is that an account is confined to one hierarchy, which
+is worth having and is not access control. The `/acme` page carries the
+warning next to the switch. "cabin has per-issuer permissions" is the sentence
+someone will quote without this paragraph.
+
+**A CA created from now on is named exactly what was typed, with no suffix
+appended.** `create_hierarchy` and `create_intermediate_under` used to build
+the subject as `f"{name} Root CA"` or `f"{name} Intermediate CA"`; both now
+sign and store `name` verbatim. Anything that relied on the old suffix — a
+script matching a CA by its composed name, an operator who typed `Acme`
+expecting the certificate to say `Acme Root CA` — sees a different name on
+every hierarchy created after this change. Existing rows are untouched:
+`name` was and remains the CN of that row's own certificate, so nothing
+already issued and nothing already in the database changes.
+
+**The CA key export is the first time cabin hands a private signing key to
+anyone.** `POST /transfer/ca-key` packages a CA's certificate and its
+unsealed private key as a password-protected PKCS#12 file. It is
+superadmin-only and writes a `ca_key_exported` audit event — but that event
+only records that an export happened, not what its holder does with the
+file afterward. Whoever receives it can issue certificates as that CA for as
+long as its certificate is valid, and cabin cannot see them doing it:
+cabin's CRL only ever covers what cabin itself issued. The one remedy left
+is retiring or distrusting the whole hierarchy, which invalidates every
+certificate under it, not only the ones the key holder made.
+
+### Added
+
+- Spec 0017 (multi-ca): a hierarchy stops being a singleton.
+  `create_hierarchy` and `import_hierarchy` each add a further one and take a
+  name; `create_intermediate_under` adds an intermediate to an existing root,
+  which is what makes rotation ordinary operation rather than a mechanism of
+  its own — new intermediate, old one retired, nothing already deployed
+  invalidated. `retire` stands a row down, and for a root every descendant
+  with it, but refuses the last active intermediate, because an instance that
+  cannot issue anything has no way back; a retired issuer still serves its
+  chain, still signs and publishes its CRL, and still has its certificates
+  revoked. `renew_in_place` re-signs the same public key, the same subject and
+  the same row with a later `not_after`, so the SubjectKeyIdentifier does not
+  move and everything issued earlier keeps validating — that is the whole
+  point of the operation. Which issuer signs is chosen per request and
+  defaults to the only active one; with several active, omitting it is an
+  error rather than a guess. A leaf now records its issuer
+  (`certificates.issuer_id`, NOT NULL) and every chain is assembled from that
+  row rather than from "the" hierarchy, and there is one CRL per issuer, keyed
+  and numbered per issuer. A validity clamped to the issuer's remaining life
+  is said out loud instead of applied silently — on the result page, as
+  `validity_capped_from` in REST and MCP, and in the audit detail. Every leaf
+  gains an AIA `caIssuers` pointing at `/ca/{issuer_id}.cer`, so a client
+  handed only a leaf can repair the chain itself; that URL and the CRL
+  distribution point are forced to `http://`, because validating a cabin
+  certificate must not require fetching a CRL over TLS. A root's `path_length`
+  is chosen at creation (1..4, default 1) — the one decision about a root that
+  cannot be corrected afterwards. `/ca` becomes the list of hierarchies with
+  create, import, add-intermediate, renew and retire on it; new audit actions
+  `ca_renewed` and `ca_retired`. Migrations 0003, 0004 and 0005 rewritten in
+  place.
+- Spec 0018 (issuer-permissions): who may issue from which CA is now a grant,
+  held by users and by API tokens in two join tables (migration 0010,
+  appended). Tokens carry their own rather than inheriting a user's, because
+  cabin deliberately gives them no owning user — and MCP authenticates with
+  the same tokens, so it inherits token grants for free. Enforcement is a
+  required keyword-only `principal` parameter on the domain functions, not a
+  FastAPI dependency: the issuer to check arrives in the request body, when it
+  is omitted it is derivable only from the database and the principal
+  together, and MCP has no dependency layer at all. A ninth issuance path
+  added later is therefore a type error rather than a silent bypass. Issuing
+  intersects the grants with the active issuers; revoking is deliberately
+  blind to status, so an operator who retires a compromised intermediate does
+  not thereby lose the ability to revoke what it signed. One granted issuer is
+  as unambiguous as one active issuer, so an admin granted one of three issues
+  without naming it while a superadmin on the same instance has to choose.
+  `superadmin` is implicit and needs no rows, and whoever creates a hierarchy
+  is granted its intermediate in the same request — superadmin included, so a
+  later demotion does not take away the CA they built. Grants are read fresh
+  on every decision, with nothing cached on a session, a token or an MCP
+  transport, so withdrawing one takes effect on the next request. Two
+  exemptions, both named constants and neither of them an absent principal:
+  ACME, which has no cabin identity behind it, and cabin issuing its own TLS
+  certificate. Deleting a user clears their grants in the application rather
+  than by cascade, so the cleanup is the application's job and stays
+  observable. Visibility is unchanged and that is a decision: the inventory,
+  the CA list, the dashboard and the audit log go on showing everything to
+  everyone who can log in, because a filtered inventory is also a filtered
+  expiry warning and a log that shows each reader only their own actions is
+  not an audit log. New grant editors on `/users` and `/tokens` (superadmin +
+  CSRF), granted issuers in the issue and sign selectors, new audit actions
+  `user_issuers_changed` and `token_issuers_changed`, and 403 for an
+  authorization failure against the 400 an unknown, retired or ambiguous
+  issuer already returns. A self-issuance cabin cannot complete also stops
+  being invisible: `TlsManager` records the last error, the dashboard banner
+  gains a third state naming it, and `tls_certificate_failed` is audited on
+  the transition into failure rather than once an hour forever.
+- Spec 0019 (acme-per-issuer): an ACME account belongs to one issuer. The URL
+  selects it and external account binding authorises it —
+  `/acme/ca/{issuer_id}/directory` and `/acme/ca/{issuer_id}/new-account`
+  replace the two shared paths, and every other ACME URL is unchanged because
+  it already knows its issuer through the account. An account is bound at
+  registration and for life; re-presenting its key at another issuer's
+  directory is refused rather than silently rebound, which would let a bare
+  account key move itself between hierarchies by visiting a URL. An EAB key
+  names one CA row, and one presented at another issuer's directory is refused
+  with the same wording every other binding failure uses — so a client learns
+  nothing about which keys exist — and is not spent. The grant check moves to
+  the one moment an operator actually decides something: minting an EAB key,
+  which now takes a required `issuer_id` and resolves it through the grants,
+  giving a chain from grant to key to account to certificate. Finalize passes
+  the account's issuer explicitly instead of riding 0017's default rule, and
+  new-order refuses when that account's issuer is retired, which is a
+  different question from whether the instance has any active issuer at all. A
+  retired issuer keeps serving its directory, because the accounts bound to it
+  still poll and a 404 there would say cabin is gone rather than that the CA
+  was stood down; what it refuses is new-account and new-order. The `index`
+  link is emitted only on the two per-issuer paths, since there is no longer a
+  single directory to name. Migrations 0008 and 0009 rewritten in place.
+- Spec 0020 (name-constraints): an intermediate can be restricted to the names
+  it is allowed to sign, with a critical `NameConstraints` extension carrying
+  dNSName and iPAddress subtrees. The extension is the easy half. The half
+  that matters is that cabin checks its own constraints before signing, beside
+  the SAN validation, in a function that takes no new parameter and therefore
+  cannot be forgotten by a caller — every issuance path runs through it,
+  including ACME, where nobody is watching and a refusal surfaces as a renewal
+  that quietly stopped. Writing the extension and trusting the client would
+  mean cabin cheerfully issues certificates every validator then rejects.
+  Constraints are set when an intermediate is created, on both creation paths
+  so the first intermediate of a hierarchy can be restricted too; they live in
+  the issuer's certificate rather than in a column, so the rule and the
+  certificate cannot disagree, and a renewal carries them over byte for byte,
+  because a routine renewal that silently widened what a CA may sign would go
+  unnoticed for years. Roots take none. Operator input is parsed in one place:
+  an address with host bits set is refused rather than widened (`10.1.2.3/8`
+  is not `10.0.0.0/8`), a wildcard is refused because RFC 5280's subtree
+  already means "and everything below it", an empty entry is refused because
+  an empty dNSName constraint matches every name, a leading dot is accepted
+  and stripped, and at most 50 entries per side. The matching rules follow the
+  validators rather than being merely stricter: excluded beats permitted, an
+  empty permitted set for a name form permits every name of that form,
+  restrictions apply per name form, DNS matching is by label boundary, an
+  IPv4-only permitted set forbids every IPv6 address while a DNS-only one
+  forbids no address at all, and the common name is checked as a DNS name only
+  when the SAN list carries no DNS entry. A constraint form cabin cannot
+  evaluate — which an imported CA may legitimately carry — refuses a name of
+  that form rather than ignoring it. The refusal is a subclass of the existing
+  issuance error, so every ordinary door rejects it unchanged; ACME is the one
+  exception and answers `rejectedIdentifier` instead of the `serverInternal`
+  that every issuance failure used to become, because telling a correct client
+  the server is broken invites it to retry forever. `/ca` shows the
+  constraints of every row that carries them, read from that row's own
+  certificate, and `ca_created` records them. cabin's own TLS certificate is
+  not exempt: an issuer constrained to exclude cabin's own hostname stops
+  renewing it 30 to 90 days later, which is now measured rather than
+  discovered. No migration.
+- Spec 0021 (cross-signing): a root already in cabin can sign another root
+  (`POST /ca/{ca_id}/cross-sign`), or a cross certificate produced elsewhere
+  can be imported (`POST /ca/cross-import` — two PEMs and no private key,
+  because nobody holds the key of a certificate somebody else produced). It is
+  a second certificate for a root that already exists, same subject and same
+  public key, so relying parties trusting the older root have a path to
+  certificates issued under the newer one. It is in scope for devices whose
+  trust store cannot be reached and which will outlive a root generation; for
+  everything else 0017's two hierarchies side by side are the better
+  transition, and cross-signing is the most error-prone mechanism in PKI. The
+  import compares the SubjectPublicKeyInfo and the subject's DER encoding, not
+  the name as a string: without that, any CA certificate whose subject happens
+  to read `CN=cabin Root CA` could be stapled into the chain cabin serves to
+  every client. A leaf under a cross-signed root then has two valid paths and
+  both are served — the default is the earliest cross path, signed by the
+  oldest root generation and therefore the one in the most trust stores, with
+  the self-signed path always present as an alternate. Alternates are offered
+  as `?anchor={ca_id}` on the chain downloads and, over ACME, as
+  `Link ...;rel="alternate"` plus `POST /acme/cert/{cert_id}/{anchor_id}`,
+  which cabin did not emit before, so `certbot --preferred-chain` can pin
+  either path from the client side. Expiry is checked where the chain is
+  assembled, on every request, against no cached value, no column and no
+  background job: when DST Root CA X3 expired in 2021, clients broke because
+  path building preferred an expired route while a valid one sat beside it,
+  and a chain that is correct until somebody visits a page is not correct. A
+  cross certificate carries exactly the name constraints of the root it
+  duplicates, because a constraint that existed only on the long path would be
+  enforced by the relying parties that took it and by nobody else, cabin
+  included. `/ca` renders cross rows under the root they duplicate and names
+  which path is served by default and which is offered alongside; the
+  dashboard's "install this root" link deliberately keeps pointing at the
+  self-signed root, and carries a comment saying so, because an operator
+  following it must not install the wrong thing. Retiring a cross certificate
+  is the kill switch and takes the path out of every chain on the next
+  request — but it is not a revocation, and cabin cannot revoke one: a cross
+  certificate is signed by a root, cabin publishes no CRL for a root, so there
+  is no document its serial could go into, and a relying party that already
+  cached it is told nothing. The UI says that next to the button. New audit
+  actions `ca_cross_signed` and `ca_cross_imported`; `IssuerInfo` gains
+  `cross` as a kind and a `cross_of_id`. Migration 0003 edited in place again;
+  the chain still ends at 0010.
+- Spec 0022 (https): cabin can terminate TLS itself, opt-in and off by
+  default. It starts self-signed before the listener accepts anything, issues
+  itself a certificate from its own CA once one exists and swaps it onto the
+  live `SSLContext` without a restart, and serves the same certificate after a
+  restart. That certificate is an ordinary inventory row with a new `system`
+  source, so it is visible, revocable and counted like any other. Its private
+  key is sealed at rest with the same store that protects every CA key and is
+  materialised only into an anonymous `memfd` for the duration of one
+  `load_cert_chain` call — a descriptor with no name in any filesystem —
+  falling back to an immediately unlinked 0600 file only if `memfd_create`
+  raises. Renewal runs on a clock (90 days, renewed at 30, checked hourly) and
+  not lazily on access: the certificate is presented during the handshake,
+  below Python, so the only request that could trigger a lazy renewal is one
+  the expired certificate has already prevented. A replacement is issued only
+  when it gains at least a day of life, or an instance whose bound issuer is
+  nearly expired would clamp every certificate straight back into the renewal
+  window and add thousands of rows and sealed keys a year. Which issuer signs
+  cabin's own certificate is a stored binding rather than a silent default,
+  because it decides the chain operators have installed in their trust stores;
+  with several active issuers and no binding, cabin keeps serving self-signed
+  and asks, since reachable with a warning beats correct and unreachable, and
+  it never downgrades itself from CA-issued back to self-signed. Retiring the
+  bound issuer is refused, including through the cascade from retiring its
+  root, because the symptom would otherwise appear months after the cause.
+  With TLS on, a second plaintext listener on `CABIN_HTTP_PORT` serves the CRL
+  and CA-certificate routes and nothing else — no route that accepts a
+  credential, no `Location`, no `Set-Cookie` — because those URLs are baked
+  into certificates and must stay `http://`. The consequence for deployment is
+  that it belongs on host port 80 of the host named in `base_url`, and a
+  `base_url` carrying any other explicit port is now refused while TLS is on.
+  `COOKIE_SECURE` is forced on, and cabin refuses to start with more than one
+  worker while TLS is on, because the swap would reach one process and leave
+  the rest serving an expired certificate silently. `/ca` now shows each
+  issuer's CDP and AIA URLs exactly as they are embedded, so a wrongly mapped
+  port is visible in seconds instead of years. New audit actions
+  `tls_certificate_issued` and `tls_certificate_failed`, a dashboard banner
+  and first-run notes explaining that the initial browser warning is expected
+  and what ends it, a scheme-aware container health check, and compose, Unraid
+  and README updates. The reverse-proxy deployment is unchanged. Turning TLS
+  on is four steps and the order matters: set `base_url` to the host cabin
+  will be reached at, with no explicit port, because it decides the name on
+  the certificate; set `CABIN_TLS=true`; publish `CABIN_HTTP_PORT` on host
+  port **80** of that host, because that is where every certificate cabin
+  issues says its CRL and CA certificate are; and, on an instance with more
+  than one active issuer, pick on `/settings` which one signs cabin's own
+  certificate, or cabin will keep serving self-signed rather than choose for
+  you. The third step is the one that fails quietly — miss it and the
+  certificates are perfectly valid while their distribution points are dead,
+  which surfaces whenever some relying party first enforces revocation. The
+  README's _Security notes_ has the whole sequence in full.
+- Spec 0023 (ca-pages): `/ca` splits into four pages. `GET /ca` is now a
+  bare list — one row per hierarchy with its status, expiry and
+  intermediate/cross counts, no form and no per-hierarchy detail — linking
+  to `GET /ca/{ca_id}`, which shows one hierarchy in full (its root, every
+  intermediate with its CRL/AIA/ACME URLs, every cross certificate) plus,
+  for an admin, every action that applies to it: renew, retire, add an
+  intermediate, cross-sign. `GET /ca/new` carries the create form alone and
+  `GET /ca/import` carries both import forms; `ca_setup.html`, the wizard
+  that used to double as the create/import page, is gone. No POST path,
+  form field or guard changes — a redirect target does:
+  `/ca/{root_id}/intermediate` and `/ca/{ca_id}/cross-sign` now re-render
+  the hierarchy's own detail page on error, with what was typed still in
+  the form and its section open, instead of the removed list-with-forms
+  page and a JSON error document. A new rail group "Certificate authority"
+  holds Hierarchies / Create / Import, gated by a new `ca_admin` nav flag
+  kept deliberately distinct from `issue`. The empty state still explains
+  where to go and stays reachable on a fresh instance and on one still
+  serving a self-signed certificate.
+- Spec 0024 (ca-names-and-actions): **a CA's name is now taken verbatim** —
+  see above. A name is stripped of leading and trailing whitespace, then
+  refused on the form — not reaching cryptography's own exception as a
+  500 — if what's left is empty or exceeds 64 UTF-8 bytes, the same bound
+  `x509.NameAttribute` itself enforces. `POST /ca/create` writes a root and
+  nothing else; adding its first intermediate is a separate action on the
+  hierarchy's own detail page, so "a root with no active issuer yet" is now
+  the ordinary state of a freshly created hierarchy rather than a rare one
+  — the issue form and the two internal error paths (`resolve_issuer`,
+  `resolve_granted_issuer`) say so explicitly and link to where the fix is,
+  instead of reusing the sentence for "no CA at all", and the dashboard
+  names every hierarchy that currently lacks an active issuer
+  (`ca_no_issuer_roots`) rather than a single instance-wide flag that goes
+  dark the moment any other hierarchy gets one. An intermediate is refused
+  if its subject would come out identical to its own parent root's:
+  dropping the composed suffix made that reachable, and a real
+  chain-building bug follows from it — OpenSSL resolves the issuer of a
+  certificate under two identically-named CAs to the wrong one, turning a
+  name-constraint violation into what looks like a signature failure. The
+  two disclosure blocks (`<details>`) for adding an intermediate and for
+  cross-signing become open sections with their own heading, matching
+  every other form in cabin, and every hierarchy row becomes its own
+  section too, so the page reads down the left column instead of leaving
+  it empty. Retiring a hierarchy or an issuer now needs a ticked
+  confirmation checkbox, enforced on the server, in its own form separate
+  from renew — the same two-step pattern certificate revocation already
+  uses.
+- Spec 0025 (transfer): a new "Transfer" rail group collects everything
+  that moves material in or out of cabin, five pages in place of the two
+  import forms `/ca/import` used to carry. `Import a CA` and
+  `Import a cross certificate` move to their own pages
+  (`/transfer/ca-import`, `/transfer/cross-import`) with the same POST
+  paths, fields and guards as before. `Trust bundle`
+  (`/transfer/trust-bundle`) concatenates every active root's certificate
+  into one PEM file, or one hierarchy's root plus its active intermediates
+  with `?ca={root_id}` — open to any logged-in user, since it contains no
+  more than `/ca/{ca_id}.pem` already serves one at a time. `Inventory export`
+  (`/transfer/inventory`) writes the certificate list as CSV or
+  JSON, the whole filtered set rather than one paginated page, with the
+  same fields `/api/v1/certs` already returns. **`CA key`
+  (`/transfer/ca-key`) is the first page in cabin that hands out a CA's own
+  private key** — see above. It offers only rows cabin actually holds a
+  sealed key for (an imported root has none; an imported intermediate
+  does, because its key was uploaded), requires a password of at least 8
+  characters, refuses cleanly rather than with a 500 when the master key
+  can't unseal a row, writes nothing to disk at any point, and records a
+  `ca_key_exported` audit event without the password in it. Per-certificate
+  downloads (`/certs/{id}/download/...`) stay on the certificate's own page
+  and do not move here.
+- Spec 0026 (hierarchy-pages): a hierarchy page is a list again.
+  `GET /ca/{root_id}` renders its root, then an **Issuers** table (name,
+  status, expiry — the name is the link), then a **Cross certificates**
+  table (name, signer, status, serving state, expiry; omitted entirely when
+  the root has none), and only then the _Add intermediate_ and _Cross-sign_
+  forms, which used to sit above everything that repeats. An intermediate
+  costs a table row rather than a full section, and a root with no issuer
+  yet says so and links to the form further down its own page instead of
+  showing an empty stretch. Everything a row used to show inline —
+  subject, fingerprint, `cert.pem` and `chain.pem`, the CRL and AIA URLs or
+  the note explaining their absence, the ACME directory URL, the name
+  constraints, and the renew and retire controls — moves to two new pages,
+  `GET /ca/{root_id}/issuer/{issuer_id}` and
+  `GET /ca/{root_id}/cross/{cross_id}`, readable by any logged-in user with
+  the controls still admin-only. A row and its hierarchy that do not belong
+  together answer 404 rather than redirecting to the right one, since the
+  next thing done on such a page renews or retires. `POST /ca/{ca_id}/renew`
+  and `POST /ca/{ca_id}/retire` keep their paths, fields and guards, and now
+  redirect to the row's own page; a retire submitted without its
+  confirmation ticked re-renders that same page rather than the hierarchy
+  page that no longer carries the form. No stylesheet change and no schema,
+  API, MCP or ACME change.
+- Spec 0027 (shell-and-tokens): cabin's interface now follows a design drawn
+  for it — dark by default, with a light counterpart that activates from the
+  browser's own `prefers-color-scheme: light`, not a switch inside cabin.
+  **Nothing about what any page does has changed**: this step rewrites
+  `cabin.css` and adds one wrapper and one id to `layout.html`'s shell, and
+  touches no content template's markup, so every form, table and action is
+  exactly where and what it was, wearing the new chrome around it. Public
+  Sans is replaced by Inter, vendored under `static/fonts/` with its own SIL
+  OFL licence and fetched from no CDN, as before; IBM Plex Mono stays,
+  trimmed to the one weight the stylesheet actually references.
+- Spec 0028 (detail-pages): the CA pages take the design's own arrangement.
+  `/ca` becomes a **grouped list** — every root with its issuers indented
+  under it, a tree glyph, the kind as a tag beside the name and the issuer's
+  own status in the Status column — so an operator reaches an issuer without
+  opening its root first, which is what every issuance, every ACME directory
+  and every grant is actually named by. The hierarchy page's `Issuers` table
+  gains a **Kind** column, both its tables become clickable by the whole row
+  rather than by the name alone (the name cell is still the link, and the
+  focus treatment is added to the link's own ring rather than replacing it),
+  and the root's **renew and retire move into a section of their own, last on
+  the page**, so the page's one irreversible control is no longer read beside
+  the root's subject and fingerprint. An issuer's facts become a definition
+  grid, and a cross certificate's "signed by X, in place of Y's own
+  signature" sentence becomes a banner above them instead of two cells of a
+  table. Every table stays a `<table>` inside its `.scroller`, with the
+  design's column templates applied through `display: grid` on `<tr>`.
+  **Not one sentence on any of these pages changed.** A defect shipped with
+  the cross-certificate table is fixed on the way past: it overflowed its own
+  box by 78px at 390px wide, because the expiry cell was marked `nowrap` and
+  a 25-character timestamp cannot be made narrower than 170px — no page-level
+  check could see it, since a scroller exists precisely to hold what does not
+  fit. Both widened tables now fit at 390 with nothing to scroll. No route,
+  guard, form field, redirect, audit event, schema, API, MCP or ACME
+  behaviour changes.
+
+- **The five form pages take the design's two-column shape, and htmx is wired
+  for the first time.** Issue, Sign a CSR, Create a CA and Import a CA gain a
+  preview panel beside the form: the constraint marks and the verdict on the
+  issue page, the parsed subject/SANs/key on the sign and import pages, and
+  what a create would produce. Four new endpoints answer them —
+  `POST /certs/issue/preview`, `/certs/sign/preview`, `/ca/create/preview`,
+  `/ca/import/preview` — each guarded exactly like the mutation it previews,
+  each writing nothing and unsealing no private key. The constraint panel calls
+  `leaf.check_name_constraints`, the signer's own function, once per name and
+  once over the whole set, so the panel and the button cannot disagree; the
+  expiry it states comes from the same clamp the certificate gets. Every one of
+  the four answers a full page when the `HX-Request` header is absent, from the
+  same Jinja macro, and every form carries a `Check` button that uses it — with
+  JavaScript off nothing on these pages silently does nothing. The rule htmx
+  enters under is recorded in `docs/adr/0003-url-state-disclosure-and-htmx.md`.
+  The CA-import preview names its two textareas explicitly and declares no
+  parameter for a private key or a passphrase, so typing one sends nothing.
+- **`Add intermediate` and `Cross-sign with another root` on a hierarchy page
+  are URL state.** `GET /ca/{id}?add=intermediate` (or `?add=cross-sign`)
+  renders that panel open; without the parameter both are closed and each shows
+  its heading, its help line and a real link. An unrecognised `add=` value is a
+  typo, not an error. A rejected create or cross-sign comes back with its own
+  panel open and the submitted values still in the fields.
+
+- **Spec 0030 (remaining-pages): every page an operator sees now says what
+  just happened, and a refusal is a page.** The dashboard, the inventory,
+  users, API tokens, ACME, the audit log, settings and the three remaining
+  transfer pages take the design's arrangement — grouped authority lists,
+  the design's column templates, service chips, a segmented status filter and
+  filter pills that are real links with addresses, toggle switches drawn on
+  the real checkboxes, and `user-select: all` on the values that used to have
+  a copy button. Not one sentence on any of them changed.
+
+- **A flash message, in one nullable column.** A UI POST that answers 303 and
+  records exactly one audit event now leaves that event's own summary on the
+  session row; the next page pops it, shows it once and clears it in the same
+  transaction. Migration `0011` adds `sessions.flash` (nullable `TEXT`, no
+  server default) and is the only schema change in the redesign. The message
+  is deliberately **not** a query parameter: a `?flash=` survives a bookmark,
+  survives `F5`, leaks into `Referer` and every proxy log, and is forgeable —
+  any link anybody sends would become a sentence cabin says in its own voice.
+  The cost is named rather than glossed: an authenticated GET becomes a write
+  whenever a message is pending. There is one tone and no close button; no
+  failing UI POST redirects, so an error flash would have no producer, and
+  spec 0029's rule leaves no route-shaped way to dismiss one early.
+  `POST /tokens` and `POST /acme/admin/eab-keys` are excluded by name — both
+  render a live credential exactly once, and routing them through a column
+  would store it in clear text and show it again.
+
+- **A refusal reaches a browser as cabin's own page.** `deps.py`'s bare
+  `HTTPException(403)` used to arrive as `{"detail": "forbidden for this
+  role"}` in a browser window. It is now `not_permitted.html`, inside the
+  shell with the rail, naming which of cabin's two actual causes applied —
+  a role that may not open the page, or a form submitted with a token this
+  session does not recognise — and offering a way back. **The other three
+  front doors are unchanged, byte for byte.** The handler decides by which
+  router owns the matched route and never by the request path: `/acme/admin`
+  is an interface page whose path begins `/acme`, so a prefix test would
+  answer cabin's own ACME settings page as `application/problem+json`. A new
+  API, ACME or MCP route lands outside the interface set with nobody
+  remembering anything, which is the direction a mistake here has to fail in.
+
+- **The rail's fourth group is `Export`.** It holds Trust bundle, CA key and
+  Inventory export; `Import a CA` and `Import a cross certificate` move under
+  `Certificate authority`, which is where the design puts them. Sixteen
+  entries, every `href` and every label unchanged. The Inventory entry gains a
+  count badge when something is expiring — the same `status_counts` figure the
+  dashboard's tile shows — and no badge at all at zero.
+
+- **A user row is edited at its own URL.** `GET /users?edit={id}` opens one
+  row as a form; without it every row is text with an `Edit` link. It works
+  with JavaScript off, it survives an error re-render, it can be linked to,
+  and it adds no endpoint — htmx fetches the same page and takes the row out
+  of it. `?edit=` is a request to open a row and never a grant: a viewer is
+  offered nothing at either URL.
+
+### Changed
+
+- **Seven environment variables, not five.** `CABIN_TLS` (default `false`) and
+  `CABIN_HTTP_PORT` (default `8081`) are new, and they are the first values
+  since spec 0014 to live in the environment rather than in the settings
+  table. `docs/adr/0002-tls-environment-variables.md` records the deviation
+  rather than making it quietly: a setting that can make the interface
+  unreachable has to be changeable from somewhere that does not depend on that
+  interface being reachable. Recoverability, not convenience, is the test the
+  ADR holds the next such request to.
+- **The CRL and CA-certificate endpoints are per issuer.** `GET
+/crl/{issuer_id}`, `GET /crl/{issuer_id}.pem` and the new `GET
+/ca/{ca_id}.cer` replace `/crl` and `/crl.pem`, and the authenticated
+  `/ca/{ca_id}.pem` and `/ca/{issuer_id}/chain.pem` replace `/ca/root.pem` and
+  `/ca/chain.pem`. All four old paths are removed with no alias and no
+  redirect, so anything fetching them has to be repointed — including any
+  certificate issued by 0.1.0, whose distribution point names a URL that no
+  longer answers.
+- **The ACME directory URL is per issuer**, so every existing client
+  configuration changes. Read the new URL before changing anything: `/ca` and
+  `/acme` show one per hierarchy, and the issuer id in the path cannot be
+  guessed or derived from the old URL — `/settings` no longer prints a
+  directory URL at all, because there is no longer a single one to print. With
+  that id in hand, a certbot or acme.sh setup pointing at `/acme/directory`,
+  which now answers with a 404 problem document, moves to
+  `/acme/ca/{issuer_id}/directory`; `/acme/new-account` is gone the same way.
+- `GET /api/v1/ca` and the MCP `get_ca_info` tool return `{"issuers": [...]}`,
+  one entry per row with its `crl_url` and `ca_url`, instead of a
+  `{root, intermediate}` pair that can no longer describe the instance.
+  `CertificateDetail` and `CertificatePem` gain `validity_capped_from`,
+  present only on an issuance response whose validity was actually clamped.
+  The issue and sign forms and their REST bodies gain an optional `issuer_id`.
+
+### Fixed
+
+- **Foreign keys were never enforced.** SQLite ignores them unless
+  `PRAGMA foreign_keys = ON` is set per connection, and cabin never set it, so
+  every foreign key in the schema was decorative — a certificate row
+  referencing a CA that does not exist was written without complaint. The
+  pragma now comes from a SQLAlchemy connect listener, so it covers every
+  connection the pool creates rather than only the first, and it is skipped
+  for other backends. This predates 0.2.0; multiple hierarchies made it
+  load-bearing, because a chain is now assembled from `certificates.issuer_id`
+  naming a real row.
+- **ACME wrote its order rows in an unspecified order**, which turning the
+  pragma on is what exposed. `create_order` built the order, its
+  authorizations and their challenges in a single flush with no
+  `relationship()` between the mappers, and SQLAlchemy derives its
+  cross-mapper insert ordering from relationships rather than from raw foreign
+  key columns — so parent-before-child had only ever been correct by luck, in
+  every ACME order since the feature shipped. Explicit flushes now force it.
+
 ## [0.1.0] - 2026-08-03
 
 First release. cabin is an all-in-one internal certificate authority in one
@@ -170,7 +722,7 @@ CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
 - Spec 0012 (acme-finalize-eab): the end of an ACME order, which completes
   the ACME server. `POST /acme/order/{id}/finalize` takes the client's CSR
   (base64url DER), checks its signature and requires its subjectAltName set
-  to be *exactly* the order's identifiers — DNS names compared
+  to be _exactly_ the order's identifiers — DNS names compared
   case-insensitively, IPs compared as addresses, a wildcard identifier
   matching the wildcard SAN — and a common name, if present, to be one of
   them; each mismatch is its own `badCSR` detail (`cabin.acme.csr`). The key
@@ -205,8 +757,7 @@ CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
   the directory's `meta.externalAccountRequired` reflects: the inner JWS is
   verified on a separate, explicit HS256 path that shares no algorithm table
   with the account-key allowlist, with the MAC compared in constant time,
-  and the operator's HMAC keys are stored sealed (`acme_eab_keys`, migration
-  0009) and shown exactly once, base64url, on creation. A key binds one
+  and the operator's HMAC keys are stored sealed (`acme_eab_keys`, migration 0009) and shown exactly once, base64url, on creation. A key binds one
   account, enforced by a conditional UPDATE plus a unique index; revoked and
   already-bound keys — and a second key for an account that already has one,
   which loses against the index — are refused with one wording, so a client
@@ -317,7 +868,7 @@ CSR signing, CRL-based revocation, an MCP server and an audit log. Specs
 - Spec 0016 (dashboard): `/` stops being the stub spec 0003 called it and
   becomes the page an operator opens first. Four counts (valid / expiring /
   expired / revoked), each linking to the inventory filtered to it and backed
-  by a new `status_counts` that runs the *same* filters the inventory runs, so
+  by a new `status_counts` that runs the _same_ filters the inventory runs, so
   a tile and the page behind it cannot disagree. The certificates expiring
   within 30 days, soonest first. The CA's own expiry — flagged a year ahead,
   because replacing an intermediate means touching every trust store it lives

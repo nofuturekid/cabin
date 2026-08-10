@@ -1,0 +1,41 @@
+{# Spec 0026 FR-13: the two macros `ca_detail.html` and `ca_issuer.html`
+   share, moved out of `ca_detail.html` unchanged. `renew_retire` carries the
+   confirmation checkbox spec 0024 FR-9 requires in the same `<form>` as the
+   danger button; two drifting copies of it is a security-shaped defect,
+   because the copy that loses its checkbox still renders a working red
+   button. One definition removes the possibility rather than testing for it.
+
+   This is a macro library and not a page: it extends nothing, defines no
+   `content` block and sets no `nav_current`, which is why
+   `test_every_content_template_sets_nav_current` excludes it -- and asserts
+   exactly these three absences, so the exemption cannot later be widened to
+   silence a real page. #}
+{% macro constraints_block(row) %}{% if row.has_constraints %}<div class="constraints"><p class="help">Permitted:{% if row.permitted_dns or row.permitted_ip %} <span class="mono">{{ (row.permitted_dns + row.permitted_ip) | join(", ") }}</span>{% else %} <span class="mono">none set -- every name of a constrained form is permitted</span>{% endif %}</p>{% if row.excluded_dns or row.excluded_ip %}<p class="help">Excluded: <span class="mono">{{ (row.excluded_dns + row.excluded_ip) | join(", ") }}</span></p>{% endif %}</div>{% endif %}{% endmacro %}
+
+{% macro renew_retire(row, retire_help) %}
+{% if nav.ca_admin %}
+<div class="row-controls">
+{% if row.can_renew %}
+<form method="post" action="/ca/{{ row.id }}/renew">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <div class="field">
+    <label for="renew-years-{{ row.id }}">Renew for (years)</label>
+    <input id="renew-years-{{ row.id }}" type="number" name="years" value="10" min="1" max="50" />
+  </div>
+  <div class="actions"><button type="submit">Renew</button></div>
+</form>
+{% endif %}
+{% if row.can_retire %}
+<form method="post" action="/ca/{{ row.id }}/retire" class="panel-danger">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <p class="help">{{ retire_help }}</p>
+  <label class="field-check">
+    <input type="checkbox" name="confirm" value="on" />
+    Yes, retire this CA
+  </label>
+  <div class="actions"><button type="submit" class="danger">Retire</button></div>
+</form>
+{% endif %}
+</div>
+{% endif %}
+{% endmacro %}

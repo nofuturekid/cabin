@@ -15,6 +15,7 @@ reads.
 
 import ipaddress
 from typing import Any
+from urllib.parse import urlsplit
 
 from acme_client import Acme, AcmeKey, b64, rsa_key
 from cryptography import x509
@@ -40,7 +41,12 @@ def db_session(cfg: Config) -> Session:
 
 
 def path_of(url: str) -> str:
-    return url.removeprefix(BASE)
+    """The path (+ query) of a URL cabin returned, independent of which
+    base URL cabin was configured with -- most callers configure ``BASE``,
+    but a test that exercises a different ``base_url`` (spec 0017 FR-12)
+    gets back locations built from that instead."""
+    parsed = urlsplit(url)
+    return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
 
 
 def assert_problem(resp: Response, kind: str, status: int) -> None:
@@ -94,13 +100,20 @@ def rsa_signing_key(bits: int = 2048) -> rsa.RSAPrivateKey:
 
 
 class Flow:
-    """One ACME account and one order, driven over the real HTTP surface."""
+    """One ACME account and one order, driven over the real HTTP surface.
+
+    Inherits its issuer from ``acme`` rather than taking one of its own:
+    ``Flow(acme_a, cfg, "nas.lan")`` and ``Flow(acme_b, cfg, "nas.lan")`` is
+    how a two-hierarchy test says "one flow per issuer", and a second
+    ``issuer_id`` parameter here could disagree with the one baked into
+    ``acme``'s paths (spec 0019 work split R1/§2.3).
+    """
 
     def __init__(self, acme: Acme, cfg: Config, *names: str, key: AcmeKey | None = None) -> None:
         self.acme = acme
         self.cfg = cfg
         self.key = key or rsa_key()
-        registration = acme.post("/acme/new-account", self.key, {"termsOfServiceAgreed": True})
+        registration = acme.post(acme.new_account_path, self.key, {"termsOfServiceAgreed": True})
         assert registration.status_code in (200, 201), registration.text
         self.kid = registration.headers["location"]
         self.identifiers = [self._identifier(name) for name in names]

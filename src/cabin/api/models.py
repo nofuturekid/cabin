@@ -15,7 +15,7 @@ Two rules shape this module:
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from cabin.audit import ActorKind, AuditAction
 from cabin.ca.certs import CertStatus
@@ -46,10 +46,22 @@ class ErrorDetail(BaseModel):
     detail: str
 
 
-class CACertificateInfo(BaseModel):
-    """One CA certificate as ``GET /ca`` describes it."""
+class IssuerInfo(BaseModel):
+    """One ``ca_certificates`` row as ``GET /ca`` describes it (spec 0017
+    FR-15/AC-15) -- a hierarchy is now several of these, not a fixed
+    ``{root, intermediate}`` pair."""
 
-    kind: Literal["root", "intermediate"]
+    id: int
+    name: str
+    kind: Literal["root", "intermediate", "cross"]
+    status: Literal["active", "retired"]
+    parent_id: int | None
+    #: Spec 0021 FR-14: the self-signed row this certificate duplicates --
+    #: set only for ``kind == "cross"``, and omitted from the JSON rather
+    #: than kept present the way ``parent_id`` is, because ``kind`` already
+    #: tells a root from an intermediate and a field present only where it
+    #: means something is the smaller change.
+    cross_of_id: int | None = None
     subject: str
     issuer: str
     serial: str
@@ -58,16 +70,33 @@ class CACertificateInfo(BaseModel):
     #: SHA-256 over the DER, colon-separated hex.
     fingerprint: str
     key_type: str
+    #: Where this row's CRL is published; ``None`` for a root row, since no
+    #: CRL route answers for one (spec 0017 FR-10).
+    crl_url: str | None = None
+    #: Where this row's own certificate is published (``/ca/{id}.cer``);
+    #: set for every row, root included.
+    ca_url: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        """``parent_id`` stays in the JSON even when ``None`` and the route
+        serializes with ``response_model_exclude_none=True``.
+
+        Every other optional field here (``crl_url``, ``ca_url``) is
+        genuinely absent-when-unknowable, but ``parent_id`` is how a caller
+        tells a self-signed root from an intermediate -- dropping the key
+        for that value would make "root" indistinguishable from "some other
+        reason this field is missing".
+        """
+        data: dict[str, object] = handler(self)
+        data["parent_id"] = self.parent_id
+        return data
 
 
 class CAInfo(BaseModel):
-    root: CACertificateInfo
-    intermediate: CACertificateInfo
+    issuers: list[IssuerInfo]
     #: The configured public origin, or absent while none is set.
     base_url: str | None = None
-    #: Where this instance publishes its CRL; absent without a base URL,
-    #: which is also when newly issued certificates carry no CDP.
-    crl_url: str | None = None
 
 
 class CertificateSummary(BaseModel):
@@ -100,6 +129,10 @@ class CertificatePem(CertificateSummary):
     cert_pem: str
     #: The issuer chain, nearest issuer first -- intermediate then root.
     chain_pem: str
+    #: Spec 0017 FR-7: the ``not_after`` that was requested but not granted,
+    #: set only on the response to the issuance call that clamped it -- never
+    #: recomputed on a later lookup.
+    validity_capped_from: datetime | None = None
 
 
 class CertificateDetail(CertificatePem):
@@ -176,6 +209,10 @@ class IssueRequest(BaseModel):
     profile: Profile = Profile.server
     key_type: KeyType = "ecdsa-p256"
     days: int = Field(default=DEFAULT_DAYS, ge=MIN_DAYS, le=MAX_DAYS)
+    #: Spec 0017 FR-6: which active intermediate signs this leaf. Omitted
+    #: with exactly one active issuer resolves to it; omitted with several is
+    #: a 400, not a guess.
+    issuer_id: int | None = None
 
 
 class SignRequest(BaseModel):
@@ -188,6 +225,8 @@ class SignRequest(BaseModel):
     days: int = Field(default=DEFAULT_DAYS, ge=MIN_DAYS, le=MAX_DAYS)
     #: Overrides the CSR's own SANs when given.
     sans: list[str] = Field(default_factory=list, max_length=MAX_SANS)
+    #: Spec 0017 FR-6: see :attr:`IssueRequest.issuer_id`.
+    issuer_id: int | None = None
 
 
 class RevokeRequest(BaseModel):

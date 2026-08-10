@@ -22,17 +22,18 @@ from cabin.acme.errors import AcmeError, ErrorType
 from cabin.acme.http import (
     ACME_PREFIX,
     KEY_CHANGE_PATH,
-    NEW_ACCOUNT_PATH,
     NEW_NONCE_PATH,
     NEW_ORDER_PATH,
     REVOKE_CERT_PATH,
     json_response,
+    new_account_path,
     not_found,
     offer_nonce,
     require_acme_enabled,
     require_jose_content_type,
     url,
 )
+from cabin.ca import service as ca_service
 from cabin.settings import ACME_REQUIRE_EAB, BASE_URL, get_flag, get_setting
 from cabin.web.deps import get_db
 
@@ -48,13 +49,33 @@ router = APIRouter(
 )
 
 
-@router.get("/directory")
-def directory(request: Request, db: Session = Depends(get_db)) -> Response:
+@router.get("/ca/{issuer_id:int}/directory")
+def directory(issuer_id: int, db: Session = Depends(get_db)) -> Response:
+    """Spec 0019 FR-3/FR-4: the shared ``/acme/directory`` is gone with no
+    alias -- there is no longer a single directory to serve, and inventing
+    one would reintroduce the default-issuer rule this spec removes. An id
+    naming no row, or a root rather than an intermediate, is the same
+    ``not_found`` problem document as any other unknown ACME resource: a
+    root signs no leaf, so its directory would be a URL that could never
+    produce a certificate. A *retired* intermediate still gets one -- 0017
+    FR-9's precedent for its CRL -- so its existing accounts keep polling
+    and are refused precisely where it matters (new-account, new-order),
+    not here.
+    """
+    try:
+        issuer = ca_service.get_ca(db, issuer_id)
+    except ca_service.UnknownIssuerError as exc:
+        raise not_found("ACME resource") from exc
+    if issuer.kind != "intermediate":
+        raise not_found("ACME resource")
     website = get_setting(db, BASE_URL)
     meta: dict[str, object] = {
         # RFC 8555 9.7.6 / spec 0012 FR-4: a client reads this before it
         # builds a registration, so that "you need credentials" is something
-        # it learns from the directory rather than from a 403.
+        # it learns from the directory rather than from a 403. No
+        # cabin-specific member names the issuer here (Out of Scope): the
+        # registry does not grant one, and the ``/ca`` page answers that
+        # question for the audience that asks it.
         "externalAccountRequired": get_flag(db, ACME_REQUIRE_EAB)
     }
     if website:
@@ -62,7 +83,7 @@ def directory(request: Request, db: Session = Depends(get_db)) -> Response:
     return json_response(
         {
             "newNonce": url(db, NEW_NONCE_PATH),
-            "newAccount": url(db, NEW_ACCOUNT_PATH),
+            "newAccount": url(db, new_account_path(issuer_id)),
             "newOrder": url(db, NEW_ORDER_PATH),
             "revokeCert": url(db, REVOKE_CERT_PATH),
             "keyChange": url(db, KEY_CHANGE_PATH),
@@ -93,7 +114,7 @@ router.include_router(api_finalize.router)
 #: so that a browser's idea of "just open the URL" is answered with 405 --
 #: and, while ACME is off, with the gate's 404 like every other path here.
 _POST_ONLY_PATHS = (
-    "/new-account",
+    "/ca/{issuer_id:int}/new-account",
     "/new-order",
     "/key-change",
     "/revoke-cert",

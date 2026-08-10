@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import dom
+import grant_fixtures
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -20,12 +22,14 @@ from sqlalchemy.orm import Session
 from cabin import audit
 from cabin.api_tokens import create_token
 from cabin.app import create_app
-from cabin.audit import AuditAction, AuditEvent
+from cabin.audit import ACTION_FILTERS, ACTOR_KIND_FILTERS, AuditAction, AuditEvent
+from cabin.ca import service as ca_service
 from cabin.ca.x509 import create_intermediate, create_root
 from cabin.config import Config
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
 from cabin.users import Role
+from cabin.web import audit_ui
 
 SUPERADMIN_PASSWORD = "correcthorse1"
 USER_PASSWORD = "whatever12345"
@@ -83,14 +87,47 @@ def _login(client: TestClient, username: str, password: str = USER_PASSWORD) -> 
     assert resp.status_code == 303
 
 
+def _last_root_id(cfg: Config) -> int:
+    db = _db(cfg)
+    try:
+        row = db.scalars(
+            select(ca_service.CACertificate)
+            .where(ca_service.CACertificate.kind == "root")
+            .order_by(ca_service.CACertificate.id.desc())
+        ).first()
+        assert row is not None, "no root row exists"
+        return row.id
+    finally:
+        db.close()
+
+
 def _create_ca(client: TestClient, cfg: Config, name: str = "cabin") -> None:
+    """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
+    two steps spec 0024 FR-3 split a single create into (FR-11).
+
+    Root and intermediate are given distinct literal names (``name`` with
+    " Root CA"/" Intermediate CA" appended by *this test file*, not by
+    production) -- ``create_intermediate_under`` refuses an intermediate
+    whose subject collides with its own root's (spec 0024 FR-13), and one
+    label reused for both is exactly that collision.
+    """
     resp = client.post(
         "/ca/create",
         data={
-            "name": name,
+            "name": f"{name} Root CA",
             "key_type": "ecdsa-p256",
             "root_years": 20,
-            "intermediate_years": 10,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+    root_id = _last_root_id(cfg)
+    resp = client.post(
+        f"/ca/{root_id}/intermediate",
+        data={
+            "name": f"{name} Intermediate CA",
+            "key_type": "ecdsa-p256",
+            "years": 10,
             "csrf_token": _csrf(client, cfg),
         },
     )
@@ -153,6 +190,20 @@ def _api_token(cfg: Config, role: Role = Role.admin) -> str:
     db = _db(cfg)
     try:
         secret, _ = create_token(db, f"{role.value}-token", role)
+        return secret
+    finally:
+        db.close()
+
+
+def _granted_api_token(cfg: Config, role: Role = Role.admin) -> str:
+    """Like :func:`_api_token`, but also granted the instance's sole active
+    issuer -- spec 0018 requires an explicit grant before a token may issue
+    or revoke, and this file's audit assertions are about the event, not
+    about that permission check."""
+    db = _db(cfg)
+    try:
+        secret, token = create_token(db, f"{role.value}-token", role)
+        grant_fixtures.grant_token(db, token, ca_service.active_issuers(db)[0].id)
         return secret
     finally:
         db.close()
@@ -264,11 +315,18 @@ def test_ca_create_import_recorded(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
     _create_ca(client, cfg, name="Acme")
 
-    created = _one(cfg, AuditAction.ca_created)
+    # spec 0024 FR-3/FR-5: creating a hierarchy is now two requests -- a
+    # root create and an intermediate create -- each its own ca_created
+    # event; this checks the root's.
+    created = next(
+        e for e in _events(cfg, AuditAction.ca_created) if e.summary.startswith("created CA root")
+    )
     assert created.actor_label == "alice"
-    assert created.target_type == "ca"
+    # spec 0017 FR-15: target_type="ca" is replaced by "ca_certificate" --
+    # one table, one target type, shared with cert issuance's "certificate".
+    assert created.target_type == "ca_certificate"
     assert created.detail is not None
-    assert created.detail["name"] == "Acme"
+    assert created.detail["name"] == "Acme Root CA"
     assert created.detail["key_type"] == "ecdsa-p256"
     assert "Acme" in created.summary
 
@@ -298,10 +356,98 @@ def test_ca_import_recorded(client: TestClient, cfg: Config) -> None:
 
     imported = _one(cfg, AuditAction.ca_imported)
     assert "Import Intermediate CA" in imported.summary
+    assert imported.target_type == "ca_certificate"
     assert imported.detail is not None
     # FR-3: the imported private key must not survive anywhere in the log.
     blob = imported.summary + (imported.detail_json or "")
     assert "PRIVATE KEY" not in blob
+
+
+def test_ca_created_and_imported_use_the_ca_certificate_target_type(
+    client: TestClient, cfg: Config
+) -> None:
+    """FR-15 replaces target_type="ca" with "ca_certificate" at both
+    web/ca_ui.py:135 (create) and :187 (import) -- checked together, and
+    checked that the old label is gone entirely rather than merely unused by
+    these two particular events."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, name="created-target")
+
+    root_cert, root_key = create_root("Import Target Root CA", "ecdsa-p256")
+    intermediate_cert, intermediate_key = create_intermediate(
+        root_cert, root_key, "Import Target Intermediate CA", "ecdsa-p256"
+    )
+    key_pem = intermediate_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    resp = client.post(
+        "/ca/import",
+        data={
+            "cert_pem": _pem_cert(intermediate_cert),
+            "key_pem": key_pem,
+            "chain_pem": _pem_cert(root_cert),
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert resp.status_code == 303
+
+    # spec 0024 FR-3/FR-5: two ca_created events now (root, then
+    # intermediate), both must carry the new target_type.
+    created_events = _events(cfg, AuditAction.ca_created)
+    assert len(created_events) == 2
+    imported = _one(cfg, AuditAction.ca_imported)
+    assert all(event.target_type == "ca_certificate" for event in created_events)
+    assert imported.target_type == "ca_certificate"
+    assert all(event.target_type != "ca" for event in _events(cfg))
+
+
+def test_audit_ca_renewed_and_retired(client: TestClient, cfg: Config) -> None:
+    """AC-14: ca_renewed/ca_retired carry target_type="ca_certificate" and
+    the row id, and are selectable in the audit filter -- which is generated
+    from AuditAction, so this is an assertion on the rendered options."""
+    _setup_superadmin(client)
+    _create_ca(client, cfg, name="rotate")
+    # a second active issuer, so retiring "rotate"'s intermediate does not
+    # trip AC-5's "the last active intermediate cannot be retired" refusal
+    _create_ca(client, cfg, name="spare")
+
+    dbsession = _db(cfg)
+    try:
+        rows = ca_service.list_cas(dbsession)
+        root = next(r for r in rows if r.name == "rotate Root CA" and r.kind == "root")
+        intermediate = next(
+            r for r in rows if r.name == "rotate Intermediate CA" and r.kind == "intermediate"
+        )
+        root_id, intermediate_id = root.id, intermediate.id
+    finally:
+        dbsession.close()
+
+    renewed = client.post(
+        f"/ca/{root_id}/renew",
+        data={"years": "25", "csrf_token": _csrf(client, cfg)},
+    )
+    assert renewed.status_code == 303
+
+    retired = client.post(
+        f"/ca/{intermediate_id}/retire",
+        # spec 0024 FR-9: retire is refused without the confirmation box.
+        data={"confirm": "on", "csrf_token": _csrf(client, cfg)},
+    )
+    assert retired.status_code == 303
+
+    renewed_event = _one(cfg, AuditAction.ca_renewed)
+    assert renewed_event.target_type == "ca_certificate"
+    assert renewed_event.target_id == str(root_id)
+
+    retired_event = _one(cfg, AuditAction.ca_retired)
+    assert retired_event.target_type == "ca_certificate"
+    assert retired_event.target_id == str(intermediate_id)
+
+    options = client.get("/audit").text
+    assert '<option value="ca_renewed"' in options
+    assert '<option value="ca_retired"' in options
 
 
 def test_settings_change_recorded(client: TestClient, cfg: Config) -> None:
@@ -432,7 +578,7 @@ def test_cert_revoked_recorded_ui_and_api(client: TestClient, cfg: Config) -> No
     )
     assert resp.status_code == 303
 
-    secret = _api_token(cfg)
+    secret = _granted_api_token(cfg)
     client.cookies.clear()
     for _ in range(2):
         resp = client.post(
@@ -460,7 +606,7 @@ def test_cert_revoked_recorded_ui_and_api(client: TestClient, cfg: Config) -> No
 def test_api_issue_and_sign_recorded_as_token_actor(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
     _create_ca(client, cfg)
-    secret = _api_token(cfg)
+    secret = _granted_api_token(cfg)
     client.cookies.clear()
 
     resp = client.post(
@@ -562,7 +708,11 @@ def test_failed_operations_are_not_recorded(client: TestClient, cfg: Config) -> 
         client.post("/certs/issue", data={"subject_cn": "x.lan", "csrf_token": "wrong"}).status_code
         == 403
     )
-    assert client.post("/ca/create", data={"name": "second", "csrf_token": csrf}).status_code == 409
+    # spec 0017 FR-2: CAExistsError is gone -- a second /ca/create now
+    # succeeds (and is covered by its own recorded-event test), so it is no
+    # longer an example of a failure here. A CA action against an id that
+    # does not exist still is one.
+    assert client.post("/ca/999999/retire", data={"csrf_token": csrf}).status_code == 404
 
     assert len(_events(cfg)) == before
 
@@ -665,8 +815,15 @@ def test_audit_list_filters(client: TestClient, cfg: Config) -> None:
     assert "filter.lan" in only_issued
     assert created not in only_issued
 
+    # spec 0030 FR-12 re-points the actor_kind half of spec 0009 FR-6 from the
+    # `<select>` to the `.pill` links. What it asserts about the *rows* is
+    # unchanged; the `action` half below is deliberately not re-pointed,
+    # which is what keeps "one of the three becomes pills" honest.
     by_kind = client.get("/audit", params={"actor_kind": "system"}).text
     assert issued not in by_kind
+    assert "system" in _pill_labels(by_kind), (
+        f"the actor_kind filter does not offer `system` as a pill: {_pill_labels(by_kind)}"
+    )
 
     by_q = client.get("/audit", params={"q": "filter.lan"}).text
     assert "filter.lan" in by_q
@@ -682,6 +839,110 @@ def test_audit_list_filters(client: TestClient, cfg: Config) -> None:
     unknown = client.get("/audit", params={"action": "nonsense", "actor_kind": "nonsense"})
     assert unknown.status_code == 200
     assert issued in unknown.text
+
+
+# === spec 0030 AC-12: the audit pills are links that carry the other
+# filters =================================================================
+
+
+def _pills(html: str) -> list[dom.Node]:
+    return dom.parse(html).find_all(cls="pill")
+
+
+def _pill_labels(html: str) -> list[str]:
+    return [node.text() for node in _pills(html)]
+
+
+def test_the_audit_pills_carry_the_other_filters(client: TestClient, cfg: Config) -> None:
+    """AC-12, four clauses plus the no-JavaScript half.
+
+    Clause 2 is the one that bites: each pill's `href` is
+    `audit_ui._page_url(q, action, kind, 1)`, the function the pager already
+    uses. Pills that dropped the action filter would make every one of them
+    a reset disguised as a narrowing -- the page would still answer 200, the
+    rows would still be audit rows, and nothing else here would notice.
+
+    Clause 4 is the other half of FR-12's own claim: exactly one of the
+    three controls becomes pills. If the `action` `<select>` went too, the
+    page would grow a wall of one option per `AuditAction`, which is a
+    two-figure list that grows with every spec.
+    """
+    _setup_superadmin(client)
+    _create_ca(client, cfg)
+    _issue(client, cfg, "pills.lan")
+
+    #: `actor_kind=token` and not `api`: FR-12's own correction records that
+    #: cabin's five pill values are `ACTOR_KIND_FILTERS` -- all / user / token
+    #: / system / acme -- and not the design's all / ui / api / acme / mcp.
+    #: Only the cardinality matches, and a request for a value the enum does
+    #: not have is normalised to `all` (`audit_ui.py:67`), so the earlier
+    #: reading asserted that a filter cabin cannot express was the active one.
+    page = client.get(
+        "/audit", params={"q": "cabin", "action": "ca_renewed", "actor_kind": "token"}
+    )
+    assert page.status_code == 200
+    assert "token" in [str(value) for value in ACTOR_KIND_FILTERS], (
+        "`token` is not one of ACTOR_KIND_FILTERS, so the active-pill clause below "
+        "is asserting about a filter this page cannot carry"
+    )
+
+    pills = _pills(page.text)
+    assert [node.text() for node in pills] == [str(value) for value in ACTOR_KIND_FILTERS], (
+        f"the pills are {[node.text() for node in pills]}; FR-12 renders one per "
+        f"ACTOR_KIND_FILTERS value, which is the five the design names"
+    )
+    assert all(node.tag == "a" for node in pills), (
+        f"a pill is not an anchor: {[node.tag for node in pills]}. Nothing in this "
+        f"spec is a control that mutates on change"
+    )
+    assert [node for node in pills if node.tag == "button"] == []
+    for kind, pill in zip(ACTOR_KIND_FILTERS, pills, strict=True):
+        expected = audit_ui._page_url("cabin", "ca_renewed", str(kind), 1)
+        assert pill.get("href") == expected, (
+            f"the {kind} pill points at {pill.get('href')!r}, not at "
+            f"`_page_url('cabin', 'ca_renewed', {str(kind)!r}, 1)` = {expected!r} -- "
+            f"it drops the search text or the action filter"
+        )
+        assert pill.get("hx-get") == expected
+        assert pill.get("hx-select") == "#audit-log"
+        assert pill.get("hx-target") == "#audit-log"
+
+    on = [node.text() for node in pills if "pill-on" in node.classes]
+    assert on == ["token"], f"`pill-on` is on {on}; exactly one pill carries it"
+
+    tree = dom.parse(page.text)
+    regions = [node for node in tree.walk() if node.get("id") == "audit-log"]
+    assert len(regions) == 1, f"the page has {len(regions)} elements with id=audit-log"
+
+    form = [node for node in tree.find_all(tag="form") if node.get("action") == "/audit"]
+    assert len(form) == 1, "the audit page's GET form moved"
+    selects = form[0].find_all(tag="select")
+    assert [node.get("name") for node in selects] == ["action"], (
+        f"the GET form holds {[node.get('name') for node in selects]}; FR-12 turns "
+        f"exactly one of the three controls into pills and leaves `action` a select"
+    )
+    options = [node.text() for node in selects[0].find_all(tag="option")]
+    assert options == [str(value) for value in ACTION_FILTERS], (
+        f"the action select offers {len(options)} options, not one per ACTION_FILTERS"
+    )
+    assert form[0].find_all(tag="button"), "the GET form lost its submit"
+
+    # --- and following a pill works with no htmx at all
+    #: `acme` rather than `mcp`, for the reason above: it is the one value the
+    #: design's list and cabin's share, and cabin has no `mcp` actor kind.
+    acme_pill = next(node for node in pills if node.text() == "acme")
+    followed = client.get(acme_pill.get("href") or "")
+    assert followed.status_code == 200, f"following a pill -> {followed.status_code}"
+    assert [node.text() for node in _pills(followed.text) if "pill-on" in node.classes] == ["acme"]
+    followed_tree = dom.parse(followed.text)
+    selected = [
+        node.text()
+        for node in followed_tree.find_all(tag="option")
+        if node.get("selected") is not None
+    ]
+    assert "ca_renewed" in selected, (
+        f"following a pill lost the action filter; the selected options are {selected}"
+    )
 
 
 def test_audit_pagination(client: TestClient, cfg: Config) -> None:

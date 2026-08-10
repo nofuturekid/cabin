@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from cabin import api_tokens
 from cabin.api_tokens import ApiToken
+from cabin.issuer_grants import Principal, token_principal
 from cabin.users import Role
 from cabin.web.deps import ADMIN_ROLES, get_db
 
@@ -66,3 +67,9 @@ require_api_read = require_api_role(Role.viewer, *ADMIN_ROLES)
 #: Issuance, signing and revocation are "admin+" -- the same line the UI
 #: draws, taken from the same constant so the two cannot drift.
 require_api_write = require_api_role(*ADMIN_ROLES)
+
+
+def api_write_principal(token: ApiToken = Depends(require_api_write)) -> Principal:
+    """Spec 0018 FR-5: the REST API's equivalent of
+    :func:`cabin.web.deps.current_principal` -- ergonomics, not enforcement."""
+    return token_principal(token)

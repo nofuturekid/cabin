@@ -1,0 +1,55 @@
+{% extends "layout.html" %}
+{% set nav_current = "ca_new" %}
+{% block title %}Create a CA — cabin{% endblock %}
+{% block content %}
+{% from "form_macros.html" import create_panel %}
+<div class="page-head">
+  <div>
+    <h1>Create a CA</h1>
+    <p class="sub">
+      Generates a root and intermediate certificate authority. To bring one
+      you already have instead, <a href="/transfer/ca-import">import a CA</a>.
+    </p>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="section">
+  <div>
+    <h2>Create a new CA</h2>
+    <p class="help">A further hierarchy, side by side with what is already here.</p>
+  </div>
+  <div class="form-split">
+    <form id="create-form" method="post" action="/ca/create">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="name">CA name</label>
+        <input id="name" type="text" name="name" placeholder="cabin" value="{{ values.get('name', '') }}" required />
+      </div>
+      <div class="field">
+        <label for="key_type">Key type</label>
+        <select id="key_type" name="key_type">
+          <option value="ecdsa-p256" {% if values.get('key_type', 'ecdsa-p256') == "ecdsa-p256" %}selected{% endif %}>ECDSA P-256</option>
+          <option value="ecdsa-p384" {% if values.get('key_type') == "ecdsa-p384" %}selected{% endif %}>ECDSA P-384</option>
+          <option value="rsa-4096" {% if values.get('key_type') == "rsa-4096" %}selected{% endif %}>RSA 4096</option>
+          <option value="ed25519" {% if values.get('key_type') == "ed25519" %}selected{% endif %}>Ed25519</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="root_years">Root validity (years)</label>
+        <input id="root_years" type="number" name="root_years" min="1" max="50" value="{{ values.get('root_years', 20) }}" required />
+      </div>
+      <div class="field">
+        <label for="path_length">Path length</label>
+        <input id="path_length" type="number" name="path_length" min="1" max="4" value="{{ values.get('path_length', 1) }}" required />
+      </div>
+      <div class="actions"><button type="submit" class="primary">Create CA</button> <button type="submit" formaction="/ca/create/preview" formmethod="post">Check</button></div>
+    </form>
+    <aside class="preview" id="preview" hx-post="/ca/create/preview" hx-target="#create-preview" hx-swap="innerHTML" hx-trigger="keyup changed delay:400ms from:#create-form, change from:#create-form" hx-include="#create-form">
+      <div id="create-preview">{{ create_panel(values.get('preview')) }}</div>
+      <div class="callout{% if (values.get('preview') or {}).get('path_length', 1) < 2 %} warning{% endif %}">How many further intermediates may sign under the root. Cannot be changed later. A root that may ever need to cross-sign an older one needs at least 2 -- planned one root generation ahead, since this cannot be widened afterwards.</div>
+    </aside>
+  </div>
+</div>
+{% endblock %}

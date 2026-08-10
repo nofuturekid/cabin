@@ -11,23 +11,52 @@
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
 <div class="scroller">
-  <table>
+  <table class="rows cols-users">
     <thead>
       <tr>
         <th>Username</th>
         <th>Role</th>
+        <th>Issuers</th>
         <th>Created</th>
         {% if can_manage %}<th>Actions</th>{% endif %}
       </tr>
     </thead>
     <tbody>
       {% for row in users %}
-      <tr>
-        <td>{{ row.username }}</td>
+      <tr id="user-{{ row.id }}" class="{% if can_manage and row.id == edit %} editing {% endif %}">
+        <td><span class="avatar">{{ row.username[:1] | upper }}</span> {{ row.username }}</td>
         <td><span class="tag">{{ row.role }}</span></td>
-        <td class="nowrap">{{ row.created_at }}</td>
+        <td>
+          {% if row.is_superadmin %}
+          <span class="tag">all issuers</span>
+          {% elif can_manage and row.id == edit %}
+          <form method="post" action="/users/{{ row.id }}/issuers">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            {% for issuer in active_intermediates %}
+            <label class="field-check">
+              <input type="checkbox" name="issuer_id" value="{{ issuer.id }}" {{ "checked" if issuer.id in row.granted_ids else "" }} />
+              {{ issuer.name }}
+            </label>
+            {% endfor %}
+            {% for retired in row.retired_grants %}
+            <input type="hidden" name="issuer_id" value="{{ retired.id }}" />
+            {% endfor %}
+            {% if row.retired_grants %}
+            <p class="note">Also granted (retired, no longer selectable): {{ row.retired_grants | map(attribute="name") | join(", ") }}</p>
+            {% endif %}
+            {% if row.role == "viewer" %}
+            <p class="note">Grants nothing until the role changes to admin or superadmin.</p>
+            {% endif %}
+            <div class="actions"><button type="submit">Save issuers</button></div>
+          </form>
+          {% else %}
+          {{ row.granted_names | join(", ") if row.granted_names else "none" }}
+          {% endif %}
+        </td>
+        <td>{{ row.created_at }}</td>
         {% if can_manage %}
         <td class="row-actions">
+          {% if row.id == edit %}
           <form method="post" action="/users/{{ row.id }}/role">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <select name="role">
@@ -46,6 +75,10 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button type="submit" class="danger">Delete</button>
           </form>
+          <a href="/users">Cancel</a>
+          {% else %}
+          <a href="/users?edit={{ row.id }}#user-{{ row.id }}" hx-get="/users?edit={{ row.id }}" hx-select="#user-{{ row.id }}" hx-target="#user-{{ row.id }}" hx-swap="outerHTML">Edit</a>
+          {% endif %}
         </td>
         {% endif %}
       </tr>

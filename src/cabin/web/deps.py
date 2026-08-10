@@ -7,14 +7,18 @@ to /login (or /setup while there are zero users) — see FR-5/FR-6.
 
 import hmac
 from collections.abc import Callable, Generator
+from typing import cast
 
 from fastapi import Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import Response
 
 from cabin import sessions, users
 from cabin.audit import Actor, user_actor
-from cabin.ca.certs import Certificate, get_certificate
+from cabin.ca.certs import Certificate, get_certificate, status_counts
+from cabin.issuer_grants import Principal, user_principal
+from cabin.secrets import SecretStore
 from cabin.sessions import SESSION_LIFETIME, UserSession
 from cabin.settings import TRUST_PROXY, get_flag
 from cabin.users import Role, User
@@ -44,7 +48,51 @@ def set_session_cookie(response: Response, request: Request, token: str) -> None
     )
 
 
-def base_context(request: Request, user: User) -> dict[str, object]:
+def is_htmx(request: Request) -> bool:
+    """Whether htmx made this request (spec 0029 FR-3).
+
+    The only thing that decides which of a preview's two envelopes goes back:
+    the panel stack alone for htmx, the whole form page with that same panel
+    stack in it for a browser that ran no JavaScript. Never a guard, never a
+    route, never anything a client can gain access with by sending it.
+    """
+    return request.headers.get("HX-Request") is not None
+
+
+def preview_fragment(macro: str, preview: dict[str, object]) -> Response:
+    """Render one of ``form_macros.html``'s macros on its own (spec 0029 FR-3).
+
+    This is the other half of "one macro, two envelopes": the page template
+    calls ``{{ macro(preview) }}`` and this calls the *same* macro with the
+    same argument through the environment's own module access, so the
+    fragment htmx swaps in is the markup a navigation would have produced,
+    byte for byte (AC-7). A second template for the fragment is the thing
+    this exists instead of.
+
+    Lives here rather than in one of the three UI routers that need it for
+    the reason every shared helper in this package lives here: three copies
+    of it would be three things to repair.
+    """
+    from cabin.web import templates
+
+    module = templates.env.get_template("form_macros.html").module
+    render = cast(Callable[[dict[str, object]], object], getattr(module, macro))
+    return HTMLResponse(str(render(preview)))
+
+
+def flash(request: Request, db: Session, message: str) -> None:
+    """Spec 0030 FR-2: the only door from the web layer to ``sessions.flash``.
+
+    ``request.state.session`` is the row :func:`get_current_user` has already
+    loaded, on the same :class:`Session` every call site holds -- a second
+    session opened for this would be a second transaction around a
+    read-modify-write on one row.
+    """
+    session_row: UserSession = request.state.session
+    sessions.set_flash(db, session_row, message)
+
+
+def base_context(request: Request, db: Session, user: User) -> dict[str, object]:
     """Context every authenticated page needs: current user, the session's
     csrf_token (layout.html's logout form needs this on *every* page -- see
     ui.py's BUG 1 regression test), and the nav flags below, for use across
@@ -54,14 +102,30 @@ def base_context(request: Request, user: User) -> dict[str, object]:
     so the menu stops offering pages that only answer 403. It is cosmetic --
     every route still guards itself with its own dependency -- but a nav
     full of dead ends is a bug report waiting to happen.
+
+    Spec 0030 FR-2/FR-7 adds two keys and the ``db`` this file did not need
+    before. ``flash`` is the pending message, read *and cleared* here, which
+    is why an authenticated GET becomes a write whenever one is waiting; and
+    ``nav["expiring"]`` is the count the rail's badge renders, taken from the
+    same :func:`status_counts` call the dashboard's tiles make so that the
+    badge and the tile cannot show two different numbers.
     """
     session_row: UserSession = request.state.session
     role = Role(user.role)
     return {
         "user": user,
         "csrf_token": session_row.csrf_token,
+        "flash": sessions.pop_flash(db, session_row),
         "nav": {
+            "expiring": status_counts(db)["expiring"],
             "issue": role in ADMIN_ROLES,
+            "ca_admin": role in ADMIN_ROLES,
+            # Spec 0025 FR-3: deliberately its own flag, not a reuse of
+            # `tokens` -- exporting a CA key and managing API tokens are
+            # different privileges that happen to share a holder today, and
+            # the day one stops being superadmin-only the flag that has to
+            # change must already exist on its own.
+            "ca_key": role == Role.superadmin,
             "settings": role in ADMIN_ROLES,
             "acme": role in ADMIN_ROLES,
             "tokens": role == Role.superadmin,
@@ -94,6 +158,15 @@ def get_db(request: Request) -> Generator[Session]:
         yield db
     finally:
         db.close()
+
+
+def get_secrets(request: Request) -> SecretStore:
+    """Spec 0022 FR-10: the accessor `crl_ui` uses in place of reading
+    `request.app.state.secrets` directly, so the plaintext PKI listener's
+    application (`server.create_public_app`, which has no secret store of
+    its own) can override this dependency to reach the main app's instead.
+    """
+    return request.app.state.secrets  # type: ignore[no-any-return]
 
 
 def redirect_if_no_users(db: Session = Depends(get_db)) -> None:
@@ -167,6 +240,22 @@ def require_role(*roles: Role) -> Callable[[User], User]:
 
 #: The guard for every mutating (and mutation-only) page.
 require_admin = require_role(*ADMIN_ROLES)
+
+#: Spec 0025 FR-13: the one definition, used to exist twice -- independently,
+#: in `ui.py` and `tokens_ui.py` -- which is exactly the drift `deps.py`'s own
+#: module docstring warns a guard defined more than once invites. Both now
+#: import it from here instead.
+require_superadmin = require_role(Role.superadmin)
+
+
+def current_principal(user: User = Depends(require_admin)) -> Principal:
+    """Spec 0018 FR-5: the principal to check issuer grants against, for
+    routes that already require :data:`require_admin`. This is ergonomics,
+    not enforcement -- the enforcement is the required ``principal``
+    parameter on ``issue_and_store``/``sign_csr_and_store``/
+    ``revoke_certificate`` themselves.
+    """
+    return user_principal(user)
 
 
 def verify_csrf(

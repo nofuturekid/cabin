@@ -1,0 +1,43 @@
+{% extends "layout.html" %}
+{% set nav_current = "transfer_cross_import" %}
+{% block title %}Import a cross certificate — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Import a cross certificate</h1>
+    <p class="sub">
+      A cross certificate produced elsewhere, for a root already on this
+      instance. To bring in a signing CA instead,
+      <a href="/transfer/ca-import">import a CA</a>.
+    </p>
+  </div>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="section">
+  <div>
+    <h2>Import a cross certificate</h2>
+    <p class="help">
+      No key, no name -- cabin checks that it really is another certificate
+      for that root, the same subject and the same public key, and refuses
+      it otherwise: a mistyped paste must not staple a stranger's CA into
+      the chain cabin serves to every client.
+    </p>
+  </div>
+  <div>
+    <form method="post" action="/ca/cross-import">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <div class="field">
+        <label for="cross_pem">Cross certificate (PEM)</label>
+        <textarea id="cross_pem" name="cross_pem" rows="8" required></textarea>
+      </div>
+      <div class="field">
+        <label for="issuer_pem">Signing root certificate (PEM)</label>
+        <textarea id="issuer_pem" name="issuer_pem" rows="8" required></textarea>
+      </div>
+      <div class="actions"><button type="submit" class="primary">Import cross certificate</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

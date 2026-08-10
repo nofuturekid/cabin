@@ -11,12 +11,19 @@
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+{% if days_requested %}
+<div class="note">
+  Requested {{ days_requested }} days; the issuing CA's own expiry is sooner,
+  so this certificate is valid only until {{ cert.not_after }}.
+</div>
+{% endif %}
+
 <div class="scroller">
-  <table>
+  <table class="facts facts-indent">
     <tbody>
       <tr><th>Serial</th><td class="mono">{{ cert.serial_hex }}</td></tr>
       <tr><th>Profile</th><td>{{ cert.profile }}</td></tr>
-      <tr><th>SANs</th><td>{{ cert.sans | join(", ") }}</td></tr>
+      <tr><th>SANs</th><td>{% for name in cert.sans %}<div>{{ name }}</div>{% endfor %}</td></tr>
       <tr><th>Valid from</th><td class="nowrap">{{ cert.not_before }}</td></tr>
       <tr><th>Valid until</th><td class="nowrap">{{ cert.not_after }}</td></tr>
       {% if revoked_at %}
@@ -80,7 +87,7 @@
     </p>
   </div>
   <div>
-    <form method="post" action="/certs/{{ cert.id }}/revoke">
+    <form method="post" action="/certs/{{ cert.id }}/revoke" class="panel-danger">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <div class="field">
         <label for="reason">Reason</label>

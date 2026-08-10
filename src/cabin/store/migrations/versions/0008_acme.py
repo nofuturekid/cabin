@@ -42,11 +42,25 @@ def upgrade() -> None:
         sa.Column("contacts_json", sa.Text(), nullable=True),
         sa.Column("tos_agreed_at", _TIMESTAMP, nullable=True),
         sa.Column("created_at", _TIMESTAMP, nullable=False),
+        # Spec 0019 FR-1: which issuer the account registered against. NOT
+        # NULL, no server default -- an account that does not name an issuer
+        # is not a state this spec has an answer for, and a default would be
+        # cabin choosing an issuer for somebody, which is what FR-9 exists to
+        # stop. Rewritten in place rather than added to (this table has no
+        # deployed rows to migrate; see the spec's Context), the same
+        # standing answer 0018's tables already gave.
+        sa.Column("issuer_id", sa.Integer(), sa.ForeignKey("ca_certificates.id"), nullable=False),
         sa.CheckConstraint(
             "status IN ('valid', 'deactivated', 'revoked')",
             name="ck_acme_accounts_status",
         ),
     )
+    # No ondelete: nothing in cabin deletes a ca_certificates row --
+    # retirement is a status change (ca/service.py:434) -- so this FK is a
+    # backstop that would make a future deletion loud rather than a cleanup
+    # rule anyone relies on (mirrors 0018 FR-1's reasoning for its own
+    # issuer-referencing tables).
+    op.create_index("ix_acme_accounts_issuer_id", "acme_accounts", ["issuer_id"])
 
     op.create_table(
         "acme_nonces",
@@ -131,4 +145,5 @@ def downgrade() -> None:
     op.drop_table("acme_orders")
     op.drop_index("ix_acme_nonces_issued_at", table_name="acme_nonces")
     op.drop_table("acme_nonces")
+    op.drop_index("ix_acme_accounts_issuer_id", table_name="acme_accounts")
     op.drop_table("acme_accounts")

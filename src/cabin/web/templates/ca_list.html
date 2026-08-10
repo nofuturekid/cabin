@@ -1,0 +1,64 @@
+{% extends "layout.html" %}
+{% set nav_current = "ca" %}
+{% block title %}Hierarchies — cabin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Hierarchies</h1>
+    <p class="sub">Every certificate authority hierarchy this cabin knows, one row each.</p>
+  </div>
+</div>
+
+{% if overview %}
+<div class="scroller">
+  <table class="rows cols-hierarchies">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Status</th>
+        <th>Expires</th>
+        <th>Intermediates</th>
+        <th>Cross certificates</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for root in overview %}
+      <tr class="row-root {% if root.status == 'retired' %} state-retired {% else %} state-active {% endif %}">
+        <td><a class="rowlink" href="/ca/{{ root.id }}">{{ root.name }}</a> <span class="tag">root</span></td>
+        <td><span class="tag{% if root.status == 'retired' %} tag-bad{% endif %}">{{ root.status }}</span></td>
+        <td>{{ root.not_valid_after }}</td>
+        <td>{{ root.intermediate_count }}</td>
+        <td>{{ root.cross_count }}</td>
+      </tr>
+      {% for issuer in root.issuers %}
+      <tr class="row-child">
+        <td><span class="tree" aria-hidden="true">{% if loop.last %}&#9492;{% else %}&#9500;{% endif %}</span><a class="rowlink" href="{{ issuer.href }}">{{ issuer.name }}</a> <span class="tag">{{ issuer.kind }}</span></td>
+        <td><span class="tag{% if issuer.status == 'retired' %} tag-bad{% endif %}">{{ issuer.status }}</span></td>
+        <td>{{ issuer.not_valid_after }}</td>
+        <td></td>
+        <td></td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="5">This hierarchy has no issuer yet, so nothing can be signed under it.</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p id="ca-empty" class="note">
+  No hierarchy exists yet.{% if nav.ca_admin %} <a href="/ca/new">Create one</a> or
+  <a href="/transfer/ca-import">import one</a> to get started.{% else %} An administrator has
+  to create or import one before there is anything here to see.{% endif %}
+</p>
+{% if tls_self_signed %}
+<p id="tls-setup-note" class="note">
+  cabin is serving a self-signed TLS certificate right now, so your browser
+  shows a warning -- that is expected. It stops once a CA exists: cabin then
+  issues and switches to its own certificate automatically, with no restart.
+</p>
+{% endif %}
+{% endif %}
+{% endblock %}

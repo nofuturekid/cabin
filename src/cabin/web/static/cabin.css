@@ -1,10 +1,17 @@
-/* cabin — design tokens, page chrome and layout primitives. No business logic
-   here: templates compose .rail/.scroller/.section/.field/.tag, they do not
-   invent widths of their own. */
+/* cabin — design tokens, page chrome and layout primitives (spec 0027).
+
+   The values come from `docs/design/0027-brief.md`, which is the checked-in
+   distillation of the redesign and the file a test compares this palette
+   against. Every colour lives in one of the two token blocks below and
+   nowhere else: a rule that needs a colour needs a token, because a table
+   beside a stylesheet that ignores it is not a design system.
+
+   No business logic here: templates compose .rail/.scroller/.section/.field/
+   .tag, they do not invent widths of their own. */
 
 @font-face {
-  font-family: "Public Sans";
-  src: url("/static/fonts/PublicSans.woff2") format("woff2-variations");
+  font-family: "Inter";
+  src: url("/static/fonts/Inter.woff2") format("woff2-variations");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -16,61 +23,152 @@
   font-style: normal;
   font-display: swap;
 }
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("/static/fonts/IBMPlexMono-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
 
+/* Dark is the default scheme (spec 0027 FR-8): the design was drawn dark and
+   only ever existed dark, so the light scheme below is a derivation of it
+   rather than the other way round. */
 :root {
-  --bg: #f2f3f4;
-  --panel: #ffffff;
-  --panel-2: #f7f8f9;
-  --line: #e0e3e6;
-  --line-strong: #c8ced4;
-  --text: #191d21;
-  --dim: #5a636d;
-  --faint: #838d98;
-  --accent: #8a5a09;
-  --accent-bg: #8a5a09;
-  --accent-ink: #ffffff;
-  --ok: #1f6b3c;
-  --warn: #8a5a09;
-  --bad: #a52c22;
-  --bad-bg: #a52c22;
-  --bad-ink: #ffffff;
+  /* grounds */
+  --bg: #161826;
+  --surface-low: #1b1d29;
+  --surface: #232532;
+  --surface-hover: #1d1f2c;
 
-  --sans: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
-  --radius: 4px;
-  --rail: 15rem;
-  --pad: 1.75rem;
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 1rem;
-  --space-4: 1.5rem;
+  /* lines */
+  --line-panel: #2f3240;
+  --line-control: #3f424d;
+  --rule-section: rgba(233, 233, 237, 0.08);
+  --rule-row: rgba(233, 233, 237, 0.07);
+
+  /* text. --text-faint and --text-hint are lifted off the design's #75798c
+     and #63677a, which fall short of WCAG 1.4.3 on the page and are used as
+     body text at 10-12px. The reasons are in the brief's palette register. */
+  --text: #e9e9ed;
+  --text-2: #cfd3e5;
+  --text-3: #b2b6ca;
+  --text-muted: #9397ab;
+  --text-faint: #888b9c;
+  --text-hint: #818699;
+  --text-disabled: #5a5d6b;
+
+  /* accent */
+  --accent: #9184d9;
+  --accent-text: #b5abfc;
+  --accent-bright: #d2cefd;
+  --accent-tint: #2b2741;
+  --accent-edge: #423a6a;
+  --accent-deep: #5d5294;
+
+  /* status */
+  --good-bg: #17291f;
+  --good-fg: #8fd3a8;
+  --good-line: #264734;
+  --warn-bg: #33291a;
+  --warn-fg: #e8c98e;
+  --warn-line: #4d3f24;
+  --bad-bg: #3a2029;
+  --bad-fg: #e8a9b4;
+  --bad-line: #55303c;
+  --dead-bg: #3a1c1d;
+  --dead-fg: #e9908e;
+  --dead-line: #5b2c2b;
+  --flat-bg: #282a33;
+  --flat-fg: #b2b6ca;
+  --flat-line: #3f424d;
+
+  /* The 2px left edge bar on a hierarchy-list root row (brief section 1's
+     paragraph after the status table). The design draws three states and
+     cabin ships two: `retired` reuses --line-control, which is the design's
+     own value for it, and `expired` is not shipped at all -- a CA row is
+     `active` or `retired`, and inventing a third state behind a colour would
+     be a content change. */
+  --bar-active: #3f7d55;
+
+  /* note grounds */
+  --note-warn-bg: #1e1c17;
+  --note-bad-bg: #1e1a1d;
+  --note-info-bg: #1e2032;
+
+  /* the danger button before its box is ticked. Lifted off the design's
+     #6d5259 for the reason the register records — cabin's retire and revoke
+     buttons are live <button>s, so WCAG's exemption for disabled controls
+     does not reach them. */
+  --danger-disarmed-fg: #a3848c;
+  --danger-disarmed-line: #3a2b30;
+
+  /* geometry */
+  --r-chip: 4px;
+  --r-control: 6px;
+  --r-panel: 8px;
+  --shell-nav: 230px;
+  --section-label: 250px;
+  --content-max: 1180px;
+
+  --sans: "Inter", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
+/* The light scheme the design does not contain (FR-12). Derived, not
+   inverted: the three grounds stay three distinct grounds, the text ramp
+   stays a ramp with every step at least as legible as its dark counterpart,
+   and the accent is re-solved — #9184d9 is 3.23:1 on white, which is a fine
+   focus ring and not a link colour.
+
+   This block holds exactly one :root rule and nothing else. That is a
+   requirement, not a habit: the contrast probe forces the light scheme by
+   deleting this wrapper from a copy of the file, and that is only faithful
+   while the block is token overrides and nothing more. */
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #101418;
-    --panel: #161b21;
-    --panel-2: #1b2129;
-    --line: #262e37;
-    --line-strong: #38424e;
-    --text: #e4e8ed;
-    --dim: #8b96a3;
-    --faint: #5d6773;
-    --accent: #d9a441;
-    --accent-bg: #d9a441;
-    --accent-ink: #1a1204;
-    --ok: #5fb37a;
-    --warn: #d9a441;
-    --bad: #e0705f;
-    --bad-bg: #b8483a;
-    --bad-ink: #ffffff;
+    --bg: #f3f3f8;
+    --surface-low: #e8e9f1;
+    --surface: #ffffff;
+    --surface-hover: #edeef6;
+
+    --line-panel: #dcdde8;
+    --line-control: #c3c5d4;
+    --rule-section: rgba(29, 31, 46, 0.1);
+    --rule-row: rgba(29, 31, 46, 0.08);
+
+    --text: #1d1f2e;
+    --text-2: #2b2e41;
+    --text-3: #3e4157;
+    --text-muted: #555870;
+    --text-faint: #5f6279;
+    --text-hint: #63667c;
+    --text-disabled: #8d90a1;
+
+    --accent: #6a5cc2;
+    --accent-text: #5b4bb8;
+    --accent-bright: #4a3f99;
+    --accent-tint: #eae7f9;
+    --accent-edge: #c8c1ee;
+    --accent-deep: #8377cf;
+
+    --good-bg: #e4f2e9;
+    --good-fg: #1c6039;
+    --good-line: #b3d7c2;
+    --warn-bg: #f7eeda;
+    --warn-fg: #6f4c0d;
+    --warn-line: #e0cda2;
+    --bad-bg: #fae6ec;
+    --bad-fg: #93244a;
+    --bad-line: #eebfcd;
+    --dead-bg: #fae3e3;
+    --dead-fg: #992423;
+    --dead-line: #edbfbe;
+    --flat-bg: #e9eaf2;
+    --flat-fg: #454a5f;
+    --flat-line: #c9ccda;
+
+    --bar-active: #2f6b47;
+
+    --note-warn-bg: #fbf5e6;
+    --note-bad-bg: #fdeef0;
+    --note-info-bg: #eeecfa;
+
+    --danger-disarmed-fg: #7d5a61;
+    --danger-disarmed-line: #dcc9cd;
   }
 }
 
@@ -89,173 +187,238 @@ body {
 body {
   background: var(--bg);
   color: var(--text);
-  font: 400 15px/1.5 var(--sans);
+  /* The design's own body size, in rem so that an operator who raised their
+     browser's base font size still gets what they asked for. The 1.5 is
+     explicit because the prototype relies on the browser default (~1.2),
+     which is not reproducible across engines. */
+  font: 400 0.8125rem/1.5 var(--sans);
 }
 
-/* Authenticated pages: rail + content. minmax(0,1fr) lets the content column
-   shrink below its content's intrinsic width, which is what keeps a wide
-   table inside .scroller instead of pushing the page sideways. */
-body.with-rail {
-  display: grid;
-  grid-template-columns: var(--rail) minmax(0, 1fr);
+/* ---- the shell ---- */
+
+/* One full-viewport flex row. The rail cannot scroll away because the shell
+   does not scroll at all: <main> is the element that moves. position:relative
+   is part of the shell — spec 0030's flash message is placed against it. */
+.shell {
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+  background: var(--bg);
+}
+
+/* Login and setup have no rail to keep on screen, so nothing is gained by
+   moving the scroll into <main>: they scroll the window, which keeps browser
+   scroll restoration and Ctrl+End working (brief section 9.10). */
+body:not(.with-rail) .shell {
+  height: auto;
   min-height: 100vh;
+  overflow: visible;
 }
 
 /* ---- navigation rail ---- */
 
-/* The rail stays put while the content scrolls: on a long page — a
-   certificate with its PEM blocks, a full audit log — a rail that scrolled
-   away would take the logout button and every other destination with it.
-   align-self keeps the grid from stretching it, which sticky needs. */
 .rail {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  height: 100vh;
-  overflow-y: auto;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  padding: var(--pad) 0;
+  width: var(--shell-nav);
+  flex: none;
+  background: var(--surface-low);
+  border-right: 1px solid var(--line-panel);
   display: flex;
   flex-direction: column;
+  padding: 18px 0 14px;
 }
 
 .rail .brand {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2);
-  padding: 0 var(--pad) var(--space-4);
-  font-family: var(--mono);
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  gap: 8px;
+  padding: 0 18px 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
 .rail .brand b {
-  font-size: 1.05rem;
-  font-weight: 500;
+  font-size: 1.0625rem;
+  font-weight: 600;
 }
 
 .rail .brand .version {
-  color: var(--faint);
-  font-size: 0.72rem;
+  font-family: var(--mono);
+  font-size: 0.65625rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-faint);
 }
 
+/* Flexes to fill the space between the brand and the foot, scrolling on its
+   own -- so the logout button in .rail-foot stays pinned at the bottom and on
+   screen however many entries nav grows to hold. Under the 100vh shell this
+   is what keeps the footer from being pushed out of the column and clipped. */
 .rail nav {
   display: flex;
   flex-direction: column;
+  gap: 1px;
+  padding: 0 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .rail .nav-group {
-  padding: 1.25rem var(--pad) var(--space-1);
-  font-size: 0.68rem;
-  letter-spacing: 0.12em;
+  padding: 14px 8px 5px;
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--text-hint);
 }
 
 .rail nav a {
-  color: var(--dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  color: var(--text-muted);
   text-decoration: none;
-  padding: var(--space-1) var(--pad);
-  border-left: 2px solid transparent;
-  font-size: 0.9rem;
+  font-size: 0.8125rem;
+  padding: 6px 9px;
+  border-radius: var(--r-control);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.12s;
 }
 
 .rail nav a:hover {
   color: var(--text);
-  background: var(--panel-2);
+  background: var(--surface-hover);
 }
 
 .rail nav a[aria-current] {
   color: var(--text);
-  border-left-color: var(--accent);
-  background: var(--panel-2);
+  background: var(--accent-tint);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .rail .rail-foot {
-  margin-top: auto;
-  padding: var(--space-3) var(--pad) 0;
-  border-top: 1px solid var(--line);
-  font-size: 0.8rem;
-  color: var(--dim);
+  margin: 14px 12px 0;
+  padding: 12px 8px 0;
+  border-top: 1px solid var(--line-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-size: 0.78125rem;
+  color: var(--text-3);
 }
 
-.rail .rail-foot form {
-  margin-top: var(--space-2);
+.rail .rail-foot button {
+  width: 100%;
+  padding: 5px 0;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.rail .rail-foot button:hover {
+  border-color: var(--accent-deep);
+  color: var(--accent-bright);
 }
 
 /* ---- content ---- */
 
 main {
+  flex: 1;
   min-width: 0;
-  padding: var(--pad) clamp(1rem, 3vw, 2.5rem) 4rem;
+  overflow-y: auto;
+  /* Not the brief's `overflow: auto`: a <main> that scrolls horizontally is a
+     page that scrolls sideways with extra steps, which is the defect spec
+     0015 exists for. */
+  overflow-x: hidden;
+  padding: 26px 34px 60px;
+}
+
+/* One content width, and no page sets its own. */
+main > div {
+  max-width: var(--content-max);
+  animation: cabinIn 0.18s ease-out;
 }
 
 /* Login and setup render without a rail: one centred column. */
 .card-narrow {
   max-width: 24rem;
   margin: 3rem auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+  padding: 14px 16px;
 }
 
 .page-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: 12px;
   flex-wrap: wrap;
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--line-strong);
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-panel);
+}
+
+/* A flex item's automatic minimum size is its min-content width, and a
+   certificate's common name is one long unbreakable token at 29px: without
+   this the page head pushes a phone-width page sideways. */
+.page-head > * {
+  min-width: 0;
 }
 
 h1 {
-  margin: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+  font-size: 1.8125rem;
+  font-weight: 500;
 }
 
 h2 {
-  font-size: 1.05rem;
-  font-weight: 600;
-  margin: 2rem 0 var(--space-2);
+  margin: 0 0 5px;
+  font-size: 1.0625rem;
+  font-weight: 500;
 }
 
 h3 {
-  font-size: 0.95rem;
-  font-weight: 600;
-  margin: var(--space-4) 0 var(--space-2);
+  margin: 18px 0 6px;
+  font-size: 0.8125rem;
+  font-weight: 500;
 }
 
 .sub {
-  color: var(--dim);
-  font-size: 0.85rem;
-  margin: var(--space-1) 0 0;
+  margin: 4px 0 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
+a:hover {
+  color: var(--accent-bright);
+}
+
 .note {
-  color: var(--dim);
-  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
   max-width: 60ch;
 }
 
 .error {
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
-  color: var(--bad);
-  border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
-  font-size: 0.875rem;
-  margin: var(--space-3) 0;
+  background: var(--note-bad-bg);
+  border: 1px solid var(--bad-line);
+  color: var(--bad-fg);
+  border-radius: var(--r-panel);
+  padding: 11px 14px;
+  font-size: 0.78125rem;
+  margin: 12px 0;
 }
 
 /* ---- controls ---- */
@@ -265,73 +428,114 @@ select,
 textarea {
   font: inherit;
   color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  padding: 0.45rem 0.6rem;
+  background: var(--surface-low);
+  border: 1px solid var(--line-control);
+  border-radius: var(--r-control);
+  padding: 9px 12px;
   max-width: 100%;
 }
 
 textarea {
   font-family: var(--mono);
-  font-size: 0.85rem;
+  font-size: 0.78125rem;
   resize: vertical;
 }
 
+/* The design leaves the checkbox as unstyled browser chrome, which on a dark
+   ground in most browsers is wrong (brief section 6.4). */
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+/* The design has no filled button anywhere: its primary is an outline with an
+   accent label. */
 button {
   font: inherit;
+  font-size: 0.78125rem;
+  font-weight: 500;
   cursor: pointer;
-  border-radius: var(--radius);
-  padding: 0.45rem 0.85rem;
-  border: 1px solid var(--line-strong);
-  background: var(--panel-2);
-  color: var(--text);
+  border-radius: var(--r-control);
+  padding: 7px 14px;
+  border: 1px solid var(--line-control);
+  background: transparent;
+  color: var(--text-2);
 }
 
 button:hover {
-  border-color: var(--faint);
+  border-color: var(--accent-deep);
 }
 
 button.primary {
-  background: var(--accent-bg);
-  border-color: var(--accent-bg);
-  color: var(--accent-ink);
-  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--accent-text);
+  border-color: var(--accent);
+  padding: 8px 16px;
 }
 
+button.primary:hover {
+  background: var(--accent-tint);
+}
+
+/* Disarmed until its confirmation box is ticked; the rule that arms it is
+   below, beside the checkbox it reads. */
 button.danger {
-  background: var(--bad-bg);
-  border-color: var(--bad-bg);
-  color: var(--bad-ink);
+  color: var(--danger-disarmed-fg);
+  border-color: var(--danger-disarmed-line);
 }
 
-/* The old stylesheet made every form a flex column, which stretched buttons
-   to the full width and gave headings the same gap as fields. Layout is now
-   .field and .actions; the form element itself is not a layout. */
+/* WCAG's incidental exemption reaches a genuinely disabled control and
+   nothing else, so this is the only place --text-disabled may appear. */
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+/* The confirmation checkbox arms the button the instant it is ticked — the
+   one interactive nuance in the design that costs no JavaScript (brief
+   section 9.9). The checkbox and the button already sit in one <form> on
+   every page that has one, so no markup changes for this. */
+form:has(input[name="confirm"]:checked) button.danger {
+  color: var(--dead-fg);
+  border-color: var(--dead-line);
+}
+
+/* Layout is .field and .actions; the form element itself is not a layout. */
 .field {
   display: grid;
-  gap: var(--space-1);
+  gap: 6px;
   max-width: 34rem;
-  margin-bottom: var(--space-3);
+  margin-bottom: 16px;
 }
 
 .field label {
-  font-size: 0.8rem;
-  color: var(--dim);
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .field .hint {
-  font-size: 0.78rem;
-  color: var(--faint);
+  font-size: 0.71875rem;
+  color: var(--text-hint);
+}
+
+/* A native select won't shrink below the intrinsic width of its longest
+   option; as a grid item that leaves it (and .field) pushing past a narrow
+   viewport instead of wrapping. A CA with a long name is the case that
+   surfaces it, not a hypothetical. */
+.field select {
+  min-width: 0;
 }
 
 .field-check {
   display: flex;
   align-items: flex-start;
-  gap: var(--space-2);
+  gap: 8px;
   max-width: 60ch;
-  margin-bottom: var(--space-3);
-  font-size: 0.9rem;
+  margin-bottom: 16px;
+  font-size: 0.78125rem;
+  color: var(--text-2);
 }
 
 .field-check input {
@@ -340,9 +544,9 @@ button.danger {
 
 .actions {
   display: flex;
-  gap: var(--space-2);
+  gap: 10px;
   flex-wrap: wrap;
-  margin-top: var(--space-3);
+  margin-top: 14px;
 }
 
 /* A link that acts as the page's main action. Anchors cannot contain buttons,
@@ -350,34 +554,45 @@ button.danger {
 .button-link {
   display: inline-block;
   text-decoration: none;
-  border-radius: var(--radius);
-  padding: 0.45rem 0.85rem;
-  background: var(--accent-bg);
-  border: 1px solid var(--accent-bg);
-  color: var(--accent-ink);
-  font-weight: 600;
-  font-size: 0.9rem;
+  border-radius: var(--r-control);
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  color: var(--accent-text);
+  font-weight: 500;
+  font-size: 0.8125rem;
+}
+
+.button-link:hover {
+  background: var(--accent-tint);
+  color: var(--accent-text);
 }
 
 /* Something shown exactly once and never again — a token, an HMAC key. */
 .callout {
-  margin: var(--space-4) 0;
-  padding: var(--space-3) var(--space-4);
-  background: var(--panel);
-  border: 1px solid var(--line-strong);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius);
+  margin: 14px 0;
+  padding: 14px 16px;
+  background: var(--note-info-bg);
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--r-panel);
 }
 
 .callout h2 {
   margin-top: 0;
 }
 
+/* One of the design's three note tones (brief section 6.10). Follows
+   .callout, because a callout that is a warning is warning-toned. */
+.warning {
+  background: var(--note-warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn-fg);
+}
+
 .filters {
   display: flex;
-  gap: var(--space-2);
+  gap: 10px;
   flex-wrap: wrap;
-  margin: var(--space-4) 0 var(--space-3);
+  margin: 22px 0 12px;
 }
 
 .filters input[type="search"] {
@@ -385,7 +600,18 @@ button.danger {
   min-width: 0;
 }
 
+/* The design contains no focus state at all: everything clickable in the
+   prototype is an unfocusable <div>. cabin uses real links, buttons, forms
+   and checkboxes on every page, and an operator working from the keyboard
+   has to be able to see where they are. */
 :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -393,12 +619,11 @@ button.danger {
 /* ---- sections (a heading plus its explanation, then its controls) ---- */
 
 .section {
-  margin-top: 2.5rem;
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--line);
   display: grid;
-  grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
-  gap: var(--space-3) 2.5rem;
+  grid-template-columns: var(--section-label) minmax(0, 1fr);
+  gap: 28px;
+  padding: 22px 0;
+  border-top: 1px solid var(--rule-section);
 }
 
 /* The page head already draws a rule; a section right below it would draw a
@@ -406,7 +631,6 @@ button.danger {
 .page-head + .section,
 .page-head + form > .section:first-of-type {
   border-top: 0;
-  margin-top: var(--space-4);
 }
 
 .section > div:first-child h2 {
@@ -414,9 +638,9 @@ button.danger {
 }
 
 .section .help {
-  color: var(--dim);
-  font-size: 0.85rem;
-  margin: var(--space-1) 0 0;
+  color: var(--text-faint);
+  font-size: 0.75rem;
+  margin: 5px 0 0;
 }
 
 /* ---- tables ---- */
@@ -424,69 +648,64 @@ button.danger {
 /* The only element allowed to scroll sideways. */
 .scroller {
   overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+  background: var(--surface);
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.875rem;
+  font-size: 0.78125rem;
 }
 
 thead th {
   text-align: left;
-  background: var(--panel-2);
-  font-size: 0.7rem;
-  letter-spacing: 0.1em;
+  font-size: 0.65625rem;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--dim);
-  font-weight: 500;
-  padding: 0.6rem 0.85rem;
-  border-bottom: 1px solid var(--line-strong);
+  color: var(--text-faint);
+  font-weight: 400;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--rule-row);
   white-space: nowrap;
 }
 
 tbody td,
 tbody th {
-  padding: 0.65rem 0.85rem;
-  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+  border-top: 1px solid var(--rule-row);
   vertical-align: top;
   text-align: left;
+  color: var(--text-3);
 }
 
 tbody th {
-  font-weight: 500;
-  color: var(--dim);
+  font-weight: 400;
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
-tbody tr:last-child td,
-tbody tr:last-child th {
-  border-bottom: 0;
-}
-
-tbody tr:hover td {
-  background: var(--panel-2);
+thead + tbody tr:first-child td,
+thead + tbody tr:first-child th {
+  border-top: 0;
 }
 
 td a,
 th a {
-  color: var(--text);
+  color: var(--accent-text);
   text-decoration: none;
-  border-bottom: 1px solid var(--line-strong);
 }
 
 td a:hover,
 th a:hover {
-  border-bottom-color: var(--accent);
+  color: var(--accent-bright);
 }
 
 .mono {
   font-family: var(--mono);
-  font-size: 0.8rem;
-  color: var(--dim);
+  font-size: 0.75rem;
+  color: var(--text-3);
 }
 
 .nowrap {
@@ -494,8 +713,8 @@ th a:hover {
 }
 
 .sans-list {
-  color: var(--dim);
-  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
   max-width: 20rem;
 }
 
@@ -504,143 +723,540 @@ th a:hover {
 }
 
 .sans-list .more {
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .meta {
   display: flex;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: 12px;
   flex-wrap: wrap;
-  margin-top: var(--space-2);
-  color: var(--faint);
-  font-size: 0.8rem;
+  margin-top: 10px;
+  color: var(--text-faint);
+  font-size: 0.75rem;
 }
 
 .pager {
   display: flex;
-  gap: var(--space-3);
+  gap: 12px;
 }
 
 .row-actions {
   display: flex;
-  gap: var(--space-2);
+  gap: 10px;
   flex-wrap: wrap;
+}
+
+/* ---- the design's lists: a <table> whose rows are grids (spec 0028) ---- */
+
+/* The design has no <table> at all -- every list in the prototype is a stack
+   of <div>s sharing one grid-template-columns -- and the brief's own advice
+   for real HTML (section 6.2) is to reproduce them as <table> with
+   display:grid on <tr>. That is what ships, so every element and every
+   attribute stays: the markup is still a table to a screen reader, .scroller
+   still wraps it, and spec 0015 FR-4's check passes unchanged. <th> and <td>
+   need no rule of their own -- a grid item's display:table-cell is blockified
+   by CSS Display section 2.7. */
+table.rows,
+table.facts {
+  display: block;
+}
+
+table.rows thead,
+table.rows tbody,
+table.facts tbody {
+  display: block;
+}
+
+table.rows tr,
+table.facts tr {
+  display: grid;
+}
+
+/* On a .rows table the *row* is the box: it carries the design's 12px inset,
+   its 12px column gap and the rule between rows, and the cells carry only
+   their own vertical padding -- which is what makes the rule run the full
+   width of the row as the design draws it (brief section 6.2). */
+.rows tr {
+  column-gap: 12px;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.rows thead th {
+  padding: 7px 0;
+  /* No cell of a list row may refuse to wrap. The body cells are FR-9's
+     subject -- a 25-character timestamp needs 170px and cannot break -- and
+     the last column's *heading* turns out to be the same defect one row up:
+     with `thead th`'s nowrap left in place, `Cross certificates` hangs out of
+     the grouped list's own box by 41px at 390. Measured, both ways. */
+  white-space: normal;
+}
+
+.rows tbody tr {
+  /* The stretched link of the name cell is drawn against this box. Without it
+     the overlay is drawn against the page, covers the whole table, and the
+     last row wins every click -- a defect no markup assertion sees. */
+  position: relative;
+  border-top: 1px solid var(--rule-row);
+}
+
+.rows thead + tbody tr:first-child {
+  border-top: 0;
+}
+
+.rows tbody td {
+  padding: 10px 0;
+  border-top: 0;
+}
+
+/* A per-root empty state is one sentence, not the first cell of five. */
+.rows tbody td[colspan] {
+  grid-column: 1 / -1;
+}
+
+/* Hover is the row tint "only where the row is clickable" (brief section
+   6.2) -- the rule cabin's global tbody tr:hover did not honour, since it
+   also lit up the certificate page's fact rows, which go nowhere. */
+.rows tbody tr:has(.rowlink):hover {
+  /* The longhand rather than the `background` shorthand: a shorthand whose
+     value is a `var()` cannot be expanded at parse time, so CSSOM reports
+     every longhand as the empty string and a rule read back out of
+     `document.styleSheets` -- which is how spec 0030 AC-15 measures which
+     rows this applies to -- looks like a rule that sets no background. */
+  background-color: var(--surface-hover);
+}
+
+/* FR-3's focus treatment is *additive*. Spec 0027 FR-15 forbids `outline:
+   none` anywhere, so the anchor keeps its own 2px ring and the row gains the
+   design's own "this row is the one" idiom (brief section 3, the active nav
+   item): the accent fill and a 2px inset accent bar. The hover tint cannot
+   carry it -- a root row is already drawn in that tint, so a focused root row
+   would look exactly like an unfocused one. */
+.rows tbody tr:has(.rowlink:focus-visible) {
+  background: var(--accent-tint);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* The column templates, one class per screen (brief sections 5.7 and 5.8).
+   Every track is minmax(0, Nfr): a bare Nfr is minmax(auto, Nfr), whose
+   minimum is the content's, and the design's own form bounds each track to
+   the container whatever the cell ends up holding. */
+.cols-hierarchies tr {
+  grid-template-columns:
+    minmax(0, 2fr) minmax(0, 0.8fr) minmax(0, 1fr)
+    minmax(0, 0.9fr) minmax(0, 1.1fr);
+}
+
+.cols-issuers tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) minmax(
+      0,
+      0.8fr
+    ) minmax(0, 1.1fr);
+}
+
+.cols-crosses tr {
+  grid-template-columns:
+    minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.8fr)
+    minmax(0, 0.9fr) minmax(0, 1fr);
+}
+
+/* Spec 0030 FR-17: the eleven column sets the remaining screens need. Six
+   are the design's own numbers unchanged; the other five are derived by the
+   rule FR-17 states once -- an extra column takes the share the design gives
+   that *kind* of cell elsewhere, and a column the design has and cabin does
+   not is dropped with the rest keeping their shares. */
+.cols-expiring tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 0.6fr) minmax(
+      0,
+      1.1fr
+    ) minmax(0, 0.8fr);
+}
+
+.cols-authorities tr {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.1fr) minmax(
+      0,
+      1fr
+    ) minmax(0, 0.8fr);
+}
+
+.cols-activity tr {
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(
+      0,
+      1.3fr
+    ) minmax(0, 2fr);
+}
+
+.cols-certs tr {
+  grid-template-columns:
+    minmax(0, 1.7fr) minmax(0, 0.7fr) minmax(0, 0.7fr) minmax(0, 1.5fr)
+    minmax(0, 1fr) minmax(0, 0.5fr) minmax(0, 1.2fr);
+}
+
+.cols-trust-bundle tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 0.8fr) minmax(
+      0,
+      0.9fr
+    ) minmax(0, 1.2fr);
+}
+
+.cols-ca-keys tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.6fr);
+}
+
+.cols-audit tr {
+  grid-template-columns:
+    minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(0, 1.2fr)
+    minmax(0, 2.2fr) minmax(0, 0.6fr);
+}
+
+.cols-users tr {
+  grid-template-columns:
+    minmax(0, 1.5fr) minmax(0, 0.8fr) minmax(0, 1.5fr)
+    minmax(0, 0.7fr) minmax(0, 0.8fr);
+}
+
+.cols-tokens tr {
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(0, 0.7fr) minmax(0, 1.4fr) minmax(0, 0.7fr)
+    minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.6fr);
+}
+
+.cols-eab tr {
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(0, 1.4fr) minmax(0, 1.2fr) minmax(0, 0.7fr)
+    minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.6fr);
+}
+
+.cols-directories tr {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 0.8fr) minmax(0, 2.2fr);
+}
+
+/* The stretched link (brief section 9.4): the whole row is the target, the
+   name cell is still the <a>, and no JavaScript is involved. Exactly one link
+   may sit in such a row, or the overlay covers the others. The overlay starts
+   one pixel above the padding box so that it covers the row's own top border
+   as well -- the row an operator sees is the border box. */
+.rowlink::after {
+  content: "";
+  position: absolute;
+  inset: -1px 0 0;
+}
+
+/* ---- the grouped list (brief sections 5.7 and 6.3) ---- */
+
+/* The design draws each group as one rounded box built from per-row borders.
+   cabin's .scroller already is that box (spec 0015 FR-5) and already wraps the
+   whole table; nesting a second border inside it would draw two. The root
+   row's fill and its status bar are what separate one group from the next.
+   Nothing is dimmed with opacity (FR-14): it composites after
+   getComputedStyle has reported a colour, so a dimmed row passes the contrast
+   probe while being a third less legible than the probe believes. */
+.row-root {
+  background: var(--surface-hover);
+}
+
+.row-root td:first-child a {
+  font-weight: 600;
+}
+
+.state-active {
+  box-shadow: inset 2px 0 0 var(--bar-active);
+}
+
+.state-retired {
+  box-shadow: inset 2px 0 0 var(--line-control);
+}
+
+.row-child {
+  font-size: 0.75rem;
+}
+
+.row-child td:first-child {
+  padding-left: 14px;
+}
+
+/* Decoration, and the only user of that exemption (FR-13): the indentation,
+   the kind tag and the position under the root all carry the structure, so
+   the glyph draws a line and is hidden from assistive technology. */
+.tree {
+  font-family: var(--mono);
+  color: var(--accent-deep);
+  margin-right: 6px;
+}
+
+/* ---- the definition grid (brief section 6.14) ---- */
+
+/* Here the *cell* is the box and not the row: each carries its own 9px 0
+   padding and its own rule. That is why .facts is a second treatment rather
+   than another column set of .rows. It keeps its .scroller, which the design's
+   fact grid has not got -- a table is the one thing wide enough to push a page
+   sideways, and spec 0015 FR-4 wraps every one of them. */
+.facts tr {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.facts tbody th,
+.facts tbody td {
+  padding: 9px 0;
+}
+
+.facts tbody th {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.facts tbody td {
+  font-size: 0.78125rem;
+}
+
+/* The design's 5.4 sets the value column 24px in; its 5.9 leaves it flush. */
+.facts-indent tbody td {
+  padding-left: 24px;
+}
+
+/* ---- panels (brief section 6.9) ---- */
+
+.panel {
+  margin: 14px 0;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+}
+
+.panel > :first-child {
+  margin-top: 0;
+}
+
+.panel > :last-child {
+  margin-bottom: 0;
+}
+
+/* The same box in the design's deeper red, around the one control on a page
+   that cannot be undone. It is a wrapper and not a new parent: the
+   confirmation checkbox spec 0024 FR-9 requires stays inside the <form> its
+   button is in, which is what arms the button. */
+.panel-danger {
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--dead-line);
+  border-radius: var(--r-panel);
+  max-width: 520px;
 }
 
 /* ---- status tags ---- */
 
+/* The design's neutral variant. A tag whose value has no rule below — a role,
+   an actor kind — stays neutral on purpose: those are facts, not alarms. */
 .tag {
   display: inline-block;
-  font-family: var(--mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
-  padding: 0.1rem 0.4rem;
-  border-radius: 2px;
-  border: 1px solid var(--line-strong);
-  color: var(--dim);
+  font-size: 0.65625rem;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: var(--r-chip);
+  background: var(--flat-bg);
+  border: 1px solid var(--flat-line);
+  color: var(--flat-fg);
   white-space: nowrap;
 }
 
-/* Status values map to three roles. A tag whose value has no rule here —
-   a role, an actor kind, where a certificate came from — stays neutral on
-   purpose: those are facts, not alarms. */
+/* An EAB key nobody has bound yet is a fact, not an alarm -- the same
+   neutral tone the bare `.tag` rule above already uses, spelled out so the
+   stylesheet-and-templates agreement test has a rule to find. */
+.tag-unused {
+  background: var(--flat-bg);
+  border-color: var(--flat-line);
+  color: var(--flat-fg);
+}
+
 .tag-ok,
-.tag-valid,
-.tag-active,
 .tag-bound {
-  color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--accent-tint);
+  border-color: var(--accent-edge);
+  color: var(--accent-bright);
+}
+
+.tag-valid,
+.tag-active {
+  background: var(--good-bg);
+  border-color: var(--good-line);
+  color: var(--good-fg);
 }
 
 .tag-warn,
 .tag-expiring {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn-fg);
 }
 
-.tag-bad,
+.tag-bad {
+  background: var(--bad-bg);
+  border-color: var(--bad-line);
+  color: var(--bad-fg);
+}
+
 .tag-expired,
 .tag-revoked {
-  color: var(--bad);
-  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+  background: var(--dead-bg);
+  border-color: var(--dead-line);
+  color: var(--dead-fg);
+}
+
+/* Where a certificate came from is a label, not a status, so the provenance
+   chips take the design's kind-tag shape — uppercase, wider tracking — and
+   keep the neutral palette. */
+.tag-source-ui,
+.tag-source-acme,
+.tag-source-api {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 /* ---- code and PEM ---- */
 
 code {
   font-family: var(--mono);
-  font-size: 0.85em;
+  font-size: 0.75rem;
 }
 
+/* The design's PEM block wraps instead of scrolling, which is what leaves
+   .scroller as the only element permitted to scroll sideways. */
 pre.pem {
-  margin: var(--space-2) 0;
+  margin: 10px 0;
   font-family: var(--mono);
-  font-size: 0.78rem;
-  line-height: 1.45;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.8rem;
-  overflow-x: auto;
-  color: var(--dim);
+  font-size: 0.71875rem;
+  line-height: 1.6;
+  background: var(--surface-low);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+  padding: 14px 16px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 footer {
-  color: var(--faint);
-  font-size: 0.8rem;
-  padding: var(--space-4) 0 0;
+  color: var(--text-faint);
+  font-size: 0.71875rem;
+  padding: 22px 0 0;
 }
 
-@media (max-width: 60rem) {
-  body.with-rail {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* ---- the two-column form and its preview aside (spec 0029) ---- */
 
-  /* Stacked above the content, the rail is short and scrolls away with it. */
-  .rail {
-    position: static;
-    height: auto;
-    overflow-y: visible;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    padding: var(--space-3) 0;
-  }
+/* The design's form pages are `minmax(0,1fr) 380px` (brief sections 5.5,
+   5.6, 5.10, 5.11). It replaces the plain `<div>` that was the value column
+   of the section, so the section's own 250px label column is untouched. */
+.form-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 28px;
+  align-items: start;
+}
 
-  .rail .brand {
-    padding-bottom: var(--space-2);
-  }
+/* Without this a grid item is at least as wide as its content, and one long
+   SAN or PEM subject in the aside pushes the whole page sideways. */
+.form-split > * {
+  min-width: 0;
+}
 
-  .rail nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-    padding: 0 var(--pad);
-  }
+/* A grid rather than a stack of margins: the aside's own top edge has to
+   line up with the form's at the wide width (FR-17), and a first child's
+   collapsing top margin would push it 14px down. */
+.preview {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
 
-  .rail .nav-group {
-    display: none;
-  }
+.preview .panel,
+.preview .callout,
+.preview .note {
+  margin: 0;
+}
 
-  .rail nav a {
-    padding: 0.3rem 0.5rem;
-    border-left: 0;
-    border-bottom: 2px solid transparent;
-  }
+/* Fingerprints, SAN entries and PEM subjects have no break opportunity of
+   their own inside a 380px column. */
+.preview .mono {
+  word-break: break-all;
+}
 
-  .rail nav a[aria-current] {
-    border-left: 0;
-    border-bottom-color: var(--accent);
-  }
+.preview [data-dim] {
+  color: var(--text-muted);
+}
 
-  .rail .rail-foot {
-    margin-top: var(--space-3);
-    padding-top: var(--space-2);
-  }
+/* A panel's heading (brief section 6.9). Uppercased in the stylesheet, not
+   in the markup: what a screen reader and a text-node test read is the
+   sentence FR-14 fixes. */
+.kicker {
+  margin: 0 0 10px;
+  font-size: 0.625rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
 
-  .section {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* The design's key/value grid inside a panel (brief section 6.9). */
+.kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.kv dt {
+  color: var(--text-muted);
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* One line per resolved name in the constraints panel. */
+.checks {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 0.75rem;
+}
+
+/* The verdict is in the words beside these, so the glyph itself is
+   aria-hidden and carries no information a reader would miss. */
+.mark-ok {
+  color: var(--accent);
+}
+
+.mark-bad {
+  color: var(--bad-fg);
+}
+
+/* ---- CA hierarchy rows (spec 0017) ---- */
+
+/* The design's dashed readout (brief section 6.9). */
+.constraints {
+  margin: 10px 0;
+  padding: 11px 14px;
+  border: 1px dashed var(--line-control);
+  border-radius: var(--r-panel);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-2);
+  max-width: 620px;
+}
+
+/* The renew/retire forms sit after whatever optional lines (CRL/AIA, ACME,
+   constraints) a row happens to have. Without their own margin they'd be
+   flush against the last of those when a row has none of them -- their
+   spacing has to come from the controls themselves, not from a neighbour
+   that might not be there. */
+.row-controls {
+  margin-top: 10px;
 }
 
 /* ---- dashboard tiles ---- */
@@ -648,29 +1264,381 @@ footer {
 .tiles {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: var(--space-3);
-  margin: var(--space-4) 0;
+  gap: 14px;
+  margin: 22px 0;
 }
 
 .tile {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 7px;
   align-items: flex-start;
-  padding: var(--space-3);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
   text-decoration: none;
   color: var(--text);
 }
 
 .tile:hover {
-  border-color: var(--line-strong);
+  border-color: var(--accent-deep);
 }
 
 .tile-count {
-  font-size: 1.75rem;
-  font-weight: 600;
+  font-size: 1.875rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
   line-height: 1;
+}
+
+/* The tile's kicker: the status word under the number reads as a caption
+   rather than as a second thing to act on. */
+.tile-label {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ---- the design's remaining components (spec 0030 FR-18) ---- */
+
+/* The rail's count badge (brief section 4, section 6.8). Rendered only when
+   something is expiring, which is why there is no "zero" state to style. */
+.nav-count {
+  font-size: 0.625rem;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  color: var(--warn-fg);
+  flex: none;
+}
+
+/* The segmented control (brief section 6.5), as five links. It wraps rather
+   than overflowing: five status words plus their padding do not fit a 390px
+   viewport in one row, and .scroller is the only thing allowed to scroll. */
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--line-control);
+  border-radius: var(--r-control);
+  overflow: hidden;
+}
+
+.seg a {
+  font-size: 0.75rem;
+  padding: 7px 13px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.seg a + a {
+  border-left: 1px solid var(--line-control);
+}
+
+.seg-on {
+  color: var(--text);
+  background: var(--accent-tint);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* The audit log's filter pills (brief section 6.6). The design's second
+   selection idiom, kept because the two answer different questions. */
+.pill {
+  font-size: 0.75rem;
+  padding: 6px 13px;
+  border-radius: var(--r-control);
+  border: 1px solid var(--line-control);
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.pill-on {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+}
+
+/* The toggle switch (brief section 6.7), drawn on the real checkbox rather
+   than on a submit button that is the track: both pages this appears on read
+   every flag from one submission, so a per-toggle button would post the whole
+   form and clear the others (spec 0030 FR-13). Because the checkbox is still
+   the focusable element, spec 0027 FR-15's ring lands on the track with no
+   rule of its own. */
+.toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 38px;
+  height: 21px;
+  padding: 2px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--line-control);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.toggle::after {
+  content: "";
+  display: block;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform 0.15s;
+}
+
+.toggle:checked {
+  background: var(--accent-deep);
+}
+
+.toggle:checked::after {
+  transform: translateX(17px);
+}
+
+/* Brief section 9.8's answer to the two copy buttons the design draws, which
+   are impossible without JavaScript: one click selects the whole value. Not
+   put on .pem, where selecting one line of a PEM body is a thing an operator
+   does. */
+.copyable {
+  display: inline-block;
+  max-width: 100%;
+  user-select: all;
+  -webkit-user-select: all;
+  background: var(--surface-low);
+  border: 1px solid var(--line-control);
+  border-radius: var(--r-control);
+  padding: 9px 12px;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+/* The open row on /users -- URL state, not a client-side widget, so this is
+   the whole of what "open" looks like (spec 0030 FR-11). */
+.editing {
+  background: var(--surface-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Brief section 6.13. One uppercase initial: cabin has a username and no
+   first name, last name or email, so the second line the design stacks under
+   it has nothing to hold. */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-edge);
+  color: var(--accent-bright);
+  font-size: 0.625rem;
+  font-weight: 600;
+}
+
+/* The dashboard's services row: three inline chips (brief section 5.1). */
+.chips {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.chips > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+  padding: 10px 14px;
+  font-size: 0.78125rem;
+}
+
+/* The dashboard's revocation section: one card per CRL, two to a row where
+   there is room (brief section 5.1). A two-row table per CRL is a definition
+   list wearing a <table>, and the design draws cards. */
+.crl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 14px;
+}
+
+/* ---- the flash message (brief section 6.12, spec 0030 FR-4) ---- */
+
+/* A sibling of the rail and of <main>, drawn against the shell's own
+   position:relative, which is what section 4 says that declaration is for.
+   The 3.2s timer is a delayed animation that fills forwards: the prototype's
+   is a setTimeout, and the only way to spend 3.2 seconds without JavaScript
+   is this. No close control -- spec 0029's rule admits no route for one. */
+.flash {
+  position: absolute;
+  left: 250px;
+  bottom: 22px;
+  max-width: 520px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-radius: var(--r-panel);
+  background: var(--surface);
+  border: 1px solid var(--accent-edge);
+  font-size: 0.78125rem;
+  color: var(--text);
+}
+
+/* The dot. One span, aria-hidden, because the message is the words beside
+   it -- the fourth and last user of the decoration exemption. */
+.flash span {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ---- entry animation ---- */
+
+@keyframes cabinIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes cabinToast {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* A third keyframe where brief section 7 says there are exactly two, and
+   recorded in the brief's register as a divergence with its reason: the
+   prototype's 3.2 seconds is a setTimeout (section 8), and a delayed
+   animation that fills forwards is the only way to spend them with no
+   JavaScript. It can hide the panel; it cannot remove it and cannot be
+   interrupted. */
+@keyframes cabinToastOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+/* Both the entry and the hide are covered here. The flash therefore appears
+   with no motion and *stays* until the next navigation -- deliberate, since
+   hiding it on a timer is the motion, and a message that lingers is readable
+   where one that vanishes early is not. */
+@media (prefers-reduced-motion: reduce) {
+  main > div {
+    animation: none;
+  }
+
+  .flash {
+    animation: none;
+  }
+
+  .rail nav a,
+  .tile,
+  .toggle,
+  .toggle::after {
+    transition-duration: 0.01ms;
+    transition-delay: 0ms;
+  }
+}
+
+/* The panel's own motion is declared where it applies rather than declared
+   and then overridden: a reader who has asked for less of it never gets the
+   rule at all. The entry is the design's `cabinToast`; the hide is a 0.3s
+   fade delayed by the prototype's own 3200 ms and filled `forwards`, because
+   an animation is the only way to spend 3.2 seconds with no JavaScript. */
+@media (prefers-reduced-motion: no-preference) {
+  .flash {
+    animation:
+      cabinToast 0.2s ease-out,
+      cabinToastOut 0.3s ease-in 3.2s forwards;
+  }
+}
+
+/* ---- below 60rem the shell releases ---- */
+
+/* The design is desktop-only — the brief describes no narrow viewport at all
+   — so the responsive behaviour cabin already had is kept and retuned: the
+   shell gives up its 100vh, the rail stacks above the content as a wrapping
+   strip, and a section collapses to one column. The page scrolls again here,
+   which is why the "the shell never scrolls" criterion is asserted at 1440
+   only. */
+@media (max-width: 60rem) {
+  .shell {
+    display: block;
+    height: auto;
+    overflow: visible;
+  }
+
+  .rail {
+    width: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-panel);
+    padding: 12px 0;
+  }
+
+  .rail .brand {
+    padding-bottom: 8px;
+  }
+
+  .rail nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    overflow-y: visible;
+  }
+
+  .rail .nav-group {
+    display: none;
+  }
+
+  .rail .rail-foot {
+    margin-top: 12px;
+  }
+
+  main {
+    padding: 18px 16px 40px;
+  }
+
+  .section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  /* Spec 0029 FR-17: below the breakpoint the aside stacks *after* the form,
+     in source order -- on a phone the operator meets the fields first and the
+     verdict below them, and the tab order is the same order. */
+  .form-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Spec 0030 FR-4: there is no 230px rail here, and 250px of left offset on
+     a 390px viewport with a 520px panel is a page that scrolls sideways. The
+     panel takes the content column's own width and the page's own padding
+     instead. */
+  .flash {
+    left: 16px;
+    right: 16px;
+    max-width: none;
+  }
 }

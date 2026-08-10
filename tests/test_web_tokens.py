@@ -6,7 +6,10 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import dom
+import probes
 import pytest
+import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from httpx2 import Response
 from sqlalchemy.orm import Session
@@ -18,6 +21,7 @@ from cabin.sessions import get_session
 from cabin.store import create_session_factory
 
 _SECRET_RE = re.compile(r"cabin_[A-Za-z0-9_-]{43}")
+STATIC = Path(__file__).resolve().parents[1] / "src/cabin/web/static"
 
 
 @pytest.fixture
@@ -254,3 +258,129 @@ def test_nav_hides_unusable_entries(client: TestClient, cfg: Config) -> None:
     assert client.get("/certs/new").status_code == 403
     assert client.get("/settings").status_code == 403
     assert client.get("/tokens").status_code == 403
+
+
+# === spec 0030 AC-14: a one-time secret is shown once and stored nowhere ===
+
+
+def _copyable(html: str) -> list[dom.Node]:
+    return dom.parse(html).find_all(cls="copyable")
+
+
+def test_a_one_time_secret_is_stored_nowhere(
+    client: TestClient, cfg: Config, tmp_path: Path
+) -> None:
+    """AC-14: the one change in this spec that would be a security
+    regression wearing the shape of a tidy-up.
+
+    FR-3's rule is "a UI POST that answers 303 and records exactly one audit
+    event sets the flash to that event's summary", and `POST /tokens` is
+    excluded because it does not redirect -- it renders the page with the
+    secret shown exactly once. Routing it through the flash "for
+    consistency" would put a live bearer token in a database column in clear
+    text and show it again on the next page load. That is asserted here by
+    effect: the secret appears in no `sessions.flash`, in no `audit_events`
+    row and in no later response.
+    """
+    _setup_superadmin(client)
+    created = _create(client, cfg, label="ci")
+    assert created.status_code == 200, (
+        f"POST /tokens answered {created.status_code}. It must keep rendering the "
+        f"page at 200 rather than redirecting: the secret exists only in this "
+        f"response, and a 303 would either lose it or leak it into a URL"
+    )
+    assert created.headers["cache-control"] == "no-store"
+
+    found = _SECRET_RE.search(created.text)
+    assert found is not None, "the response carries no token secret at all"
+    secret = found.group(0)
+
+    holders = [node for node in _copyable(created.text) if secret in node.text()]
+    assert len(holders) == 1, (
+        f"the secret is inside {len(holders)} `.copyable` elements; FR-14 puts it in "
+        f'a `<code class="copyable">` so that one click selects the whole value'
+    )
+    assert holders[0].tag == "code", f"the secret sits in a <{holders[0].tag}>"
+
+    _assert_secret_is_nowhere(client, cfg, secret, "/tokens")
+
+    if not Path(probes.CHROME).exists():
+        pytest.skip("headless Chrome not installed")
+    measured = _user_select(tmp_path, created.text)
+    assert measured["found"] > 0, "the browser drew no .copyable element"
+    assert measured["userSelect"] == "all", (
+        f"`.copyable` computes `user-select: {measured['userSelect']}`. Brief section "
+        f"9.8's answer to the two copy buttons the design draws -- which are "
+        f"impossible without JavaScript -- is that one click selects the whole value"
+    )
+
+
+def _assert_secret_is_nowhere(client: TestClient, cfg: Config, secret: str, page: str) -> None:
+    db = _db(cfg)
+    try:
+        columns = {column["name"] for column in sa.inspect(db.get_bind()).get_columns("sessions")}
+        assert "flash" in columns, (
+            "`sessions` has no `flash` column, so the clause below reads nothing. "
+            "FR-2 adds it; a build without it cannot be measured for what it puts "
+            "there and must fail rather than skip"
+        )
+        stored = [
+            str(value)
+            for (value,) in db.execute(sa.text("SELECT flash FROM sessions")).all()
+            if value is not None
+        ]
+        assert not any(secret in value for value in stored), (
+            "the one-time secret is sitting in a `sessions.flash` column in clear "
+            "text. AC-14 forbids by effect the tidy-up that would put it there"
+        )
+        #: The column is `detail_json` (`audit.py:190`); `AuditEvent.detail` is
+        #: the decoded property beside it and is not a column raw SQL can name.
+        events = db.execute(sa.text("SELECT summary, detail_json FROM audit_events")).all()
+    finally:
+        db.close()
+    for summary, detail in events:
+        assert secret not in (summary or ""), f"the secret leaked into an audit summary: {summary}"
+        assert secret not in (detail or ""), "the secret leaked into an audit event's detail"
+
+    again = client.get(page)
+    assert again.status_code == 200
+    assert secret not in again.text, (
+        f"{page} showed the secret a second time. cabin stores a hash of it and "
+        f"cannot show it again"
+    )
+
+
+#: What the browser resolves `user-select` to on the element holding a
+#: one-time secret, and how many such elements it found -- the count is what
+#: stops a page with no `.copyable` answering "all" by looking at nothing.
+_USER_SELECT_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var nodes = document.querySelectorAll('.copyable');
+    var value = null;
+    if (nodes.length) {
+      var cs = getComputedStyle(nodes[0]);
+      value = cs.userSelect || cs.webkitUserSelect;
+    }
+    var out = document.createElement('div');
+    out.id = 'probe-result';
+    out.textContent = JSON.stringify({found: nodes.length, userSelect: value});
+    document.body.appendChild(out);
+  }, 300);
+});
+</script>
+"""
+
+
+def _user_select(tmp_path: Path, html: str) -> dict[str, object]:
+    root = tmp_path / "copyable"
+    root.mkdir(parents=True, exist_ok=True)
+    probes.stage(root, STATIC, {"tokens": html}, _USER_SELECT_PROBE)
+    httpd, port = probes.serve(root)
+    try:
+        found = probes.run(f"http://127.0.0.1:{port}/tokens.html", 1440, 1150)
+    finally:
+        httpd.shutdown()
+    assert isinstance(found, dict)
+    return found

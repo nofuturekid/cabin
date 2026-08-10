@@ -64,7 +64,13 @@ from cabin.ca.certs import (
 )
 from cabin.ca.crl import RevocationError
 from cabin.ca.leaf import IssueError
-from cabin.ca.service import CANotConfiguredError
+from cabin.ca.service import (
+    CANotConfiguredError,
+    IssuerRequiredError,
+    IssuerRetiredError,
+    UnknownIssuerError,
+)
+from cabin.issuer_grants import IssuerForbiddenError, NoGrantedIssuerError, token_principal
 from cabin.secrets import SecretsError
 from cabin.users import Role
 from cabin.web.api_deps import require_api_read, require_api_write
@@ -110,6 +116,17 @@ def _domain_errors() -> Iterator[None]:
         raise
     except (IssueError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (UnknownIssuerError, IssuerRetiredError, IssuerRequiredError) as exc:
+        # Spec 0017 FR-6: a bad or ambiguous issuer selection is bad input,
+        # the same 400 an unusable CSR gets -- not a state conflict, and not
+        # a 404 (an unknown issuer id is a caller mistake, not a missing
+        # certificate).
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (IssuerForbiddenError, NoGrantedIssuerError) as exc:
+        # Spec 0018 FR-14: this identity has no grant on the issuer it named
+        # (or on any issuer at all) -- an authorization failure, explicitly
+        # not the 400 the issuer errors above get.
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except RevocationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CANotConfiguredError as exc:
@@ -137,11 +154,19 @@ def _key_fields(request: Request, token: ApiToken, row: Certificate) -> dict[str
 
 
 def _detail(
-    request: Request, db: Session, token: ApiToken, row: Certificate, now: datetime
+    request: Request,
+    db: Session,
+    token: ApiToken,
+    row: Certificate,
+    now: datetime,
+    *,
+    validity_capped_from: datetime | None = None,
 ) -> CertificateDetail:
     return CertificateDetail.model_validate(
         {
-            **views.certificate_pem(db, row, now).model_dump(),
+            **views.certificate_pem(
+                db, row, now, validity_capped_from=validity_capped_from
+            ).model_dump(),
             **_key_fields(request, token, row),
         }
     )
@@ -240,9 +265,10 @@ def issue_certificate(
     (FR-5) -- it is also stored, sealed, for later download."""
     _no_store(response)
     with _domain_errors():
-        row = certs_service.issue_and_store(
+        issued = certs_service.issue_and_store(
             db,
             request.app.state.secrets,
+            principal=token_principal(token),
             profile=body.profile,
             subject_cn=body.subject_cn,
             # Raw entries on purpose: the domain layer runs the same SAN
@@ -250,10 +276,13 @@ def issue_certificate(
             sans=body.sans,
             days=body.days,
             key_type=body.key_type,
-            crl_url=crl_service.distribution_url(db),
+            issuer_id=body.issuer_id,
             source=CertSource.api,
         )
-        detail = _detail(request, db, token, row, datetime.now(UTC))
+        row = issued.row
+        detail = _detail(
+            request, db, token, row, datetime.now(UTC), validity_capped_from=issued.capped_from
+        )
     _record_certificate_event(
         db,
         request,
@@ -261,7 +290,12 @@ def issue_certificate(
         AuditAction.cert_issued,
         summary=audit.issued_summary(row),
         target_id=row.id,
-        detail=audit.certificate_detail(row, key_type=body.key_type),
+        detail=audit.certificate_detail(
+            row,
+            key_type=body.key_type,
+            days_requested=body.days if issued.capped_from is not None else None,
+            validity_capped_from=issued.capped_from,
+        ),
     )
     return detail
 
@@ -282,17 +316,21 @@ def sign_csr(
     """The CSR contributes its public key, CN and (unless ``sans`` overrides
     them) its SANs -- never its extensions."""
     with _domain_errors():
-        row = certs_service.sign_csr_and_store(
+        issued = certs_service.sign_csr_and_store(
             db,
             request.app.state.secrets,
+            principal=token_principal(token),
             csr_pem=body.csr_pem,
             profile=body.profile,
             days=body.days,
             sans_override=body.sans or None,
-            crl_url=crl_service.distribution_url(db),
+            issuer_id=body.issuer_id,
             source=CertSource.api,
         )
-        detail = _detail(request, db, token, row, datetime.now(UTC))
+        row = issued.row
+        detail = _detail(
+            request, db, token, row, datetime.now(UTC), validity_capped_from=issued.capped_from
+        )
     # The CSR body stays out of the log, here as in the UI (FR-3).
     _record_certificate_event(
         db,
@@ -301,7 +339,11 @@ def sign_csr(
         AuditAction.cert_signed,
         summary=audit.signed_summary(row),
         target_id=row.id,
-        detail=audit.certificate_detail(row),
+        detail=audit.certificate_detail(
+            row,
+            days_requested=body.days if issued.capped_from is not None else None,
+            validity_capped_from=issued.capped_from,
+        ),
     )
     return detail
 
@@ -346,7 +388,9 @@ def revoke_certificate(
     existing = certs_service.get_certificate(db, cert_id)
     was_revoked = existing is not None and existing.revoked_at is not None
     with _domain_errors():
-        row = crl_service.revoke_certificate(db, request.app.state.secrets, cert_id, body.reason)
+        row = crl_service.revoke_certificate(
+            db, request.app.state.secrets, cert_id, body.reason, principal=token_principal(token)
+        )
     if not was_revoked:
         _record_certificate_event(
             db,

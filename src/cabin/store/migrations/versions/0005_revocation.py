@@ -3,6 +3,11 @@
 Revision ID: 0005
 Revises: 0004
 Create Date: 2026-08-01
+
+Edited in place for spec 0017 FR-1: crl_state stops being a singleton. The
+CHECK id = 1 backstop is gone along with the id column itself -- the primary
+key is now issuer_id (FK ca_certificates.id), so each issuer's CRL is its
+own row, and "exactly one CRL per issuer" is what the primary key enforces.
 """
 
 import sqlalchemy as sa
@@ -24,14 +29,16 @@ def upgrade() -> None:
     )
     op.create_table(
         "crl_state",
-        # The current CRL is a single document, not a history: the CHECK
-        # pins the table to exactly one row (id = 1) so no code path can
-        # accidentally leave two "current" CRLs behind.
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=False),
+        sa.Column(
+            "issuer_id",
+            sa.Integer(),
+            sa.ForeignKey("ca_certificates.id"),
+            primary_key=True,
+            autoincrement=False,
+        ),
         sa.Column("crl_number", sa.Integer(), nullable=False),
         sa.Column("generated_at", sa.DateTime(), nullable=False),
         sa.Column("crl_der", sa.LargeBinary(), nullable=False),
-        sa.CheckConstraint("id = 1", name="ck_crl_state_single_row"),
     )
 
 

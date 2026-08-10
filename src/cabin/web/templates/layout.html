@@ -8,37 +8,53 @@
     <!-- htmx 2.0.10, vendored locally: no CDN -->
     <script src="/static/htmx.min.js"></script>
   </head>
-  {%- macro nav_link(href, name, label) -%}
-  <a href="{{ href }}"{% if nav_current == name %} aria-current="page"{% endif %}>{{ label }}</a>
+  {%- macro nav_link(href, name, label, count=0) -%}
+  <a href="{{ href }}"{% if nav_current == name %} aria-current="page"{% endif %}>{{ label }}{% if count %}<span class="nav-count">{{ count }}</span>{% endif %}</a>
   {%- endmacro -%}
   <body class="{% if user %}with-rail{% endif %}">
-    {% if user %}
-    <aside class="rail">
-      <div class="brand"><b>cabin</b><span class="version">{{ version }}</span></div>
-      <nav>
-        <span class="nav-group">Overview</span>
-        {{ nav_link("/", "dashboard", "Dashboard") }}
-        {{ nav_link("/ca", "ca", "Certificate authority") }}
-        <span class="nav-group">Certificates</span>
-        {{ nav_link("/certs", "certs", "Inventory") }}
-        {% if nav.issue %}{{ nav_link("/certs/new", "issue", "Issue") }}{% endif %}
-        {% if nav.issue %}{{ nav_link("/certs/sign", "sign", "Sign a CSR") }}{% endif %}
-        <span class="nav-group">Access</span>
-        {% if nav.acme %}{{ nav_link("/acme/admin", "acme", "ACME") }}{% endif %}
-        {% if nav.tokens %}{{ nav_link("/tokens", "tokens", "API tokens") }}{% endif %}
-        {{ nav_link("/users", "users", "Users") }}
-        {{ nav_link("/audit", "audit", "Audit log") }}
-        {% if nav.settings %}{{ nav_link("/settings", "settings", "Settings") }}{% endif %}
-      </nav>
-      <div class="rail-foot">
-        {{ user.username }} <span class="tag">{{ user.role }}</span>
-        <form method="post" action="/logout">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          <button type="submit">Log out</button>
-        </form>
-      </div>
-    </aside>
-    {% endif %}
-    <main>{% block content %}{% endblock %}</main>
+    <div class="shell">
+      {% if user %}
+      <aside class="rail">
+        <div class="brand"><b>cabin</b><span class="version">{{ version }}</span></div>
+        <nav>
+          <span class="nav-group">Overview</span>
+          {{ nav_link("/", "dashboard", "Dashboard") }}
+          <span class="nav-group">Certificate authority</span>
+          {{ nav_link("/ca", "ca", "Hierarchies") }}
+          {% if nav.ca_admin %}{{ nav_link("/ca/new", "ca_new", "Create") }}{% endif %}
+          {% if nav.ca_admin %}{{ nav_link("/transfer/ca-import", "transfer_ca_import", "Import a CA") }}{% endif %}
+          {% if nav.ca_admin %}{{ nav_link("/transfer/cross-import", "transfer_cross_import", "Import a cross certificate") }}{% endif %}
+          <span class="nav-group">Certificates</span>
+          {{ nav_link("/certs", "certs", "Inventory", nav.expiring) }}
+          {% if nav.issue %}{{ nav_link("/certs/new", "issue", "Issue") }}{% endif %}
+          {% if nav.issue %}{{ nav_link("/certs/sign", "sign", "Sign a CSR") }}{% endif %}
+          <span class="nav-group">Export</span>
+          {{ nav_link("/transfer/trust-bundle", "trust_bundle", "Trust bundle") }}
+          {% if nav.ca_key %}{{ nav_link("/transfer/ca-key", "ca_key", "CA key") }}{% endif %}
+          {{ nav_link("/transfer/inventory", "inventory_export", "Inventory export") }}
+          <span class="nav-group">Access</span>
+          {% if nav.acme %}{{ nav_link("/acme/admin", "acme", "ACME") }}{% endif %}
+          {% if nav.tokens %}{{ nav_link("/tokens", "tokens", "API tokens") }}{% endif %}
+          {{ nav_link("/users", "users", "Users") }}
+          {{ nav_link("/audit", "audit", "Audit log") }}
+          {% if nav.settings %}{{ nav_link("/settings", "settings", "Settings") }}{% endif %}
+        </nav>
+        <div class="rail-foot">
+          <span class="avatar">{{ user.username[:1] | upper }}</span>
+          {{ user.username }} <span class="tag">{{ user.role }}</span>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit">Log out</button>
+          </form>
+        </div>
+      </aside>
+      {% endif %}
+      <main id="main">
+        <div>{% block content %}{% endblock %}</div>
+      </main>
+      {% if flash is defined and flash %}
+      <div class="flash" role="status"><span aria-hidden="true"></span>{{ flash }}</div>
+      {% endif %}
+    </div>
   </body>
 </html>
