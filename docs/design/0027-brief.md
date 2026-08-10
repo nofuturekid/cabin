@@ -61,6 +61,202 @@ Not read by the test; recorded here so that the file is the whole account.
   pixel-identical to §2 at default settings and still honour a raised base
   font size (spec 0027 FR-16). The prototype had no user whose settings could
   be honoured.
+- **Fact grids keep their `.scroller` box**, which §6.14's grid does not
+  have (spec 0028 FR-6). `test_every_table_is_wrapped_in_scroller`
+  requires every `<table>` in every template to be wrapped, and it
+  protects spec 0015 FR-4 — a table is the one thing wide enough to push
+  a page sideways. Dropping the wrapper to match the design would mean
+  editing that test in the same change that introduces four new tables.
+- **`cert_detail.html`'s fact grid stays one column of pairs**, not
+  §5.4's `repeat(2, minmax(0, 1fr))` of two such grids (spec 0028 FR-6).
+  The field count on that page is variable — the `Revoked` row appears
+  only when the certificate is revoked — and a two-column pairing built
+  from one linear `<tbody>` either reorders the fields as the count
+  changes or leaves a hole. Two `<table>`s would fix the geometry and
+  would split one fact list into two, which is worse.
+- **The expired status bar is not shipped.** §1 and §5.7 give the 2px
+  left edge bar three colours; cabin ships `#3f7d55` active and
+  `#3f424d` retired, and no `#8c3f3d` (spec 0028 FR-11). A
+  `ca_certificates` row's `status` is `active` or `retired`; cabin
+  computes no expired state for a CA row anywhere, and inventing one
+  here would be a content change behind a colour.
+- **No row is dimmed with `opacity`.** §5.7 and §6.3 give non-active
+  rows `opacity: .65` (spec 0028 FR-14). `opacity` composites the whole
+  subtree after `getComputedStyle` has reported its `color`, so a dimmed
+  row's real contrast is invisible to spec 0027 FR-14's probe — it would
+  report 4.5:1 for text that renders at roughly 3:1. A property that
+  quietly defeats the check built to hold contrast honest is not one
+  this project adds in the spec after it. A retired row is marked the
+  way every other retired thing in cabin is: a `retired` tag carrying
+  `tag-bad`, and the retired status bar.
+- **No per-group box on `/ca`.** §6.3 draws each root and its children
+  as one rounded box built from per-row borders (spec 0028, Out of
+  Scope). `.scroller` is already that box (spec 0015 FR-5) and already
+  wraps the whole table, and nesting a second border inside it would
+  draw two. The root row's fill and its 2px status bar are what separate
+  one group from the next.
+- **No status tag beside the `h1`**, although §4's page recipe and §5.4,
+  §5.8 and §5.9 all draw one (spec 0028 FR-1 and Out of Scope). On the
+  hierarchy and issuer pages the status is a row of the definition grid
+  today, so moving it to the head would overturn spec 0026 FR-6's field
+  list for no gain, and duplicating it would put the same tag on one
+  page twice. On the certificate page §5.4's tag reads "valid · 18 days"
+  — a computed status and a days-left number the page does not carry —
+  which is new content and new copy, not a new layout.
+- **§5.4's `Issuer` fact is not added** to the certificate page's
+  definition grid (spec 0028 FR-1). It needs a context key `certs_ui.py`
+  does not build, and the rule this redesign works under is that a move
+  must not quietly become an addition.
+- **The import page's dim preview values are `--text-muted`**, not
+  §5.11's `#5a5d6b` (spec 0029 FR-10). That hex is 2.4:1 on `--surface`
+  and would be reported by spec 0027 FR-14's contrast probe, which walks
+  every element carrying its own text node; the values are not disabled
+  controls, so WCAG's incidental exemption does not reach them, and
+  `aria-hidden` would be a lie about text an operator is meant to read.
+  One step less faint still distinguishes the two states, and no new
+  token is added.
+- **§5.10's "_name_ Root" naming hint is not printed** (spec 0029 FR-9).
+  Spec 0024 FR-1 abolished that convention, and printing a hint that
+  describes behaviour cabin deliberately removed is worse than printing
+  none.
+- **`Profile` stays a `<select>`**, not §5.5's two-option segmented
+  control (spec 0029, Out of Scope). The field renders `list(Profile)`,
+  so a two-option control would hard-code an enum's cardinality into
+  markup, and the change buys nothing an operator can act on.
+- **No "Paste an example", "Paste a sample CSR" or "Paste a sample
+  CA"** (§5.5, §5.6, §5.11; spec 0029, Out of Scope). Each needs example
+  data to exist server-side and a decision about what a good example
+  common name is on somebody else's network.
+- **No busy state on the primary buttons** — §5.5's "Issuing…" and
+  §5.10's "Generating keys…" (spec 0029, Out of Scope). The label change
+  is a client-side mutation of a form being submitted, which is
+  JavaScript this redesign's rule has no route-shaped answer for, and
+  the operations really are slow, so a disabled-looking button that is
+  not disabled would be the worst of the options.
+- **Under `prefers-reduced-motion` the flash does not hide at all.**
+  §6.12 auto-dismisses the panel after 3200 ms (§9.5 already records
+  that nothing can dismiss it early, and §6.12 draws no close control,
+  so neither of those is a departure). cabin spends the 3.2 seconds in a
+  delayed animation that fills forwards, which hides the element without
+  removing it — and the reduced-motion wrapper spec 0027 FR-16 requires
+  around every animation therefore leaves the panel standing until the
+  next navigation (spec 0030 FR-4). That is deliberate, and it is the
+  safer half of the trade: a message that lingers is readable and one
+  that vanishes early is not.
+- **A third keyframe, where §7 says there are exactly two.**
+  `cabinToastOut` is added beside `cabinIn` and `cabinToast` (spec 0030
+  FR-4). The prototype's 3.2-second timer is a `setTimeout` (§8), and
+  the only way to spend 3.2 seconds without JavaScript is a delayed
+  animation that fills forwards.
+- **§9.5's three dot colours are not shipped.** The flash keeps §6.12's
+  single accent dot (spec 0030 FR-2, FR-4). No failing UI POST in cabin
+  redirects — each one re-renders its own page at 400 with its own
+  error box, beside the field that caused it — so a `warn` or `bad` tone
+  would have no producer, and two `.flash-*` rules with no literal user
+  fail the reverse direction of spec 0027 FR-20's agreement test. The
+  level column arrives with the first failing redirect, in the spec that
+  adds one.
+- **The flash's `left: 250px` holds only above the shell's
+  breakpoint.** §6.12 positions the toast at 230px of sidebar plus 20px
+  (spec 0030 FR-4). Below 60rem there is no 230px rail — spec 0027 FR-7
+  releases the shell — and 250px of left offset on a 390px viewport
+  under a `max-width: 520px` panel is a page that scrolls sideways.
+  There the panel takes the content column's own width and the page's
+  own padding instead.
+- **§5.2's two body texts are chosen by cabin's two causes, not by the
+  prototype's roles** (spec 0030 FR-5). The design names an auditor and
+  a missing issuer grant; cabin has neither an auditor role nor a 403
+  raised by a grant check. Its refusals come from `require_role` and
+  from `verify_csrf`, and those are the two a reader needs told apart,
+  because one is answered by asking someone for a role and the other by
+  reloading the page.
+- **No sorting on the inventory.** §5.3 makes `Common name` and `Valid
+  until` sortable headings and §9.6 turns each into an `<a>` that flips
+  `dir` (spec 0030 FR-10). `list_certificates` orders by `created_at
+  desc, id desc`, and that ordering is the page's own lead sentence —
+  "Everything this CA has issued, newest first." — which a sort control
+  makes false in every state but one. It is also not a layout change: it
+  needs a query parameter, a whitelist, a tie-breaker, and the same
+  ordering in `export_certificates` or the CSV disagrees with the page
+  that offered it.
+- **The users row keeps four buttons, has no confirm-delete state, and
+  its avatar carries no second line.** §5.17 and §9.3 give the open row
+  one `Save`, a third "Delete? Yes / No" state, and a 26px avatar beside
+  a full name stacked over a mono `@login` (spec 0030 FR-11). cabin's
+  four mutations are four routes with four audit actions and four
+  guards, so one `Save` would be a new endpoint collapsing four log
+  entries into one; a `?delete={id}` confirmation would be a behaviour
+  change and new copy, and would leave `POST /users/{id}/delete` as the
+  only destructive route in cabin whose confirmation is a URL rather
+  than the checkbox spec 0007 and spec 0023 FR-9 use; and cabin has a
+  `username` and no first name, last name or email, so the stacked
+  second line has nothing to hold.
+- **`.cols-users` drops §5.17's Email track** — five tracks against the
+  design's six (spec 0030 FR-17). cabin's user record has no email
+  column. `Last seen`'s `.7fr` is what cabin's `Created` column stands
+  in, because both are a date and the rule that derives the extended
+  lists is about kinds of cell.
+- **§5.18's five filter pills carry cabin's five actor kinds, and the
+  action filter stays a `<select>`** (spec 0030 FR-12). The design's
+  pills are `all / ui / api / acme / mcp`; cabin's `ACTOR_KIND_FILTERS`
+  are `all / user / token / system / acme`. Only the cardinality
+  matches, because the two answer different questions: the design names
+  the _door_ a request came through, cabin names the _kind of actor_ it
+  was blamed on — `system` is cabin itself with no door at all, and
+  `user` covers the UI whether the operator came from a browser or not.
+  Renaming them to match the drawing would be a schema change with a
+  CHECK constraint behind it and a filter value in every existing
+  bookmark, to make a chip read differently. `action` stays a select
+  because it has one option per `AuditAction`, a two-figure list that
+  grows with every spec and would be a wall as pills.
+- **`.cols-audit` is re-ordered, and §5.18's `Door` chip is cabin's
+  `From` address** (spec 0030 FR-17). The design's order is Time / Actor
+  / Door / Action / Summary; cabin's is Time / Actor / Action / What
+  happened / From, and the last cell holds a remote address rather than
+  a door chip. The tracks are derived from the same kinds of cell as the
+  design's.
+- **§9.7's recommended toggle shape is declined.** The brief offers a
+  `<form>` whose submit button _is_ the track, or a styled
+  `<input type="checkbox">` with a visible `Save`, and recommends the
+  first while calling the second "arguably worse" (spec 0030 FR-13).
+  cabin ships the second, because on these two pages the first is not
+  merely worse but broken: `POST /acme/admin` reads `acme_enabled` and
+  `acme_require_eab` from one submission and an absent checkbox means
+  off, and `POST /settings` does the same for seven fields from one
+  wrapping `<form>` — so a per-toggle submit button would turn ACME off
+  while turning EAB on. What the brief warns about, the knob showing the
+  pending state rather than the saved one, is inherited rather than
+  introduced: `/settings` has been edit-then-save since spec 0001 and
+  `/acme/admin` since spec 0019.
+- **`.cols-eab`'s `Bound account` track is `1.4fr`**, where the rule
+  that derives cabin's extra tracks from the design's cell kinds gives
+  §5.15's `Used` column `.8fr` (spec 0030 FR-17). cabin's cell holds
+  _two_ values where the design's holds one — a mono account id and the
+  parenthesised instant it was bound — and `.8fr` puts them on two lines
+  at every width.
+- **§5.15's directories block is a list, not cards** (spec 0030 FR-17).
+  The design draws one card per active issuer, holding the name over the
+  URL. cabin's block is a three-column table today — Issuer, Status,
+  Directory URL — and the design's card has nowhere to put the status
+  tag, so drawing cards would mean either dropping a value the page
+  shows or inventing a card shape the design does not have. The tracks
+  of `.cols-directories` are derived from the same kinds of cell.
+- **§4's `Certificate authorities` group heading is not adopted**; the
+  rail keeps cabin's `Certificate authority` (spec 0030 FR-7). That is
+  wording, and wording is out of scope for the whole redesign. §4's
+  other naming instruction — that the fourth group is `Export` and not
+  `Transfer`, the rail being the newer artefact — is the one exception,
+  and it is taken.
+- **The dashboard's Expiring list shows ten rows where §5.1 shows five**
+  (spec 0030 FR-8). `EXPIRING_SHOWN` is spec 0016's number, and how many
+  expiring certificates an operator is shown is a content change behind
+  a layout one.
+- **Three sections of the design are not built at all** (spec 0030, Out
+  of Scope): §5.15's `Recent orders`, §5.19's `Environment` grid and
+  §5.14's `Delete a stored key`. The first two are blocks of content
+  cabin's pages do not have, and each is a feature with a query behind
+  it rather than a restyle. The third is a form for a route that does
+  not exist: nothing in cabin deletes a stored CA key.
 
 ### Additions the design does not contain
 

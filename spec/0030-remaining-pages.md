@@ -2399,3 +2399,53 @@ edit this spec adds is a URL, an anchor and a server-rendered branch.
 **No change to any guard, any audit action, any REST, MCP or ACME
 behaviour, and no new token in the palette.** Eighteen POSTs gain one
 line each and nothing else about them moves.
+
+**No test reads the "everything else" divergence register** (FR-1). The
+palette register has one because a table of token / brief / shipped /
+reason is data: spec 0027 AC-6 parses it, applies it to §10's block and
+compares the result with `cabin.css`'s `:root` in both directions. The
+prose register has no reader, and that is why FR-1's entries were the
+one obligation in this spec that a green suite could not have caught
+missing. A criterion that would close it, stated concretely enough to
+implement and no further — adding it is the next spec's decision, not a
+side effect of writing the entries:
+
+1. **Mark a divergence in the spec, in one shape.** Every place a spec
+   departs from the brief already argues it in prose; give it a marker
+   as well. The corrections in this spec already use a fixed lead
+   (`**Correction (test-authoring): …**`), so the same construct works:
+   `**Divergence (§6.12).**` opening the paragraph, or an HTML comment
+   `<!-- divergence: 0030 FR-4 §6.12 -->` beside it. Spec number,
+   requirement and brief section are the whole key.
+2. **One register entry per marker, in both directions.** The test
+   globs `spec/0*.md`, collects the keys, parses the bullets of the
+   "everything else" register — each bullet already cites its brief
+   section and its `spec NNNN FR-n` — and asserts the two sets are
+   equal. A departure argued in a spec and never written down fails; an
+   entry citing a requirement that marks no departure fails too, which
+   is what stops the register being padded until it passes.
+3. **A shape for an entry.** A bullet must name at least one `§n`, cite
+   at least one `spec NNNN FR-n`, and carry more than one sentence.
+   That is mechanical, and it is the same rule the palette register's
+   "a value changed here with no reason beside it fails" already
+   applies to the table.
+
+**What such a check cannot do**, said plainly, because a criterion
+oversold is worse than none. It cannot know whether an entry is _true_:
+the register is a checked-in document, a document can always be edited
+into agreeing with the code, and the reason clause — the part worth
+having — is the part no parser can read. Nor can it find a departure
+nobody wrote down anywhere: an implementer who diverges silently in
+`cabin.css` or a template leaves no marker for clause 1 to count, and
+the check is then green on an incomplete account. The palette register
+does not have that hole because its subject is a value a test can read
+back out of the stylesheet; there is no equivalent read for "the design
+draws a card here and we shipped a table".
+
+So the check is about **presence and shape, not truth**. It makes the
+register impossible to leave behind when a spec argues a departure, and
+impossible to write as a diff line with no reason. The first of those
+is exactly what this spec's own omission was. What keeps the register
+_honest_ is the thing that found the omission: a reader holding it
+against the specs, which is cheap once the two are in one-to-one
+correspondence and expensive otherwise.
