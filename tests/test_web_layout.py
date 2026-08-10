@@ -771,18 +771,161 @@ def page_paths(cfg: Config, cert_path: str) -> dict[str, str]:
     }
 
 
-def render_pages(client: TestClient, paths: dict[str, str]) -> dict[str, str]:
-    """Fetch every page, asserting each one is actually a page.
+#: Spec 0030 FR-16/AC-19: the three screens the probes have never walked,
+#: and the status each answers. `/login` is 200 for an authenticated client
+#: (`login_form` has no auth dependency); the refused render is 403 by
+#: construction; `/setup` is 404 once a user exists, which is why it is
+#: fetched from an instance that has none rather than from this one.
+EXTRA_EXPECTED = {"login": 200, "setup": 200, "not_permitted": 403}
+
+
+def render_pages(
+    client: TestClient, paths: dict[str, str], expected: dict[str, int] | None = None
+) -> dict[str, str]:
+    """Fetch every page, asserting each one answers what it is expected to.
 
     A route that moves and starts 404ing or 405ing would otherwise drop out
     of every probe below while contributing nothing and failing nothing.
+
+    Spec 0030 gives the caller an expected status per entry rather than
+    assuming 200: the list gains a refused render (403), and a probe list
+    that silently dropped it would go back to covering only the pages that
+    were already covered.
     """
     rendered = {}
     for name, path in paths.items():
         resp = client.get(path)
-        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        want = (expected or {}).get(name, 200)
+        assert resp.status_code == want, f"{path} -> {resp.status_code}, expected {want}"
         rendered[name] = resp.text
     return rendered
+
+
+PROBE_VIEWER = ("probe_viewer", "correcthorse1x")
+
+
+def make_probe_viewer(client: TestClient, cfg: Config) -> None:
+    """A viewer, so that a refusal has somebody to refuse.
+
+    Creating it is also how the flash is staged (spec 0030 FR-21): the POST
+    answers 303 and records exactly one audit event, which is precisely
+    FR-3's rule, so the next page this client renders carries the panel. A
+    flash faked by writing the column directly would measure a panel this
+    application never produces.
+    """
+    created = client.post(
+        "/users",
+        data={
+            "username": PROBE_VIEWER[0],
+            "password": PROBE_VIEWER[1],
+            "role": "viewer",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert created.status_code == 303, created.text
+
+
+def extra_pages(client: TestClient, cfg: Config) -> dict[str, str]:
+    """`/login`, `/setup` and a refused render (spec 0030 FR-16/FR-21).
+
+    Neither login nor setup has ever been walked by the overflow, contrast
+    or focus probes -- `page_paths` does not contain them and `NOT_PAGES`
+    excludes them from the template checks -- so the one pass this project
+    makes over its own geometry has never looked at the first two screens
+    anybody sees.
+
+    Two of the three cannot be fetched from the caller's own client, and
+    that is a fact about cabin rather than a convenience:
+
+    * `/setup` answers 404 once a user exists (`ui.py:148`), so it is
+      rendered from a second instance with an empty database. There is no
+      state of *this* database in which it is a page.
+    * a refusal needs a role that is refused something, and the caller is a
+      superadmin. A second client over the same application logs in as the
+      viewer, so the page comes out of the application under test rather
+      than out of a fixture that mimics it.
+    """
+    viewer = TestClient(client.app, follow_redirects=False)
+    assert (
+        viewer.post(
+            "/login", data={"username": PROBE_VIEWER[0], "password": PROBE_VIEWER[1]}
+        ).status_code
+        == 303
+    ), "the probe viewer does not exist; make_probe_viewer runs before the pages"
+    refused = viewer.get("/tokens")
+    assert refused.status_code == EXTRA_EXPECTED["not_permitted"], (
+        f"a viewer's /tokens -> {refused.status_code}"
+    )
+
+    login = client.get("/login")
+    assert login.status_code == EXTRA_EXPECTED["login"], f"/login -> {login.status_code}"
+
+    empty_dir = cfg.data_dir.parent / "setup-probe"
+    empty = Config(
+        port=8080, data_dir=empty_dir, db_url=f"sqlite:///{empty_dir}/cabin.db", tls=cfg.tls
+    )
+    with TestClient(create_app(empty), follow_redirects=False) as fresh:
+        setup = fresh.get("/setup")
+        assert setup.status_code == EXTRA_EXPECTED["setup"], f"/setup -> {setup.status_code}"
+
+    return {"login": login.text, "setup": setup.text, "not_permitted": refused.text}
+
+
+_FLASH_RE = re.compile(r'class="[^"]*\bflash\b')
+
+
+def all_pages(client: TestClient, cfg: Config, cert_path: str) -> dict[str, str]:
+    """Every screen the probes cover: `page_paths`' twenty, plus the three
+    `extra_pages` builds, with a real flash panel on one of them.
+
+    One list, so that the overflow, contrast, focus and agreement checks
+    cannot drift onto three different ones (spec 0027 FR-20, extended by
+    spec 0030 FR-21). The flash is staged rather than left absent because a
+    panel that is not rendered is not a panel that can push a page sideways,
+    and it is staged by making a mutation rather than by writing the column,
+    so what the probes measure is what an operator sees.
+    """
+    make_probe_viewer(client, cfg)
+    rendered = render_pages(client, page_paths(cfg, cert_path))
+    rendered.update(extra_pages(client, cfg))
+    assert len(rendered) >= 23, f"the probe list holds {len(rendered)} screens"
+    return rendered
+
+
+def assert_probe_list_is_sound(rendered: dict[str, str]) -> None:
+    """The two preconditions every walking probe over `all_pages` depends on.
+
+    Asserted by the probes rather than by `all_pages` itself, so that the
+    checks which have nothing to do with this -- the twelve numbers, the
+    palette, the type scale, the danger button -- keep running and keep
+    reporting their own results.
+
+    **Every entry parses as a document** (spec 0030 AC-20's second bullet).
+    `probes.stage` inserts its script before `</body>`, so a screen that is
+    not a page carries no probe at all and comes back as "Chrome rendered
+    nothing" -- which is what a refusal answered as `{"detail": ...}` does
+    today, and what FR-5/FR-6 turn into a page.
+
+    **A flash panel is staged** (FR-21/AC-19). A panel that is not rendered
+    is not a panel that can push a page sideways, so a geometry run without
+    one says nothing about the one element this spec adds.
+    """
+    not_documents = sorted(
+        name for name, html in rendered.items() if "</body>" not in html or "<html" not in html
+    )
+    assert not_documents == [], (
+        f"these screens are not HTML documents: {not_documents}. Every probe below "
+        f"is injected before `</body>`, so a screen without one is walked by nothing "
+        f"and reports nothing -- a refusal answered as a JSON body is exactly that"
+    )
+
+    with_flash = sorted(name for name, html in rendered.items() if _FLASH_RE.search(html))
+    assert len(with_flash) == 1, (
+        f"{len(with_flash)} of the {len(rendered)} rendered screens carry a `.flash` "
+        f"panel: {with_flash}. `all_pages` makes a mutation that answers 303 and "
+        f"records exactly one audit event, so the first page rendered after it must "
+        f"show the message (FR-3/FR-4) and no later page may show it again"
+    )
 
 
 @pytest.mark.skipif(not Path(probes.CHROME).exists(), reason="headless Chrome not installed")
@@ -864,8 +1007,13 @@ def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int, scheme:
     cfg = Config(port=8080, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db", tls=True)
     with TestClient(create_app(cfg), follow_redirects=False) as client:
         cert_path = _populate(client, cfg, second_issuer=True)
-        pages = page_paths(cfg, cert_path)
-        rendered = render_pages(client, pages)
+        # spec 0030 FR-21: the same twenty screens plus `/login`, `/setup`
+        # and a refused render, with a flash staged into one of them -- a
+        # panel that is not rendered is not a panel that can push a page
+        # sideways.
+        rendered = all_pages(client, cfg, cert_path)
+        pages = dict.fromkeys(rendered, "")
+    assert_probe_list_is_sound(rendered)
 
     root = tmp_path / f"pages-{scheme}"
     root.mkdir()

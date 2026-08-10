@@ -2345,11 +2345,19 @@ def test_the_column_templates_are_the_designs(
     fix = _seed(cfg)
 
     declared = _column_templates(CSS_PATH.read_text())
-    assert set(declared) == set(BRIEF_TRACKS), (
-        f"the stylesheet declares column templates for {sorted(declared)}; FR-9 names "
-        f"{sorted(BRIEF_TRACKS)}"
+    # Spec 0030 FR-17 adds eleven more `.cols-*` templates, so this is no
+    # longer an equality: the census of *which* templates the stylesheet may
+    # declare moves to `test_web_design_shell.test_the_column_templates_are_the_designs`,
+    # which owns all fourteen. What stays here is spec 0028 FR-9's own
+    # requirement -- these three, in the `minmax(0, …)` form, with the brief's
+    # ratios -- which is what this test was written for.
+    assert set(BRIEF_TRACKS) <= set(declared), (
+        f"the stylesheet declares column templates for {sorted(declared)}; spec 0028 "
+        f"FR-9 names {sorted(BRIEF_TRACKS)} and one of them is gone"
     )
-    for name, tracks in sorted(declared.items()):
+    for name, tracks in sorted(
+        (name, tracks) for name, tracks in declared.items() if name in BRIEF_TRACKS
+    ):
         expected = BRIEF_TRACKS[name]
         assert len(tracks) == len(expected), f".{name} has {len(tracks)} tracks: {tracks}"
         bare = [track for track in tracks if not re.fullmatch(r"minmax\(\s*0(px)?\s*,.*\)", track)]

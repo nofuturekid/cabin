@@ -36,7 +36,7 @@ from httpx2 import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_web_design_shell import class_selectors
-from test_web_layout import _populate, page_paths, render_pages
+from test_web_layout import _populate, all_pages
 
 from cabin import audit
 from cabin.api_tokens import create_token
@@ -1221,8 +1221,11 @@ def test_stylesheet_and_templates_agree_in_both_directions(client: TestClient, c
         assert "inline-form" not in text, f"{name} still uses .inline-form"
 
     cert_path = _populate(client, cfg, second_issuer=True)
-    pages = render_pages(client, page_paths(cfg, cert_path))
-    assert len(pages) >= 19, f"the agreement test is looking at {len(pages)} screens"
+    # spec 0030 AC-17: the full page list, now including `/login`, `/setup`
+    # and a refused render -- three screens whose classes this test has never
+    # seen -- and with no addition to the `tag-*` exemption list below.
+    pages = all_pages(client, cfg, cert_path)
+    assert len(pages) >= 23, f"the agreement test is looking at {len(pages)} screens"
 
     defined = class_selectors(css_text)
     rendered: set[str] = set()

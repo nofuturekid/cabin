@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import dom
 import grant_fixtures
 import pytest
 from cryptography import x509
@@ -21,13 +22,14 @@ from sqlalchemy.orm import Session
 from cabin import audit
 from cabin.api_tokens import create_token
 from cabin.app import create_app
-from cabin.audit import AuditAction, AuditEvent
+from cabin.audit import ACTION_FILTERS, ACTOR_KIND_FILTERS, AuditAction, AuditEvent
 from cabin.ca import service as ca_service
 from cabin.ca.x509 import create_intermediate, create_root
 from cabin.config import Config
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
 from cabin.users import Role
+from cabin.web import audit_ui
 
 SUPERADMIN_PASSWORD = "correcthorse1"
 USER_PASSWORD = "whatever12345"
@@ -813,8 +815,15 @@ def test_audit_list_filters(client: TestClient, cfg: Config) -> None:
     assert "filter.lan" in only_issued
     assert created not in only_issued
 
+    # spec 0030 FR-12 re-points the actor_kind half of spec 0009 FR-6 from the
+    # `<select>` to the `.pill` links. What it asserts about the *rows* is
+    # unchanged; the `action` half below is deliberately not re-pointed,
+    # which is what keeps "one of the three becomes pills" honest.
     by_kind = client.get("/audit", params={"actor_kind": "system"}).text
     assert issued not in by_kind
+    assert "system" in _pill_labels(by_kind), (
+        f"the actor_kind filter does not offer `system` as a pill: {_pill_labels(by_kind)}"
+    )
 
     by_q = client.get("/audit", params={"q": "filter.lan"}).text
     assert "filter.lan" in by_q
@@ -830,6 +839,96 @@ def test_audit_list_filters(client: TestClient, cfg: Config) -> None:
     unknown = client.get("/audit", params={"action": "nonsense", "actor_kind": "nonsense"})
     assert unknown.status_code == 200
     assert issued in unknown.text
+
+
+# === spec 0030 AC-12: the audit pills are links that carry the other
+# filters =================================================================
+
+
+def _pills(html: str) -> list[dom.Node]:
+    return dom.parse(html).find_all(cls="pill")
+
+
+def _pill_labels(html: str) -> list[str]:
+    return [node.text() for node in _pills(html)]
+
+
+def test_the_audit_pills_carry_the_other_filters(client: TestClient, cfg: Config) -> None:
+    """AC-12, four clauses plus the no-JavaScript half.
+
+    Clause 2 is the one that bites: each pill's `href` is
+    `audit_ui._page_url(q, action, kind, 1)`, the function the pager already
+    uses. Pills that dropped the action filter would make every one of them
+    a reset disguised as a narrowing -- the page would still answer 200, the
+    rows would still be audit rows, and nothing else here would notice.
+
+    Clause 4 is the other half of FR-12's own claim: exactly one of the
+    three controls becomes pills. If the `action` `<select>` went too, the
+    page would grow a wall of one option per `AuditAction`, which is a
+    two-figure list that grows with every spec.
+    """
+    _setup_superadmin(client)
+    _create_ca(client, cfg)
+    _issue(client, cfg, "pills.lan")
+
+    page = client.get("/audit", params={"q": "cabin", "action": "ca_renewed", "actor_kind": "api"})
+    assert page.status_code == 200
+
+    pills = _pills(page.text)
+    assert [node.text() for node in pills] == [str(value) for value in ACTOR_KIND_FILTERS], (
+        f"the pills are {[node.text() for node in pills]}; FR-12 renders one per "
+        f"ACTOR_KIND_FILTERS value, which is the five the design names"
+    )
+    assert all(node.tag == "a" for node in pills), (
+        f"a pill is not an anchor: {[node.tag for node in pills]}. Nothing in this "
+        f"spec is a control that mutates on change"
+    )
+    assert [node for node in pills if node.tag == "button"] == []
+    for kind, pill in zip(ACTOR_KIND_FILTERS, pills, strict=True):
+        expected = audit_ui._page_url("cabin", "ca_renewed", str(kind), 1)
+        assert pill.get("href") == expected, (
+            f"the {kind} pill points at {pill.get('href')!r}, not at "
+            f"`_page_url('cabin', 'ca_renewed', {str(kind)!r}, 1)` = {expected!r} -- "
+            f"it drops the search text or the action filter"
+        )
+        assert pill.get("hx-get") == expected
+        assert pill.get("hx-select") == "#audit-log"
+        assert pill.get("hx-target") == "#audit-log"
+
+    on = [node.text() for node in pills if "pill-on" in node.classes]
+    assert on == ["api"], f"`pill-on` is on {on}; exactly one pill carries it"
+
+    tree = dom.parse(page.text)
+    regions = [node for node in tree.walk() if node.get("id") == "audit-log"]
+    assert len(regions) == 1, f"the page has {len(regions)} elements with id=audit-log"
+
+    form = [node for node in tree.find_all(tag="form") if node.get("action") == "/audit"]
+    assert len(form) == 1, "the audit page's GET form moved"
+    selects = form[0].find_all(tag="select")
+    assert [node.get("name") for node in selects] == ["action"], (
+        f"the GET form holds {[node.get('name') for node in selects]}; FR-12 turns "
+        f"exactly one of the three controls into pills and leaves `action` a select"
+    )
+    options = [node.text() for node in selects[0].find_all(tag="option")]
+    assert options == [str(value) for value in ACTION_FILTERS], (
+        f"the action select offers {len(options)} options, not one per ACTION_FILTERS"
+    )
+    assert form[0].find_all(tag="button"), "the GET form lost its submit"
+
+    # --- and following a pill works with no htmx at all
+    mcp_pill = next(node for node in pills if node.text() == "mcp")
+    followed = client.get(mcp_pill.get("href") or "")
+    assert followed.status_code == 200, f"following a pill -> {followed.status_code}"
+    assert [node.text() for node in _pills(followed.text) if "pill-on" in node.classes] == ["mcp"]
+    followed_tree = dom.parse(followed.text)
+    selected = [
+        node.text()
+        for node in followed_tree.find_all(tag="option")
+        if node.get("selected") is not None
+    ]
+    assert "ca_renewed" in selected, (
+        f"following a pill lost the action filter; the selected options are {selected}"
+    )
 
 
 def test_audit_pagination(client: TestClient, cfg: Config) -> None:

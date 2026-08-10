@@ -65,6 +65,7 @@ from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import probes
 import pytest
@@ -87,10 +88,11 @@ from test_web_design_shell import css_rules, declarations
 
 from cabin import audit
 from cabin.app import create_app
-from cabin.audit import AuditEvent
+from cabin.audit import ACTOR_KIND_FILTERS, AuditEvent
 from cabin.ca import certs as ca_certs
 from cabin.ca import leaf as leaf_mod
 from cabin.ca import service as ca_service
+from cabin.ca.certs import STATUS_FILTERS as certs_STATUS_FILTERS
 from cabin.ca.certs import Certificate
 from cabin.ca.service import CACertificate
 from cabin.config import Config
@@ -98,6 +100,7 @@ from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
 from cabin.users import User
+from cabin.web import audit_ui, certs_ui
 
 REPO = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = REPO / "src/cabin/web/templates"
@@ -596,25 +599,130 @@ def _hx_attributes() -> list[tuple[str, str, str]]:
     return found
 
 
-def _hx_targets(root_id: int) -> set[tuple[str, str]]:
-    """`(method, url)` for every `hx-get`/`hx-post` in every template, with
-    the one interpolation these templates carry resolved to a real id.
+def _hx_targets(root_id: int) -> tuple[set[tuple[str, str]], int]:
+    """`(method, url)` for every literal `hx-get`/`hx-post` in the templates,
+    plus how many were skipped because they are interpolated.
 
-    An unresolved `{{ ... }}` fails loudly rather than being requested as a
-    literal, because a URL nobody can request is a URL AC-1 would silently
-    stop covering.
+    Spec 0030 changes what this can do. Half of that spec's targets are
+    built out of a value -- `/users?edit={{ row.id }}`, `_page_url`'s output
+    -- and a URL still containing `{{` cannot be fetched. The old form
+    asserted loudly on any unresolved interpolation, which was right while
+    the one interpolation in the templates was `{{ root.id }}`; with
+    interpolated targets now the normal case, what it does instead is skip
+    them here and **count what it skipped**, so that a build in which every
+    target is unresolvable is distinguishable from one in which there are
+    none. The resolved ones come off the rendered pages (`_rendered_hx_targets`).
     """
     targets = set()
-    for name, attribute, value in _hx_attributes():
+    skipped = 0
+    for _name, attribute, value in _hx_attributes():
         if attribute not in {"hx-get", "hx-post"}:
             continue
         url = re.sub(r"{{\s*root\.id\s*}}", str(root_id), value)
-        assert "{{" not in url and "{%" not in url, (
-            f"{name} carries {attribute}={value!r}, whose interpolation this test "
-            f"cannot resolve to a URL -- it would drop out of AC-1's coverage"
-        )
+        if "{{" in url or "{%" in url:
+            skipped += 1
+            continue
         targets.add(("GET" if attribute == "hx-get" else "POST", url))
-    return targets
+    return targets, skipped
+
+
+_RENDERED_HX_RE = re.compile(r'\shx-(get|post)="([^"]*)"')
+
+
+def _rendered_hx_targets(pages: dict[str, str]) -> set[tuple[str, str]]:
+    """`(method, url)` for every `hx-get`/`hx-post` on a *rendered* page.
+
+    This is the half spec 0030 adds. A target the templates carry as
+    `/users?edit={{ row.id }}` is a real URL only once a row exists, and the
+    walker has to fetch the URL the browser would -- so it collects from the
+    nineteen screens as well as from the files, and the union is what AC-1's
+    "every htmx target answers a full page" is asserted over.
+    """
+    found = set()
+    for html in pages.values():
+        for method, url in _RENDERED_HX_RE.findall(html):
+            assert "{{" not in url and "{%" not in url, (
+                f"a rendered page carries an unresolved interpolation in an hx- attribute: {url!r}"
+            )
+            found.add(("GET" if method == "get" else "POST", unescape(url)))
+    return found
+
+
+#: Every query parameter an htmx target may carry. Spec 0030's Interface
+#: Contract adds exactly one to what already existed -- `edit` on
+#: `GET /users` -- and a target carrying anything else is a new endpoint
+#: wearing a query string.
+KNOWN_QUERY_PARAMETERS = {"q", "status", "page", "action", "actor_kind", "add", "edit"}
+
+#: The screens that carry spec 0030's interpolated targets. Rendered rather
+#: than read, because `/users?edit={{ row.id }}` and `_page_url`'s output are
+#: only URLs once there are rows.
+SPEC_0030_SCREENS = ("/users", "/certs", "/audit")
+
+
+def _flatten_routes(routes: Any) -> list[Any]:
+    """Every real route, walking FastAPI's `_IncludedRouter` wrappers --
+    `app.routes` holds one per `include_router` call rather than the routes
+    themselves in this version."""
+    out: list[Any] = []
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            out.extend(_flatten_routes(inner.routes))
+        else:
+            out.append(route)
+    return out
+
+
+def _rendered_screens(client: TestClient, cfg: Config, fix: Fixture) -> dict[str, str]:
+    """The pages whose htmx targets are interpolated, plus the two spec 0029
+    disclosures' own page.
+
+    Asserted to carry **no** flash panel: a popped message is a difference
+    between two otherwise identical responses, and the byte-identical clause
+    below would then be comparing the response that had it against the one
+    that did not.
+    """
+    paths = [*SPEC_0030_SCREENS, f"/ca/{fix.alpha_root}", "/certs/new", "/certs/sign", "/ca/new"]
+    pages = {}
+    for path in paths:
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        assert 'class="flash' not in resp.text, (
+            f"{path} carries a pending flash. This fixture seeds through the database "
+            f"and one HTTP POST that records nothing, so nothing should have written "
+            f"one -- and a popped message would make two otherwise identical "
+            f"responses differ"
+        )
+        pages[path] = resp.text
+    return pages
+
+
+def _expected_targets(cfg: Config, fix: Fixture) -> set[tuple[str, str]]:
+    """The targets specs 0029 and 0030 require, derived rather than listed.
+
+    Derived from the same functions the pages build their links with
+    (`certs_ui._page_url`, `audit_ui._page_url`) and from the fixture's own
+    rows, so that a filter link that quietly dropped a parameter shows up
+    here as a missing target rather than as a different string nobody
+    compared.
+    """
+    expected = {("POST", url) for url in PREVIEWS} | {
+        ("GET", f"/ca/{fix.alpha_root}?add=intermediate"),
+        ("GET", f"/ca/{fix.alpha_root}?add=cross-sign"),
+    }
+    db = _db(cfg)
+    try:
+        user_ids = [row.id for row in db.scalars(select(User).order_by(User.id))]
+    finally:
+        db.close()
+    assert user_ids, "the fixture has no user, so the row-edit target has no id"
+    expected |= {("GET", f"/users?edit={user_id}") for user_id in user_ids}
+    expected |= {("GET", certs_ui._page_url("", str(status), 1)) for status in certs_STATUS_FILTERS}
+    expected |= {
+        ("GET", audit_ui._page_url("", "all", str(kind), 1)) for kind in ACTOR_KIND_FILTERS
+    }
+    return expected
 
 
 def _request(
@@ -685,21 +793,51 @@ def test_every_hx_target_answers_a_full_page(client: TestClient, cfg: Config) ->
     _setup_superadmin(client)
     fix = _seed(cfg)
 
-    targets = _hx_targets(fix.alpha_root)
-    expected = {("POST", url) for url in PREVIEWS} | {
-        ("GET", f"/ca/{fix.alpha_root}?add=intermediate"),
-        ("GET", f"/ca/{fix.alpha_root}?add=cross-sign"),
-    }
+    literal, skipped = _hx_targets(fix.alpha_root)
+    pages = _rendered_screens(client, cfg, fix)
+    resolved = _rendered_hx_targets(pages)
+    targets = literal | resolved
+
     assert targets, (
         "no template carries an hx-get or hx-post attribute at all, so this test "
         "found nothing and would pass by finding nothing (AC-1)"
     )
-    assert targets == expected, (
-        f"the set of hx- targets is not the set this spec introduces. FR-2 clause 2 "
-        f"admits no endpoint beyond FR-3's four previews and FR-13's two "
-        f"disclosures.\n  missing: {sorted(expected - targets)}\n  extra: "
-        f"{sorted(targets - expected)}"
+    assert skipped == 0 or resolved, (
+        f"{skipped} hx- target(s) in the templates are interpolated and not one of "
+        f"them was resolved off a rendered page, so every one of them dropped out of "
+        f"this test's coverage. That is the state spec 0030's walker counts skips to "
+        f"make visible"
     )
+    expected = _expected_targets(cfg, fix)
+    assert expected <= targets, (
+        f"these htmx targets are required by spec 0029 FR-2 and spec 0030 FR-10, "
+        f"FR-11 and FR-12 and no template carries one. Spec 0030's corrected "
+        f"Strengthened entry asks for a derived lower bound rather than an exact "
+        f"number: FR-10 gives the inventory's five links their `hx-` attributes and "
+        f"FR-15 leaves open whether the inventory export's five carry them too, so "
+        f"no exact number is derivable from anything the spec says. The bound plus "
+        f"the no-new-endpoint check below is FR-20 clause 1 measured instead.\n  "
+        f"missing: {sorted(expected - targets)}"
+    )
+    assert len(targets) >= len(expected) > 0, (targets, expected)
+
+    # FR-20 clause 1: htmx adds no endpoint and no query parameter but `edit`.
+    known_paths = {
+        getattr(route, "path", None)
+        for route in _flatten_routes(client.app.routes)  # type: ignore[attr-defined]
+    }
+    for method, url in sorted(targets):
+        parsed = urlparse(url)
+        assert parsed.path in known_paths, (
+            f"{method} {parsed.path} is not a route this application already has. "
+            f"'Every htmx target is a URL that also works as a page' (ADR-0003) and "
+            f"spec 0030 FR-20 adds no endpoint at all"
+        )
+        strays = set(parse_qs(parsed.query)) - KNOWN_QUERY_PARAMETERS
+        assert strays == set(), (
+            f"{method} {url} carries the query parameter(s) {sorted(strays)}. The "
+            f"Interface Contract adds exactly one, `edit` on GET /users"
+        )
 
     for method, url in sorted(targets):
         data = _payload(url, fix, cfg, client) if method == "POST" else None

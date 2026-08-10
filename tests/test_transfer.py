@@ -16,6 +16,7 @@ both import forms on one page.
 
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
+from cabin.ca import certs as certs_service
 from cabin.ca import service as ca_service
 from cabin.ca import x509 as ca_x509
 from cabin.config import Config
@@ -200,13 +202,189 @@ def test_transfer_pages_mark_their_rail_entries(client: TestClient, cfg: Config)
 
 
 def test_rail_has_sixteen_entries_and_a_transfer_group(client: TestClient, cfg: Config) -> None:
+    """Spec 0025 AC-1, re-pointed by spec 0030 FR-7.
+
+    The requirement is unchanged and is the whole of what 0025 AC-1
+    measures: the five transfer pages have five rail entries and the rail
+    has sixteen. What moves is the label of the fourth group and which of
+    the five entries sit in it -- and they move *together*, because either
+    half alone names a group for what it is not (`Export` whose first two
+    entries are `Import a CA` and `Import a cross certificate`). The
+    membership assertion is AC-7 clause 1's and lives in
+    `test_the_rail_group_moved_and_the_badge_is_absent_at_zero`; what is
+    kept here is the count and the departed path.
+    """
     _setup_superadmin(client)
     html = client.get("/").text
 
-    assert "Transfer" in _nav_group_labels(html)
+    assert "Export" in _nav_group_labels(html), (
+        f"the rail's fourth group is not labelled `Export`: {_nav_group_labels(html)}. "
+        f"Spec 0030 FR-19 renames it and FR-7 moves the two imports out of it"
+    )
+    assert "Transfer" not in _nav_group_labels(html)
     hrefs = _nav_hrefs(html)
     assert len(hrefs) == 16, hrefs
     assert "/ca/import" not in hrefs
+
+
+# === spec 0030 AC-7: the rail's fourth group, and a badge absent at zero ====
+
+#: FR-7: the count stays sixteen, every href stays and no link's label
+#: changes -- only which group two of them sit in. Both are asserted, so a
+#: build that moved the membership by dropping an entry fails.
+RAIL_GROUPS = ["Overview", "Certificate authority", "Certificates", "Export", "Access"]
+
+RAIL_LINKS = [
+    ("/", "Dashboard"),
+    ("/ca", "Hierarchies"),
+    ("/ca/new", "Create"),
+    ("/transfer/ca-import", "Import a CA"),
+    ("/transfer/cross-import", "Import a cross certificate"),
+    ("/certs", "Inventory"),
+    ("/certs/new", "Issue"),
+    ("/certs/sign", "Sign a CSR"),
+    ("/transfer/trust-bundle", "Trust bundle"),
+    ("/transfer/ca-key", "CA key"),
+    ("/transfer/inventory", "Inventory export"),
+    ("/acme/admin", "ACME"),
+    ("/tokens", "API tokens"),
+    ("/users", "Users"),
+    ("/audit", "Audit log"),
+    ("/settings", "Settings"),
+]
+
+_NAV_ITEM_RE = re.compile(
+    r'<span class="nav-group">([^<]+)</span>|<a href="([^"]*)"[^>]*>(.*?)</a>', re.S
+)
+
+
+def _nav_items(html: str) -> list[tuple[str, str, str]]:
+    """The rail's contents in document order as ``(kind, href, label)``.
+
+    Groups and links in one sequence, because AC-7's claim is about
+    *position*: the two imports have to land between the second heading and
+    the third, and a test that only counted hrefs could not tell a moved
+    entry from an unmoved one.
+    """
+    items: list[tuple[str, str, str]] = []
+    for group, href, label in _NAV_ITEM_RE.findall(_nav_html(html)):
+        if group:
+            items.append(("group", "", group.strip()))
+        else:
+            # The count badge lives inside the Inventory link (FR-7) and is
+            # not part of that link's label; it has its own criterion below.
+            without_badge = re.sub(r'<span class="nav-count">.*?</span>', "", label, flags=re.S)
+            items.append(("link", href, re.sub(r"<[^>]*>", "", without_badge).strip()))
+    return items
+
+
+def _group_of(items: list[tuple[str, str, str]], href: str) -> str:
+    current = ""
+    for kind, item_href, label in items:
+        if kind == "group":
+            current = label
+        elif item_href == href:
+            return current
+    raise AssertionError(f"the rail carries no link to {href}")
+
+
+def test_the_rail_group_moved_and_the_badge_is_absent_at_zero(
+    client: TestClient, cfg: Config
+) -> None:
+    """AC-7, both halves.
+
+    _Supersedes spec 0025 AC-1's `Transfer` rail group._ The operator was
+    asked whether the design's grouping should override 0025's own decision
+    -- 0025 put the two imports and the three exports in one group of five --
+    and chose the design: `Export` holds the trust bundle, the CA key and
+    the inventory export, and the two imports join `Certificate authority`.
+
+    The badge's half is here rather than in a test of its own because the
+    two failures are opposite: a build that renames the label without moving
+    the membership fails clause 1, and a build that renders the badge
+    unconditionally fails clause 2 only at zero.
+    """
+    _setup_superadmin(client)
+    items = _nav_items(client.get("/").text)
+
+    assert [label for kind, _href, label in items if kind == "group"] == RAIL_GROUPS, (
+        f"the rail's group headings are {[label for kind, _h, label in items if kind == 'group']}"
+    )
+    assert [(href, label) for kind, href, label in items if kind == "link"] == RAIL_LINKS, (
+        f"the rail's sixteen entries are not the sixteen they are today, in the "
+        f"design's order. FR-7 moves two of them between groups and changes no "
+        f"href and no label: "
+        f"{[(h, label) for kind, h, label in items if kind == 'link']}"
+    )
+    for href in ("/transfer/ca-import", "/transfer/cross-import"):
+        assert _group_of(items, href) == "Certificate authority", (
+            f"{href} is still under {_group_of(items, href)!r}. The design puts "
+            f"Import CA and Import Cross Certificate under the authorities group"
+        )
+    for href in ("/transfer/trust-bundle", "/transfer/ca-key", "/transfer/inventory"):
+        assert _group_of(items, href) == "Export", (
+            f"{href} is under {_group_of(items, href)!r}, not `Export`"
+        )
+
+    # --- the count badge, at one and at zero
+    db = _db(cfg)
+    try:
+        issuer = ca_fixtures.sole_active_issuer(db, "badge")
+        ca_fixtures.insert_cert(db, issuer_id=issuer, cn="soon.lan", expires_in=timedelta(days=5))
+        ca_fixtures.insert_cert(db, issuer_id=issuer, cn="fine.lan", expires_in=timedelta(days=300))
+        expected = certs_service.status_counts(db, datetime.now(UTC))["expiring"]
+    finally:
+        db.close()
+    assert expected == 1, f"the fixture produced {expected} expiring certificates, not one"
+
+    badges = _nav_count_badges(client.get("/").text)
+    assert len(badges) == 1, (
+        f"the rail carries {len(badges)} `.nav-count` badge(s) with one certificate "
+        f"expiring; FR-7 puts exactly one, on the Inventory entry"
+    )
+    href, text = badges[0]
+    assert href == "/certs", f"the badge sits on {href!r}, not on the Inventory entry"
+    assert text == str(expected), (
+        f"the badge reads {text!r} and `status_counts(db, now)['expiring']` is "
+        f"{expected} -- the badge and the dashboard's tile must not show two "
+        f"different numbers"
+    )
+
+
+def test_the_badge_is_absent_rather_than_zero(client: TestClient, cfg: Config) -> None:
+    """AC-7 clause 2's other half, on its own instance.
+
+    A second instance rather than a second request: "at zero the element is
+    absent" cannot be measured on a database that has already been given an
+    expiring certificate, and revoking one back out would leave a `revoked`
+    row whose absence from the count is a different fact.
+    """
+    _setup_superadmin(client)
+    db = _db(cfg)
+    try:
+        issuer = ca_fixtures.sole_active_issuer(db, "quiet")
+        ca_fixtures.insert_cert(db, issuer_id=issuer, cn="fine.lan", expires_in=timedelta(days=300))
+        assert certs_service.status_counts(db, datetime.now(UTC))["expiring"] == 0
+    finally:
+        db.close()
+
+    badges = _nav_count_badges(client.get("/").text)
+    assert badges == [], (
+        f"the rail renders a count badge with nothing expiring: {badges}. The "
+        f"design draws it 'only when > 0' and a badge reading zero is a decoration "
+        f"that says nothing"
+    )
+
+
+def _nav_count_badges(html: str) -> list[tuple[str, str]]:
+    """``(the href of the entry it sits in, its text)`` for every
+    `.nav-count` in the rail -- scoped to the entry, so "the badge is on
+    Inventory" is measured rather than "a badge is somewhere"."""
+    found = []
+    for href, inner in re.findall(r'<a href="([^"]*)"[^>]*>(.*?)</a>', _nav_html(html), re.S):
+        for badge in re.findall(r'<span class="nav-count">(.*?)</span>', inner, re.S):
+            found.append((href, re.sub(r"<[^>]*>", "", badge).strip()))
+    return found
 
 
 # === AC-2: role gating, both directions, one test ===========================

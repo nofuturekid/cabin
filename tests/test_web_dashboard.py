@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ca_fixtures
+import dom
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -30,6 +31,7 @@ from cabin.config import Config
 from cabin.secrets import SecretStore
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
+from cabin.web.ui import _ca_expiry
 
 
 @pytest.fixture
@@ -416,6 +418,179 @@ def test_dashboard_retired_issuer_only_flagged_when_expired(
     assert "tag-bad" in expired_window
 
 
+# === spec 0030 AC-8: the authorities block is the grouped list ============
+
+
+def _authorities_rows(html: str) -> list[dom.Node]:
+    """The `<tr>` elements of the dashboard's authorities list.
+
+    Scoped by the `cols-authorities` class the table carries (spec 0030
+    FR-17), not by splitting the page on the heading: FR-8 keeps the heading
+    (`The CA itself` is not in FR-19's exception table) but replaces the flat
+    table under it, and a window measured in characters cannot tell a
+    grouped list from a flat one.
+    """
+    tree = dom.parse(html)
+    tables = [node for node in tree.find_all(tag="table") if "cols-authorities" in node.classes]
+    assert len(tables) == 1, (
+        f"the dashboard carries {len(tables)} table(s) with `cols-authorities`; "
+        f"FR-8/FR-17 give the authorities block exactly one"
+    )
+    bodies = tables[0].find_all(tag="tbody")
+    assert len(bodies) == 1
+    return [node for node in bodies[0].children if node.tag == "tr"]
+
+
+def test_the_dashboard_authorities_block_is_the_grouped_list(
+    client: TestClient, cfg: Config
+) -> None:
+    """AC-8, four clauses.
+
+    Clause 1 is spec 0017 FR-14's requirement measured against the database
+    rather than against a literal: one entry per `ca_certificates` row, so
+    that no CA certificate's expiry warning can go missing. It is also what
+    catches the shape this change would take if the block were built by
+    filtering for `kind == "root"` and hanging children off it -- a cross
+    row has no root to hang under and would silently disappear.
+
+    Clause 4 is the other half: the grouped list is *reused* (spec 0028
+    FR-5's component), not written a second time under new names, so each of
+    its class names has exactly one rule block in `cabin.css`.
+    """
+    _superadmin(client)
+    _create_ca(client, cfg, name="alpha")
+    _create_ca(client, cfg, name="beta")
+    alpha_root = _root_id_named(cfg, "alpha Root CA")
+    beta_root = _root_id_named(cfg, "beta Root CA")
+    assert (
+        client.post(
+            f"/ca/{alpha_root}/intermediate",
+            data={
+                "name": "alpha Second Intermediate CA",
+                "key_type": "ecdsa-p256",
+                "years": 10,
+                "csrf_token": _csrf(client, cfg),
+            },
+        ).status_code
+        == 303
+    )
+    cross = client.post(
+        f"/ca/{beta_root}/cross-sign",
+        data={"signing_root_id": alpha_root, "years": 5, "csrf_token": _csrf(client, cfg)},
+    )
+    assert cross.status_code == 303, cross.text
+
+    page = client.get("/")
+    assert page.status_code == 200
+    rows = _authorities_rows(page.text)
+
+    db = _db(cfg)
+    try:
+        ca_rows = list(db.scalars(select(CACertificate).order_by(CACertificate.id)))
+        expected_expiry = {
+            row.id: _ca_expiry(row, datetime.now(UTC))["not_after"] for row in ca_rows
+        }
+        kinds = {row.id: row.kind for row in ca_rows}
+        names = {row.name: row.id for row in ca_rows}
+    finally:
+        db.close()
+
+    assert len(rows) == len(ca_rows), (
+        f"the authorities block draws {len(rows)} rows and `ca_certificates` holds "
+        f"{len(ca_rows)}. Spec 0017 FR-14 makes it one entry per row so that no CA "
+        f"certificate's expiry warning can go missing, and a cross row is the one "
+        f"a grouped list built by filtering for roots would drop"
+    )
+
+    # clause 2: roots at root level, their intermediates immediately under
+    # them, and the cross row at root level with its own kind tag
+    seen_root: str | None = None
+    for index, row in enumerate(rows):
+        kind_classes = {"row-root", "row-child"} & row.classes
+        assert len(kind_classes) == 1, (
+            f"row {index} carries {sorted(row.classes)}; spec 0028 FR-5's grouped "
+            f"list marks every row either `row-root` or `row-child`"
+        )
+        label = row.children[0].text()
+        if "row-root" in kind_classes:
+            seen_root = label
+        else:
+            assert seen_root is not None, f"row {index} is a child before any root"
+
+    by_name = {row.children[0].text(): row for row in rows}
+    for name, row_id in names.items():
+        matching = [label for label in by_name if name in label]
+        assert matching, f"the authorities block does not name {name!r}: {sorted(by_name)}"
+        row = by_name[matching[0]]
+        expected_kind = "row-child" if kinds[row_id] == "intermediate" else "row-root"
+        assert expected_kind in row.classes, (
+            f"{name} ({kinds[row_id]}) is a {sorted(row.classes)} row, not {expected_kind}. "
+            f"Spec 0028 FR-5 refuses to indent a cross row under a root, because a "
+            f"cross row's name equals its subject root's"
+        )
+        if kinds[row_id] == "cross":
+            assert "cross" in row.text().split(), (
+                f"the cross row carries no `cross` kind tag: {row.text()!r}"
+            )
+        # clause 3: the expiry the row prints is the expiry `_ca_expiry` computes
+        assert expected_expiry[row_id] in row.text(), (
+            f"{name}'s row prints {row.text()!r}, which does not carry "
+            f"{expected_expiry[row_id]!r} -- the number the dashboard prints for a "
+            f"row is the number it prints today"
+        )
+
+    # clause 4: reused, not re-implemented
+    css = CSS.read_text()
+    for name in ("row-root", "row-child", "tree", "state-active", "state-retired", "rowlink"):
+        blocks = [
+            selector
+            for selector, _body in _css_rules(css)
+            if re.search(rf"\.{name}(?![\w-])", selector)
+        ]
+        assert len(blocks) == 1, (
+            f".{name} is the subject of {len(blocks)} rule blocks in cabin.css: "
+            f"{blocks}. FR-9 reuses spec 0028's grouped list; a second rule for one "
+            f"of its names is the component written twice"
+        )
+
+
+def _root_id_named(cfg: Config, name: str) -> int:
+    db = _db(cfg)
+    try:
+        return int(db.scalars(select(CACertificate).where(CACertificate.name == name)).one().id)
+    finally:
+        db.close()
+
+
+def _css_rules(text: str) -> list[tuple[str, str]]:
+    """Every rule as `(selector, body)`, at-rules flattened."""
+    rules: list[tuple[str, str]] = []
+
+    def walk(chunk: str) -> None:
+        depth = 0
+        start = 0
+        selector = ""
+        body_start = 0
+        for index, char in enumerate(chunk):
+            if char == "{":
+                if depth == 0:
+                    selector = chunk[start:index].strip()
+                    body_start = index + 1
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    body = chunk[body_start:index]
+                    if selector.startswith("@"):
+                        walk(body)
+                    else:
+                        rules.append((selector, body))
+                    start = index + 1
+
+    walk(re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+    return rules
+
+
 def test_dashboard_lists_one_entry_per_ca_row(client: TestClient, cfg: Config) -> None:
     """FR-14: the dashboard used to show the pair [intermediate, root] of
     "the" hierarchy; now it must show one entry per ca_certificates row --
@@ -424,8 +599,12 @@ def test_dashboard_lists_one_entry_per_ca_row(client: TestClient, cfg: Config) -
     _create_ca(client, cfg, name="alpha")
     _create_ca(client, cfg, name="beta")
 
+    # spec 0030 FR-8/FR-9: the flat `The CA itself` table becomes the grouped
+    # list. The requirement is unchanged -- spec 0016 FR-4 and spec 0017
+    # FR-14: one entry per `ca_certificates` row -- and only the element it is
+    # read out of has moved.
     page = client.get("/").text
-    section = page.split("The CA itself")[1].split("Revocation")[0]
+    section = " ".join(row.text() for row in _authorities_rows(page))
     for name in (
         "alpha Root CA",
         "alpha Intermediate CA",

@@ -7,8 +7,10 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
+import dom
 import grant_fixtures
 import pytest
+import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,7 +29,10 @@ from cabin.settings import (
     ACME_ENABLED,
     ACME_REQUIRE_EAB,
     BASE_URL,
+    DNS_RESOLVERS,
+    MCP_ENABLED,
     get_flag,
+    get_setting,
     set_setting,
 )
 from cabin.store import create_session_factory
@@ -187,6 +192,151 @@ def test_acme_ui_key_lifecycle(client: TestClient, cfg: Config) -> None:
     assert AuditAction.acme_eab_key_revoked in _actions(cfg)
 
 
+# === spec 0030 AC-13: the toggles are checkboxes, and one Save writes
+# every flag the form carries ==============================================
+
+
+def _toggle(html: str, element_id: str) -> dom.Node:
+    tree = dom.parse(html)
+    found = [node for node in tree.walk() if node.get("id") == element_id]
+    assert len(found) == 1, f"the page carries {len(found)} elements with id={element_id!r}"
+    return found[0]
+
+
+def test_one_save_still_writes_both_flags(client: TestClient, cfg: Config) -> None:
+    """AC-13, the case the design's own recommendation would have broken.
+
+    Brief section 9.7 offers two shapes for a toggle switch and recommends
+    the one whose submit button *is* the track. On this page that shape is
+    not merely worse, it is broken: `POST /acme/admin` reads `acme_enabled`
+    and `acme_require_eab` out of one submission and an absent checkbox
+    means off, so a per-toggle button would post the whole form and turning
+    EAB on would turn ACME off.
+
+    Clause 2's second POST is the measurement. It is the behaviour spec 0019
+    already has, and it is what a per-toggle submit button silently breaks --
+    nothing else in the suite posts one of these two flags without the other.
+    """
+    _setup(client, cfg)
+
+    page = client.get(ACME_PAGE)
+    assert page.status_code == 200
+    tree = dom.parse(page.text)
+    forms = [node for node in tree.find_all(tag="form") if node.get("action") == ACME_PAGE]
+    assert len(forms) == 1, (
+        f"the ACME page has {len(forms)} forms posting to {ACME_PAGE}; both flags "
+        f"live in one submission, which is the whole of FR-13's argument"
+    )
+    form = forms[0]
+    submits = [node for node in form.find_all(tag="button") if (node.get("type") or "") == "submit"]
+    assert len(submits) == 1, (
+        f"the settings form carries {len(submits)} submit buttons. A per-toggle "
+        f"button posts this form in full, so pressing one clears the other flag"
+    )
+
+    for element_id in ("acme_enabled", "acme_require_eab"):
+        control = _toggle(page.text, element_id)
+        assert control.tag == "input" and control.get("type") == "checkbox", (
+            f"#{element_id} is a <{control.tag} type={control.get('type')!r}>. FR-13 "
+            f"keeps the real control -- its id, its name, its value and its position "
+            f"in the form it is already in -- and draws it as the design's track"
+        )
+        assert "toggle" in control.classes, (
+            f"#{element_id} does not carry `toggle`: {sorted(control.classes)}"
+        )
+        assert control.get("name") == element_id
+        assert control.get("value") == "on"
+        assert control.closest(tag="form") is form, (
+            f"#{element_id} is not inside the one form that posts to {ACME_PAGE}"
+        )
+
+    # both on
+    both = client.post(
+        ACME_PAGE,
+        data={"acme_enabled": "on", "acme_require_eab": "on", "csrf_token": _csrf(client, cfg)},
+    )
+    assert both.status_code == 303, both.text
+    db = _db(cfg)
+    try:
+        assert get_flag(db, ACME_ENABLED) is True
+        assert get_flag(db, ACME_REQUIRE_EAB) is True
+    finally:
+        db.close()
+
+    # only one of them: the other goes off, which is spec 0019's own behaviour
+    one = client.post(ACME_PAGE, data={"acme_enabled": "on", "csrf_token": _csrf(client, cfg)})
+    assert one.status_code == 303, one.text
+    db = _db(cfg)
+    try:
+        assert get_flag(db, ACME_ENABLED) is True
+        assert get_flag(db, ACME_REQUIRE_EAB) is False, (
+            "a submission without `acme_require_eab` left it on. An absent checkbox "
+            "means off (acme_ui.py:214-218), and that is why a per-toggle submit "
+            "button on this page would turn ACME off when EAB was turned on"
+        )
+    finally:
+        db.close()
+
+
+def test_one_save_still_writes_every_settings_flag(client: TestClient, cfg: Config) -> None:
+    """AC-13 clause 3: the same shape on `/settings`, where seven fields
+    share one wrapping `<form>` (`settings.html:14`).
+
+    The extra half here is the one that has nothing to do with toggles: a
+    POST that changes only `mcp_enabled` must leave `base_url` and
+    `dns_resolvers` exactly as they were. A per-toggle button would post the
+    whole form with those two fields absent and clear them both.
+    """
+    _setup(client, cfg)
+
+    page = client.get("/settings")
+    assert page.status_code == 200
+    tree = dom.parse(page.text)
+    forms = [node for node in tree.find_all(tag="form") if node.get("action") == "/settings"]
+    assert len(forms) == 1, f"/settings has {len(forms)} forms posting to itself"
+    submits = [
+        node for node in forms[0].find_all(tag="button") if (node.get("type") or "") == "submit"
+    ]
+    assert len(submits) == 1, (
+        f"/settings carries {len(submits)} submit buttons; seven fields share one form"
+    )
+    for element_id in ("acme_enabled", "mcp_enabled"):
+        control = _toggle(page.text, element_id)
+        assert control.tag == "input" and control.get("type") == "checkbox", control.attrs
+        assert "toggle" in control.classes, (
+            f"#{element_id} on /settings does not carry `toggle`: {sorted(control.classes)}"
+        )
+        assert control.closest(tag="form") is forms[0]
+
+    db = _db(cfg)
+    try:
+        before_base_url = get_setting(db, BASE_URL)
+        before_resolvers = get_setting(db, DNS_RESOLVERS)
+    finally:
+        db.close()
+    assert before_base_url, "the fixture set no base URL, so this clause measures nothing"
+
+    saved = client.post(
+        "/settings",
+        data={
+            "base_url": before_base_url,
+            "dns_resolvers": before_resolvers or "",
+            "mcp_enabled": "on",
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert saved.status_code == 303, saved.text
+    db = _db(cfg)
+    try:
+        assert get_flag(db, MCP_ENABLED) is True
+        assert get_setting(db, BASE_URL) == before_base_url, (
+            "the base URL changed when only a toggle was saved"
+        )
+        assert get_setting(db, DNS_RESOLVERS) == before_resolvers
+    finally:
+        db.close()
+
+
 def test_acme_page_is_admin_only_and_in_the_nav(client: TestClient, cfg: Config) -> None:
     """FR-5: a viewer is neither offered the page nor allowed onto it."""
     csrf = _setup(client, cfg)
@@ -298,3 +448,60 @@ def test_inventory_shows_acme_source(client: TestClient, cfg: Config) -> None:
     assert client.get("/crl").status_code == 404
     crl = client.get(f"/crl/{issuer_id}")
     assert crl.status_code == 200
+
+
+# === spec 0030 AC-14 clause 4: the EAB secret, the same four clauses ======
+
+
+def test_the_eab_secret_is_stored_nowhere(client: TestClient, cfg: Config) -> None:
+    """AC-14 clause 4. `POST /acme/admin/eab-keys` is the second of FR-3's
+    two named exclusions that render rather than redirect, and it is
+    excluded for the same reason: a flash would put a live credential in a
+    database column in clear text and show it again on the next page load.
+    """
+    _setup(client, cfg)
+    created = client.post(
+        f"{ACME_PAGE}/eab-keys",
+        data={"label": "edge", "issuer_id": _issuer_id(cfg), "csrf_token": _csrf(client, cfg)},
+    )
+    assert created.status_code == 200, (
+        f"POST /acme/admin/eab-keys answered {created.status_code}; it renders the "
+        f"page with the secret shown exactly once and must keep doing so"
+    )
+    assert created.headers["cache-control"] == "no-store"
+
+    tree = dom.parse(created.text)
+    copyable = tree.find_all(cls="copyable")
+    assert copyable, (
+        "the EAB page carries no `.copyable` element. FR-14 names three users for "
+        "it: the API-token secret, the EAB secret and the ACME directory URL"
+    )
+    secrets = [node.text() for node in copyable if _SECRET_RE.fullmatch(node.text())]
+    assert secrets, (
+        f"the one-time EAB secret is not inside a `.copyable`: "
+        f"{[node.text()[:24] for node in copyable]}"
+    )
+    secret = secrets[0]
+
+    db = _db(cfg)
+    try:
+        columns = {column["name"] for column in sa.inspect(db.get_bind()).get_columns("sessions")}
+        if "flash" in columns:
+            stored = [
+                str(value)
+                for (value,) in db.execute(sa.text("SELECT flash FROM sessions")).all()
+                if value is not None
+            ]
+            assert not any(secret in value for value in stored), (
+                "the EAB secret is sitting in a `sessions.flash` column in clear text"
+            )
+        events = db.execute(sa.text("SELECT summary, detail FROM audit_events")).all()
+    finally:
+        db.close()
+    for summary, detail in events:
+        assert secret not in (summary or ""), summary
+        assert secret not in (detail or ""), "the EAB secret leaked into an event's detail"
+
+    again = client.get(ACME_PAGE)
+    assert again.status_code == 200
+    assert secret not in again.text, "the ACME page showed the EAB secret a second time"

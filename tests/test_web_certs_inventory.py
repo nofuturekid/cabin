@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ca_fixtures
+import dom
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -16,12 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cabin.app import create_app
-from cabin.ca.certs import get_certificate
+from cabin.ca.certs import STATUS_FILTERS, get_certificate
 from cabin.ca.service import CACertificate
 from cabin.config import Config
 from cabin.sessions import get_session
 from cabin.store import create_session_factory
-from cabin.web import certs_download_ui
+from cabin.web import certs_download_ui, certs_ui
 
 
 @pytest.fixture
@@ -319,7 +320,13 @@ def test_inventory_revoked_badge_and_filter(client: TestClient, cfg: Config) -> 
     listing = client.get("/certs")
     assert listing.status_code == 200
     assert "tag-revoked" in listing.text
-    assert 'value="revoked"' in listing.text  # the filter offers it
+    # spec 0030 FR-10 re-points this from the `<option value="revoked">` of a
+    # `<select>` to the `.seg` link that replaces it. Spec 0006 FR-2's
+    # requirement is unchanged -- the filter offers `revoked` and narrowing
+    # by it narrows the list -- and only the control has moved.
+    assert "revoked" in _seg_labels(listing.text), (
+        f"the status filter does not offer `revoked`: {_seg_labels(listing.text)}"
+    )
 
     only_revoked = client.get("/certs", params={"status": "revoked"})
     assert "gone.lan" in only_revoked.text
@@ -330,6 +337,177 @@ def test_inventory_revoked_badge_and_filter(client: TestClient, cfg: Config) -> 
     still_valid = client.get("/certs", params={"status": "valid"})
     assert "live.lan" in still_valid.text
     assert "gone.lan" not in still_valid.text
+
+
+# === spec 0030 AC-9/AC-10: the filter bar, the pager and the sort that
+# does not ship ==============================================================
+
+
+def _seg(html: str) -> dom.Node:
+    tree = dom.parse(html)
+    found = tree.find_all(cls="seg")
+    assert len(found) == 1, (
+        f"the page carries {len(found)} `.seg` elements; FR-10 replaces the status "
+        f"`<select>` with exactly one segmented control"
+    )
+    return found[0]
+
+
+def _seg_links(html: str) -> list[dom.Node]:
+    return [node for node in _seg(html).find_all(tag="a")]
+
+
+def _seg_labels(html: str) -> list[str]:
+    return [node.text() for node in _seg_links(html)]
+
+
+def test_the_inventory_filter_is_five_links_that_keep_the_search(
+    client: TestClient, cfg: Config
+) -> None:
+    """AC-9, four clauses plus the no-JavaScript half.
+
+    The clause that matters most is 2: each link's `href` is
+    `certs_ui._page_url(q, status, 1)`, the function the pager already uses,
+    so a filter link and a pager link cannot disagree about what "carry the
+    other parameters through" means. A build whose links drop `q` would
+    silently discard the operator's search on every click, and no other
+    assertion here would see it.
+
+    The second half runs with **no** `HX-Request` header anywhere, because a
+    control with an address is the whole point: FR-10's links are fetched by
+    htmx second and followed by a browser first.
+    """
+    _setup_superadmin(client)
+    _create_ca(client, cfg)
+    _issue(client, cfg, cn="nas.lan")
+    _issue(client, cfg, cn="printer.lan")
+
+    page = client.get("/certs", params={"q": "nas", "status": "valid", "page": 1})
+    assert page.status_code == 200
+
+    links = _seg_links(page.text)
+    assert [node.text() for node in links] == [str(value) for value in STATUS_FILTERS], (
+        f"the segmented control offers {[node.text() for node in links]}; FR-10 "
+        f"renders one link per STATUS_FILTERS entry, in the tuple's order, with the "
+        f"labels those `<option>`s carry today"
+    )
+    for status, link in zip(STATUS_FILTERS, links, strict=True):
+        expected = certs_ui._page_url("nas", str(status), 1)
+        assert link.get("href") == expected, (
+            f"the {status} link points at {link.get('href')!r}, not at "
+            f"`_page_url('nas', {str(status)!r}, 1)` = {expected!r}. Every link has "
+            f"to carry the active search text through and reset to page 1"
+        )
+        assert link.get("hx-get") == expected, (
+            f"the {status} link's hx-get is {link.get('hx-get')!r}, not its own href"
+        )
+        assert link.get("hx-select") == "#inventory", link.get("hx-select")
+        assert link.get("hx-target") == "#inventory", link.get("hx-target")
+
+    on = [link for link in links if "seg-on" in link.classes]
+    assert [link.text() for link in on] == ["valid"], (
+        f"`seg-on` is on {[link.text() for link in on]}; exactly one link carries it "
+        f"and it is the active status"
+    )
+
+    tree = dom.parse(page.text)
+    regions = [node for node in tree.walk() if node.get("id") == "inventory"]
+    assert len(regions) == 1, f"the page has {len(regions)} elements with id=inventory"
+    assert regions[0].find_all(tag="table"), "#inventory does not contain the table"
+    assert regions[0].find_all(cls="pager"), "#inventory does not contain the pager"
+
+    forms = [node for node in tree.find_all(tag="form") if node.get("action") == "/certs"]
+    assert len(forms) == 1, f"the search form moved: {len(forms)} forms post to /certs"
+    assert (forms[0].get("method") or "").lower() == "get"
+    hidden = [
+        node
+        for node in forms[0].find_all(tag="input")
+        if node.get("type") == "hidden" and node.get("name") == "status"
+    ]
+    assert [node.get("value") for node in hidden] == ["valid"], (
+        f"the search form carries {[node.get('value') for node in hidden]} as its "
+        f"hidden status; submitting a search has to keep the filter the way the "
+        f"links keep the search"
+    )
+    assert forms[0].find_all(tag="button"), "the search box lost its submit"
+
+    # --- and all of it works with no htmx at all
+    expired_link = next(link for link in links if link.text() == "expired")
+    followed = client.get(expired_link.get("href") or "")
+    assert followed.status_code == 200, (
+        f"following a filter link answered {followed.status_code}; a `<button>` or a "
+        f"`#`-only anchor has no address to follow without JavaScript"
+    )
+    assert [link.text() for link in _seg_links(followed.text) if "seg-on" in link.classes] == [
+        "expired"
+    ]
+    search = dom.parse(followed.text).find_all(tag="input")
+    assert any(node.get("name") == "q" and node.get("value") == "nas" for node in search), (
+        "following a filter link lost the search text"
+    )
+
+    _bulk_insert(cfg, 51)
+    first = client.get("/certs")
+    assert first.status_code == 200
+    next_link = [
+        node
+        for node in dom.parse(first.text).find(cls="pager").find_all(tag="a")
+        if "Next" in node.text()
+    ]
+    assert len(next_link) == 1, "the pager offers no next page with 51 certificates"
+    second = client.get(next_link[0].get("href") or "")
+    assert second.status_code == 200, f"the pager's Next -> {second.status_code}"
+    assert dom.parse(second.text).find_all(tag="tbody")[0].find_all(tag="tr"), (
+        "the second page rendered no rows"
+    )
+
+
+def test_the_inventory_is_still_newest_first(client: TestClient, cfg: Config) -> None:
+    """AC-10: the page's own lead sentence, and a sort that does not ship.
+
+    The design makes `Common name` and `Valid until` sortable. cabin has no
+    sort at all -- `list_certificates` orders by `created_at desc, id desc`
+    -- and that ordering is the page's own lead sentence. Clause 3 is what
+    catches an implementation that quietly honours a `?sort=` the spec
+    declined: the sentence would then be false in every state but one.
+    """
+    _setup_superadmin(client)
+    _create_ca(client, cfg)
+    for name in ("alpha.lan", "zulu.lan", "mike.lan"):
+        _issue(client, cfg, cn=name)
+
+    page = client.get("/certs")
+    assert page.status_code == 200
+    tree = dom.parse(page.text)
+    leads = [node.text() for node in tree.find_all(cls="sub")]
+    assert "Everything this CA has issued, newest first." in leads, (
+        f"the inventory's lead paragraph is {leads}; wording is out of scope (FR-19) "
+        f"and this sentence is what FR-10 declines a sort control to keep true"
+    )
+
+    linked_headings = [
+        node.text()
+        for node in tree.find_all(tag="th")
+        if node.tag == "th" and (node.find_all(tag="a") or node.get("href"))
+    ]
+    assert linked_headings == [], (
+        f"these column headings are links: {linked_headings}. Sorting does not ship "
+        f"(FR-10) -- it needs a query parameter, a whitelist, a tie-breaker and the "
+        f"same ordering in `export_certificates`"
+    )
+
+    def names(html: str) -> list[str]:
+        body = dom.parse(html).find_all(tag="tbody")
+        if not body:
+            return []
+        return [row.children[0].text() for row in body[0].children if row.tag == "tr"]
+
+    sorted_request = client.get("/certs", params={"sort": "subject_cn", "dir": "asc"})
+    assert sorted_request.status_code == 200
+    assert names(sorted_request.text) == names(page.text), (
+        "`?sort=subject_cn&dir=asc` changed the order of the list, so a sort was "
+        "implemented after all and the page's lead sentence is now false"
+    )
 
 
 # --- FR-4, AC-4: PEM downloads -------------------------------------------------

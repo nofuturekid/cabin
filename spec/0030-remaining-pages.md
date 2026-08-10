@@ -129,11 +129,25 @@ in specs 0023–0029 changes.
 | 5   | 0029 AC-1's "the number this spec introduces"          | FR-20, AC-3 | the target set grows and half of it is interpolated, so the walker collects from rendered pages as well as templates    |
 | 6   | 0016 FR-4's flat per-row CA list on the dashboard      | FR-8      | **not overturned** — every row still appears; only its position changes. Recorded so no reader infers it from row 7     |
 | 7   | 0006's inventory status filter as a `<select>`         | FR-10     | **not overturned** — 0006 requires a `status` filter, not a control; recorded because the `<select>` does disappear     |
+| 8   | 0028 FR-9's census of which `cols-*` classes may exist | FR-17     | eleven more column templates ship, so that census becomes a subset check and the full one moves to AC-16               |
 
 Rows 3, 5 and 6 are not in the plan's list. They surface when the plan
 is checked against 0027's, 0029's and 0016's own text, and a spec that
 shipped them silently would leave two criteria failing and one reader
 wondering.
+
+Row 8 is not in the plan's list either, and it surfaced later than the
+others: **only when the spec was checked against the tests.** Rows 1
+and 2 are the criteria behind two of the three checks this spec breaks
+(`test_the_reserved_classes_are_still_reserved` and
+`test_the_tree_glyph_is_the_only_decoration`) and were argued from the
+start; the third,
+`test_ca_issuer_pages.py::test_the_column_templates_are_the_designs`,
+asserts an equality no requirement here mentions and no reading of
+0028's text predicts. Each of the three now names its test in the
+Re-pointed list, because this table is where a reader checks what will
+break and an entry argued in one requirement and absent from here is an
+entry that reader does not find.
 
 ## User Stories
 
@@ -247,6 +261,27 @@ wondering.
   | `tokens_ui.py`      | `POST /tokens/{id}/issuers`, `/tokens/{id}/revoke`                                                                |
   | `transfer_ui.py`    | `POST /ca/import`, `/ca/cross-import`                                                                             |
   | `acme_ui.py`        | `POST /acme/admin/eab-keys/{id}/revoke`                                                                           |
+
+  > **Confirmed (test-authoring): the rule's precondition holds for all
+  > eighteen, measured rather than assumed.** The rule is "a UI POST
+  > that answers 303 and **records exactly one audit event**", and which
+  > routes satisfy it was a claim about eighteen handlers nobody had
+  > counted. Each was posted once against the fixture, with the
+  > `audit_events` rows before and after: all eighteen answered **303**
+  > and every one of them recorded **exactly one** event — including the
+  > four that had a plausible reason not to (`POST /ca/create` and
+  > `POST /ca/{root_id}/intermediate`, which also write a grant;
+  > `POST /ca/import`, which inserts two `ca_certificates` rows;
+  > `POST /users/{id}/delete`, which also deletes sessions). None of
+  > those side effects is an event.
+  >
+  > Their redirect targets were read off the same eighteen responses and
+  > are the ones FR-1 says are unchanged: `/users` five times, `/ca`
+  > three, `/tokens` twice, `/acme/admin` once, and the six built per
+  > row (`/ca/{root_id}`, `_page_of(row)` twice, `/certs/{id}` three
+  > times). AC-3 clause 2 keeps asserting it, because the check is
+  > cheap and the eighteen call sites are where a redirect target gets
+  > "tidied".
 
   And the exclusions, each for a reason and not by omission:
 
@@ -607,7 +642,26 @@ wondering.
   control.** The design (§5.18) draws five filter pills. cabin's page
   has two `<select>`s and a search box in one GET form, and exactly one
   of the three maps onto the pills: `actor_kind`, whose
-  `ACTOR_KIND_FILTERS` are the five values the design names.
+  `ACTOR_KIND_FILTERS` are five values, which is the shape the design
+  draws.
+
+  > **Correction (test-authoring): five, but not those five.** The
+  > design's pills are `all / ui / api / acme / mcp`; cabin's
+  > `ACTOR_KIND_FILTERS` are `all / user / token / system / acme`. Only
+  > the cardinality matches, and the earlier wording — "the five values
+  > the design names" — would send an implementer looking for `ui` and
+  > `mcp` in an enum that has neither.
+  >
+  > **cabin's five stay, unchanged.** They are `ActorKind`, the column
+  > the audit log actually filters on (spec 0009 FR-1), and they answer
+  > a different question from the design's: the design names the *door*
+  > a request came through, cabin names the *kind of actor* it was
+  > blamed on — `system` is cabin itself with no door at all, and `user`
+  > covers the UI whether the operator came from a browser or not.
+  > Renaming them to match the drawing would be a schema change with a
+  > CHECK constraint behind it and a filter value in every existing
+  > bookmark, to make a chip read differently. Wording is out of scope
+  > (FR-19) and this is more than wording.
 
   - **`actor_kind` becomes `.pill` links**, one per filter value, each
     `href` equal to `_page_url(q, action, that_kind, 1)` — so a pill
@@ -754,16 +808,74 @@ wondering.
   - **Where cabin renders a column the design's set does not have**
     (`.cols-tokens`, `.cols-eab`), the design's tracks stay on the
     columns they name and each extra column takes the share the
-    design gives that *kind* of cell elsewhere: a status chip `.7fr`,
-    a mono timestamp `1fr`, a right-aligned action cell `.6fr`.
+    design gives that *kind* of cell elsewhere: a name or label `1.2fr`,
+    a status chip `.7fr`, a mono timestamp `1fr`, a right-aligned
+    action cell `.6fr`.
   - **Where the design has a column cabin does not**
-    (`.cols-users`: no Email, no Last seen), that track is dropped and
-    the rest keep their shares.
+    (`.cols-users`: no Email), that track is dropped and the rest keep
+    their shares — including onto a column of the same *kind*: cabin's
+    `Created` takes the `.7fr` the design gives `Last seen`, because
+    both are a date and the rule above is about kinds.
   - **Where the design's list is not cabin's list at all**
     (`.cols-audit`'s `Door` chip is cabin's `From` address;
     `.cols-directories` has no §5.15 track list because the design
     draws that block as cards), the tracks are derived from the same
     kinds and the divergence is recorded in the brief's register.
+
+  So that a reader can check the two extended lists rather than trust
+  them, both are mapped out:
+
+  | `.cols-tokens` | Label | Role | Issuers | Status | Created | Last used | Expires | Actions |
+  | -------------- | ----- | ---- | ------- | ------ | ------- | --------- | ------- | ------- |
+  | track          | 1.2fr | .7fr | 1.4fr   | .7fr   | 1fr     | 1fr       | 1fr     | .6fr    |
+  | from           | §5.16 Name | §5.16 Role | §5.16 Grant | chip | §5.16 Created | §5.16 Last used | timestamp | §5.16 Revoke |
+
+  | `.cols-eab` | Label | Issuer | Key ID | Status | Bound account | Created | Actions |
+  | ----------- | ----- | ------ | ------ | ------ | ------------- | ------- | ------- |
+  | track       | 1.2fr | 1.4fr  | 1.2fr  | .7fr   | 1.4fr         | 1fr     | .6fr    |
+  | from        | label | §5.15 Issued for | §5.15 Key id | chip | **divergence** | §5.15 Created | action |
+
+  > **Correction (test-authoring), two entries in this requirement.**
+  >
+  > **`.cols-users` drops one track, not two.** The rule read "no Email,
+  > no Last seen" and the list has five tracks against the design's six,
+  > so only Email's `1.4fr` is gone; `Last seen`'s `.7fr` is what
+  > cabin's `Created` column stands in. The tracks were right and the
+  > sentence describing them was not, which is the worse way round: a
+  > reader following the rule as written arrives at four tracks and a
+  > table that does not line up.
+  >
+  > **And cabin renders one fewer cell than that list has tracks, for a
+  > reader.** `users.html` wraps the `Actions` column in
+  > `{% if can_manage %}`, so a viewer's row has four cells against five
+  > tracks and the last one is empty. That is the existing behaviour and
+  > this spec does not change it — FR-11 keeps `can_manage` gating every
+  > control — but a track list is a claim about a row, and the claim is
+  > only true for a superadmin. Named rather than fixed: making the
+  > track set depend on the role is a second `cols-*` class for one
+  > empty column, and hiding the heading for everyone is a content
+  > change behind a layout one.
+  >
+  > **`.cols-eab`'s fifth track is a divergence and is now recorded as
+  > one.** Under the rule above, `Bound account` maps onto the design's
+  > `Used` and would take `.8fr`. It ships `1.4fr` because cabin's cell
+  > holds *two* values where the design's holds one — a mono account id
+  > and the parenthesised instant it was bound — and `.8fr` puts them on
+  > two lines at every width. Recorded in the brief's "everything else"
+  > register with that reason (FR-1). Before this correction the list
+  > matched neither the design nor the rule that supposedly derived it,
+  > and no criterion could catch it: AC-16 reads the brief only for the
+  > six marked *verbatim*.
+
+  > **Confirmed (test-authoring): the six marked *verbatim* are
+  > verbatim.** Each was parsed back out of `docs/design/0027-brief.md`
+  > §5 and compared against the list above — `2fr .6fr 1.1fr .8fr`,
+  > `1.6fr 1.1fr 1fr .8fr` and `1.1fr .9fr 1.3fr 2fr` out of §5.1,
+  > `1.7fr .7fr .7fr 1.5fr 1fr .5fr 1.2fr` out of §5.3,
+  > `2fr .8fr .9fr 1.2fr` out of §5.13 and `2fr 1fr 1.6fr` out of §5.14
+  > — and all six match. AC-16 keeps doing it from the file rather than
+  > from numbers repeated in a test, which is what makes the word mean
+  > something after the next edit to either.
 
   Dropping cabin's extra columns to match the design's track count is
   **not** an option, in either direction: a column is content, this is
@@ -844,17 +956,30 @@ wondering.
   | `This form was submitted with a token this session does not recognise. Open the page again and retry.`        | `not_permitted.html` body | new; the `verify_csrf` refusal (FR-5)       |
   | `Edit`                                                                                                        | every closed user row | new; the row-edit trigger (FR-11)             |
   | `Cancel`                                                                                                      | the open user row    | new; the way back out (FR-11, brief §5.17)    |
-  | `stale`                                                                                                       | the dashboard's CRL cards | brief §5.1, verbatim; the tag on a stale CRL |
 
-  Seven strings, and the flash contributes **none of them** — FR-3's
+  Six strings, and the flash contributes **none of them** — FR-3's
   message is the audit summary that already exists. That is the point
   of deriving it: the largest new surface in this spec ships without a
   sentence anybody had to write.
 
-  The status filter's five labels, the audit pills' five labels and the
-  key-state sentences on the CA-key page are **not** new copy: they are
-  the `<option>` and cell text those pages render today, moved into a
-  link or a cell. Moving a sentence is not editing it, and AC-18
+  > **Correction (test-authoring): `stale` was in this table and is not
+  > new copy.** `dashboard.html` already renders
+  > `<span class="tag tag-bad">stale</span>` on a CRL past its next
+  > update; FR-8 moves that tag from a table row into a card and moves
+  > nothing else. It belongs in the paragraph below with the other
+  > sentences this spec relocates without editing.
+  >
+  > The table is down to six. It is worth correcting rather than
+  > shrugging at, because the table's whole job is stated one line
+  > above it — "so that 'new copy' cannot later mean 'an edit to
+  > something that was already there'" — and a string listed as new
+  > that was already there is that failure, in the list written to
+  > prevent it.
+
+  The status filter's five labels, the audit pills' five labels, the
+  `stale` tag on a CRL and the key-state sentences on the CA-key page
+  are **not** new copy: they are the `<option>`, tag and cell text those
+  pages render today, moved into a link, a card or a cell. Moving a sentence is not editing it, and AC-18
   compares multisets of text nodes, not positions.
 
 - FR-20: **htmx adds no endpoint, and the attribute set is still
@@ -1187,10 +1312,26 @@ days and one expiring outside it, and a base URL set.
      `Location` header is parsed: none carries a `flash` query
      parameter, and each equals the target that route redirects to
      today, string for string.
-  3. Across every file in `src/cabin/web/templates/`, the count of
-     `hx-post` attributes is **zero**, and the count of `hx-get`
-     attributes is greater than zero — so a build that renders no htmx
-     at all cannot pass clause 3 by having nothing to count.
+  3. Across every file in `src/cabin/web/templates/`, the `hx-post`
+     attributes are **exactly spec 0029's four previews**, one each in
+     `ca_new.html`, `certs_new.html`, `certs_sign.html` and
+     `transfer_ca_import.html`, and the count of `hx-get` attributes is
+     greater than zero — so a build that renders no htmx at all cannot
+     pass clause 3 by having nothing to count.
+
+  > **Correction (test-authoring), clause 3.** It read "the count of
+  > `hx-post` attributes is **zero**" and no build can satisfy that.
+  > Spec 0029 FR-3 put four of them on the four preview pages, and this
+  > spec's own Interface Contract says those four preview routes are
+  > untouched — so the clause forbade markup this spec deliberately
+  > leaves in place. What FR-20 clause 2 actually requires is that *this
+  > spec* adds none, and the satisfiable form of that is the one above:
+  > the four are pinned to the four files that carry them, by name, so
+  > that a fifth fails and so does moving one of the four.
+  >
+  > Pinned rather than counted, for the reason spec 0029's own
+  > correction gives about `<script>`: a count alone passes on a build
+  > that moved one.
 
   _Goes red if_: the flash is smuggled into the redirect target "so it
   survives a lost session", which is the query-parameter design with a
@@ -1243,14 +1384,36 @@ days and one expiring outside it, and a base URL set.
     application built without this spec's handler registered;
   - an ACME request that is refused → likewise, `application/problem+json`
     and its own document, through `AcmeError`'s own handler;
-  - `GET /mcp` with no credential → likewise.
+  - `POST /mcp` with no credential → likewise.
 
   **And the census, which is what makes the six requests a sample
-  rather than the whole claim:** over every route in `app.routes`, the
-  set the handler would answer HTML for is computed and asserted equal
-  to the set of routes contributed by the ten interface routers of
-  FR-6, collected from those router objects. Both sets are asserted
-  non-empty and neither is allowed to be all of `app.routes`.
+  rather than the whole claim:** over every route the application
+  will match, the set the handler would answer HTML for is computed and
+  asserted equal to the set of routes contributed by the ten interface
+  routers of FR-6, collected from those router objects. Both sets are
+  asserted non-empty and neither is allowed to be all of them.
+
+  > **Two mechanical traps, found while writing this (test-authoring).**
+  >
+  > **`app.routes` does not hold this application's routes.** FastAPI
+  > 0.141 appends one `_IncludedRouter` wrapper per `include_router`
+  > call rather than splicing the routes in, so `app.routes` is five
+  > entries — the four FastAPI adds and `/healthz` — plus fourteen
+  > wrappers. A census written literally over `app.routes` looks at
+  > none of cabin's own routes and passes on everything. It has to walk
+  > each wrapper's `original_router.routes`; done that way it is 106
+  > routes. This is why the sentence above says "every route the
+  > application will match" rather than naming the attribute.
+  >
+  > **`GET /mcp` is a 405 that no exception handler sees.** Starlette
+  > answers method-not-allowed while routing, before the handler stack
+  > this requirement is about runs at all, so a comparison made on it is
+  > green against every implementation — including one that renders HTML
+  > for every 403 on every door. The MCP door is exercised as a `POST`
+  > with the streamable-HTTP `Accept` header, which reaches MCP's own
+  > credential check and answers 401. Any door whose refusal is a 405
+  > measures routing, not this boundary.
+
   _Goes red if_: the classifier is a path prefix (the `/acme/admin`
   clause), if it is registered for every status (a 404 on `/api/v1`
   would change), or if it is registered for `Exception` and swallows
@@ -1449,45 +1612,99 @@ days and one expiring outside it, and a base URL set.
   because only the file says which form was written (spec 0028 AC-9's
   shape). The six marked *verbatim* are compared against the numbers
   parsed out of `docs/design/0027-brief.md` §5, not against numbers
-  repeated in the test.
+  repeated in the test. The stylesheet declares column templates for
+  **exactly** these eleven plus spec 0028 FR-9's three, which is the
+  census row 8 of the overturns table moves here.
   _Goes red if_: a bare `Nfr` is written, or a "verbatim" track list
   drifts from the brief — the last clause is what makes the word
   verbatim mean something.
 
+  > **Note (test-authoring): the eleven have to be *rendered* before a
+  > browser can measure them.** `.cols-expiring` needs a certificate
+  > expiring inside 30 days, `.cols-eab` an EAB key, `.cols-ca-keys` a
+  > stored CA key — the criterion's fixture has all of them, and the
+  > probe's page list is what carries them to Chrome. A class no
+  > rendered row uses is reported as missing rather than skipped, so
+  > "measured against a browser" cannot quietly become "measured
+  > against the file twice".
+
 - AC-17: **The stylesheet and the templates agree, in both directions,
-  and nothing is reserved any more.**
-  `test_stylesheet_and_templates_agree_in_both_directions` passes over
-  the full page list — now including `/login`, `/setup` and a refused
-  render — with **no addition** to its `tag-*` exemption list. In the
-  same test, each of `.nav-count`, `.seg`, `.pill`, `.toggle` and
-  `.flash` has a rule **and** a literal user in some template, and the
-  set of names reserved-and-undefined by specs 0027–0029 is empty.
+  and nothing is reserved any more.** Stated as the property, over the
+  full page list — the nineteen screens plus `/login`, `/setup` and a
+  refused render:
+  1. every class name any of those pages renders has a rule in
+     `cabin.css`;
+  2. every class name `cabin.css` declares a rule for has a user — a
+     name on one of those pages, or a name written **literally** in a
+     template — with one exemption, the `tag-*` values that exist only
+     as a `tag-{{ … }}` interpolation, and **no addition** to it;
+  3. each of `.nav-count`, `.seg`, `.pill`, `.toggle` and `.flash` has
+     a rule **and** a literal user in some template, and the set of
+     names reserved-and-undefined by specs 0027–0029 is empty.
+
+  > **Correction (test-authoring).** This criterion named
+  > `test_stylesheet_and_templates_agree_in_both_directions` and said
+  > it would pass — a claim about a test outside this spec, which this
+  > section's own preamble forbids and cites spec 0029 AC-18 for. The
+  > preamble was right and the criterion was wrong: written that way it
+  > is satisfied by editing that test, and the reader cannot tell from
+  > it what the build has to do. The three clauses above are the
+  > property; which test carries them is a matter for the Test list.
+
   _Goes red if_: a `cols-*` or a state class is written as
   `cols-{{ … }}` or `seg-{{ … }}` — the rule would have no literal
-  user and the reverse direction would fail.
+  user and clause 2 would fail.
 
 - AC-18: **Not one existing sentence changed, and the one that did is
-  the one named.** For each of the twelve pages this spec redesigns —
-  `layout.html` being rendered inside every one of them — the
-  multiset of non-empty visible text nodes is compared against the same
-  page rendered through the templates as they stood at this spec's base
-  commit, on one instance with one database.
-  - Nothing is lost, with **one** permitted removal on **one** page:
-    the string `Transfer` from the rail, which FR-19 replaces with
-    `Export` and which is expected on every page that has a rail.
-  - `/users` is compared as the **union** of `/users` and
-    `/users?edit={id}` for each user in the fixture, taking the larger
-    multiplicity of each, for the reason spec 0029 AC-14's correction
-    gives: FR-11 is a disclosure, so the four forms' labels are absent
-    from the closed render by construction, and that is the requirement
-    working rather than a wording change.
-  - Every addition is named, per page, from FR-19's new-copy table plus
-    the fixture's own values (names, dates, counts, serials) — an
-    addition not in the list fails.
-  - In the same test, the palette divergence register still has exactly
-    three rows and `test_the_palette_equals_the_checked_in_brief`,
-    `test_the_twelve_numbers` and `test_no_colour_outside_the_token_blocks`
-    pass unmodified.
+  the one named.** For each of the thirteen templates FR-1 edits, the
+  multiset of text a reader sees — every literal run left after the
+  Jinja tags, the HTML tags and the comments are removed — is compared
+  against the same template as it stood at this spec's base commit,
+  read out of git.
+  - Nothing is lost, with **one** permitted removal on **one**
+    template: the string `Transfer` from `layout.html`'s rail, which
+    FR-19 replaces with `Export`.
+  - Every addition is one of FR-19's two tables: the one string that
+    changes, and the seven new ones. An addition not in them fails.
+  - `not_permitted.html` carries nothing but strings from those tables,
+    and carries all four of its own.
+
+  > **Correction (test-authoring), twice over.**
+  >
+  > **The instrument cannot be built.** This asked for each page
+  > "rendered through the templates as they stood at this spec's base
+  > commit, **on one instance with one database**". One instance cannot
+  > render both generations: FR-8 removes `ca_certs` from the
+  > dashboard's context (Interface Contract) and `web/__init__.py` sets
+  > `StrictUndefined`, so the base commit's `dashboard.html` against the
+  > new context is a hard error rather than a comparison. A second
+  > instance is not a way out either — the two would differ in every
+  > serial, date and id, which is exactly what the "named additions"
+  > clause was there to absorb.
+  >
+  > What FR-19 actually says is about the *templates*: "every sentence,
+  > label, heading, help line and hint that exists on the thirteen
+  > templates today is byte-identical afterwards." That is what is
+  > compared, and it is the stronger instrument for this requirement: it
+  > is deterministic, it needs no fixture to reach every branch, and it
+  > sees a help line dropped from a page no fixture renders. What it
+  > gives up is a sentence that moves out of a template and into
+  > Python — nothing in FR-1's boundary does that, and FR-3 ships the
+  > flash with no copy of its own precisely so that none has to.
+  >
+  > **The `/users` union clause is gone with it.** It existed because a
+  > *rendered* closed row does not carry the four forms' labels. The
+  > templates carry both states in one file, so the disclosure needs no
+  > special case at all.
+  >
+  > **The last bullet named three tests outside this spec and said they
+  > would pass** — the claim this section's preamble forbids and cites
+  > spec 0029 AC-18 for. The preamble was right. What that bullet was
+  > reaching for is already a requirement: FR-18 says no token is added
+  > and no colour literal is written outside the two `:root` blocks, and
+  > the palette register is pinned at three rows by spec 0027's own
+  > criterion. Restating it here bought nothing and broke the rule this
+  > spec had just written down.
 
   _Goes red if_: a heading is "improved" while the markup around it is
   rewritten, which fails both halves at once. This is the change that
@@ -1517,12 +1734,32 @@ days and one expiring outside it, and a base URL set.
     CSRF token refused;
   - every one of the nineteen screens plus `/login`, `/setup` and a
     refused render returns its expected status and parses as HTML;
-  - `/api/v1`'s OpenAPI document, MCP's tool list, the ACME directory
-    and a CRL are byte-identical to the same responses from the
-    application at this spec's base commit;
+  - the set of routes the application carries — path, methods and
+    endpoint — and `/api/v1`'s set of operations are identical to the
+    same sets recorded at this spec's base commit;
   - `sessions` round-trips: an existing session created before the
-    migration — simulated by inserting a row with `flash` unset —
-    authenticates, renders every page, and shows no flash.
+    migration — inserted through `sessions.create_session`, which never
+    names the column, exactly as an upgraded database already holds
+    one — authenticates, renders every page, and shows no flash.
+
+  > **Correction (test-authoring): the CRL clause was impossible.** It
+  > asked for "a CRL byte-identical to the same response from the
+  > application at this spec's base commit". A CRL is signed, by a key
+  > this fixture generates, and carries `thisUpdate`/`nextUpdate` from
+  > the clock — two runs of the *same* commit do not produce the same
+  > bytes, so no build could ever satisfy it and a reader would have
+  > spent a session finding out why. MCP's tool list has the same
+  > problem for a weaker reason: it needs a live session before it will
+  > answer at all.
+  >
+  > What is actually deterministic is what is compared: the route
+  > inventory and the OpenAPI operation set, recorded at the base commit
+  > and checked in beside the tests. That is the Interface Contract's
+  > own first sentence — no route is added and none is removed — and it
+  > is the clause a new route, a moved guard or a renamed handler fails.
+  > The CRL, the ACME directory and MCP keep their own specs' tests;
+  > restating them here would have been the claim about other tests that
+  > this section's preamble forbids.
 
   _Goes red if_: the migration is written with a `NOT NULL` column and
   no server default, which upgrades a populated database into a state
@@ -1539,8 +1776,12 @@ test_the_flash_animation_is_declared_and_reducible (AC-4, the rendered
 half in `tests/test_web_design_shell.py`),
 test_the_refusal_is_html_for_the_ui_and_json_for_the_doors (AC-5),
 test_the_refusal_names_its_cause (AC-6),
-test_the_rail_group_moved_and_the_badge_is_absent_at_zero (AC-7, in
-`tests/test_transfer.py`, beside the assertion it re-points),
+test_the_rail_group_moved_and_the_badge_is_absent_at_zero and
+test_the_badge_is_absent_rather_than_zero (AC-7, in
+`tests/test_transfer.py`, beside the assertion it re-points — two
+tests, because "absent at zero" needs a database that has never had an
+expiring certificate and revoking one back out leaves a `revoked` row
+whose absence from the count is a different fact),
 test_the_dashboard_authorities_block_is_the_grouped_list (AC-8, in
 `tests/test_web_dashboard.py`),
 test_the_inventory_filter_is_five_links_that_keep_the_search (AC-9, in
@@ -1550,14 +1791,46 @@ test_the_users_row_edit_is_url_state (AC-11, in `tests/test_web_auth.py`,
 where the users page's own assertions live),
 test_the_audit_pills_carry_the_other_filters (AC-12, in
 `tests/test_web_audit.py`),
-test_one_save_still_writes_both_flags (AC-13, in `tests/test_web_acme_ui.py`),
+test_one_save_still_writes_both_flags and
+test_one_save_still_writes_every_settings_flag (AC-13, in
+`tests/test_web_acme_ui.py`; two, because the criterion's third clause
+is the same shape on `/settings`, where seven fields share one form),
 test_a_one_time_secret_is_stored_nowhere (AC-14, in `tests/test_web_tokens.py`),
+test_the_eab_secret_is_stored_nowhere (AC-14 clause 4, in
+`tests/test_web_acme_ui.py`),
 test_the_ca_key_page_groups_and_the_bundle_does_not_click (AC-15),
-test_the_column_templates_are_the_designs (AC-16, headless Chrome, in
-`tests/test_web_design_shell.py`),
+test_the_column_templates_are_the_designs and
+test_the_column_templates_resolve_in_the_browser (AC-16, the second
+headless Chrome, both in `tests/test_web_design_shell.py`; two, because
+the file says which *form* was written and the browser says what the
+columns came out as, and a template declared but never applied — a row
+that is not `display: grid` — satisfies the first and draws nothing),
+test_the_flash_panel_animates_in_the_browser (AC-4's rendered half and
+AC-19's geometry clause, headless Chrome, same file),
 test_no_sentence_changed_on_the_remaining_pages (AC-18),
 test_the_remaining_pages_do_not_scroll_sideways (AC-19, headless Chrome),
 test_the_unchanged_routes_are_unchanged (AC-20)
+
+Two files carry no test and are listed because they are contract:
+**`tests/dom.py`**, one parsed element tree for the whole suite — this
+spec's criteria are anchored to elements and to where they sit ("inside
+`.shell` and as a sibling of `<main id="main">`", "exactly five `<a>`
+inside one `.seg`", "zero `<form>` elements inside `<tbody>`") and none
+of that can be measured with a substring search; six more one-off
+`HTMLParser` subclasses would be six things to repair, which is the
+argument `tests/probes.py` already makes one level up. And
+**`tests/data/0030_routes.json`**, the route and OpenAPI inventory
+recorded at this spec's base commit, which AC-20 compares against.
+
+**Three of these criteria are green at the base commit and it is worth
+saying so.** AC-10 is entirely "must not change" — the lead sentence is
+already there, no `<th>` is already a link, and `?sort=` is already
+ignored — as are AC-7's zero-badge half and AC-20's route, OpenAPI and
+guard clauses. Nothing an implementer does *before* going wrong makes
+them fail. They stay because what they catch is the change nobody
+proposed: a sort control added "while we are in the file", a badge
+rendered unconditionally, a route quietly added beside the eighteen
+call sites FR-3 touches.
 
 **Re-pointed** — the requirement is unchanged, the selector or the page
 it is read from moved. Each names, at its call site, the requirement it
@@ -1579,25 +1852,102 @@ protects.
   in the same way. Its `action` filter assertions are **not**
   re-pointed and must pass unchanged, which is what keeps FR-12's
   "one of the three becomes pills" honest.
-- **`tests/test_web_auth.py`'s and `tests/test_web_issuer_grants.py`'s
-  users-page form assertions** protect spec 0003 FR-7 and spec 0018
-  FR-10: a superadmin is offered the role, password,
-  grant and delete forms and a viewer is offered none. Each is
-  re-pointed at `GET /users?edit={id}` — the URL at which that form now
-  stands open — and the viewer half gains that URL too, because with
-  `edit` coming from the query string, "no form is offered" has to hold
-  at the URL that would open one.
+- **`tests/test_web_auth.py`'s `test_role_can_view_users_list`**
+  protects spec 0003 FR-7 and spec 0018 FR-10 for a reader: a viewer
+  and an admin can open `/users` and are offered nothing on it. It is
+  **strengthened, not re-pointed** — it asserts a status code and
+  nothing else today — to "zero `<form>` elements inside `<tbody>`", at
+  `/users` **and** at `/users?edit={id}`, because with `edit` coming
+  from the query string "no form is offered" has to hold at the URL
+  that would open one.
+
+  > **Correction (test-authoring).** This entry read "`tests/test_web_auth.py`'s
+  > and `tests/test_web_issuer_grants.py`'s users-page form assertions
+  > … Each is re-pointed at `GET /users?edit={id}`". **There are no such
+  > assertions.** `test_role_can_view_users_list` asserts
+  > `resp.status_code == 200`; `test_web_issuer_grants.py` posts to
+  > `/users` and never reads the page. Nothing anywhere in the suite
+  > asserts which forms `/users` offers a superadmin or withholds from a
+  > viewer — a build that rendered every management control to every
+  > role passes the suite at this spec's base commit.
+  >
+  > The superadmin half is therefore **new**, not re-pointed: it is
+  > AC-11 clauses 1 and 2. The viewer half is the strengthening above.
+  > This is worth recording rather than quietly fixing: a spec that
+  > lists a test it has not opened is how a requirement gets assumed
+  > covered, and the assumption survives every review because the
+  > sentence naming it reads like evidence.
 - **`tests/test_web_dashboard.py`'s CA-expiry assertions** protect spec
   0016 FR-4 and spec 0017 FR-14: one entry per `ca_certificates` row,
   flagged a year ahead. They are re-pointed from the flat
   `The CA itself` table to the grouped block; the row count, the tag
   and the expiry each assert exactly what they assert today.
-- **`tests/test_web_layout.py`'s `page_paths`** protects that every
-  probe runs over the same list rather than a second one that drifts
-  (spec 0027 FR-20). It gains `/login`, `/setup` and the refused
-  render as three more entries, and `render_pages`'s "assert each one
-  is actually a page" gains an expected status per entry, since two of
-  the three are not 200 for an authenticated client.
+- **`tests/test_web_layout.py`'s page list** protects that every probe
+  runs over the same list rather than a second one that drifts (spec
+  0027 FR-20). It gains `/login`, `/setup` and the refused render, and
+  `render_pages`'s "assert each one is actually a page" gains an
+  expected status per entry.
+
+  > **Correction (test-authoring): two of the three cannot be entries in
+  > `page_paths`.** That function returns paths for one authenticated
+  > client to fetch, and:
+  >
+  > - **`/setup` answers 404 to every client** on a database that has a
+  >   user (`ui.py:148`), and the probe fixture's first act is to create
+  >   one. There is no status it can be given here; it has to come from
+  >   a second instance with an empty database.
+  > - **a refusal needs a role that is refused something**, and the
+  >   fixture's client is a superadmin, who is refused nothing. It has
+  >   to come from a second client over the *same* application, logged
+  >   in as a viewer — the same application, so that the page is the
+  >   one under test rather than a fixture mimicking it.
+  >
+  > So the three are built by a function beside `page_paths` and the two
+  > are joined into **one** list every probe takes, which is the whole
+  > of what FR-20 asks. `/login` alone is a plain entry: it answers 200
+  > to an authenticated client, because `login_form` has no auth
+  > dependency.
+
+- **`tests/test_ca_issuer_pages.py`'s `test_the_column_templates_are_the_designs`**
+  protects spec 0028 FR-9: its three `cols-*` classes carry the brief's
+  ratios in the `minmax(0, …)` form. Its census clause —
+  `set(declared) == set(BRIEF_TRACKS)` — becomes a subset check, because
+  FR-17 adds eleven more templates to the stylesheet and the census of
+  *which* may exist moves to AC-16's test, which owns all fourteen.
+  What 0028 FR-9 measures about its own three is unchanged.
+- **`tests/test_web_design_shell.py`'s `test_the_reserved_classes_are_still_reserved`**
+  protects spec 0027 FR-18: a class is defined by the spec that first
+  renders one. It asserts today that the reserved list has five names
+  and that none of them has a rule. FR-18 renders all five, so the list
+  becomes empty and the criterion inverts — each of the five now has to
+  have a rule **and** a literal user, which is AC-17 clause 3. The
+  guard is not dropped: with the list empty it is clause 2 that stops a
+  sixth component being defined "while we are in the file".
+- **`tests/test_web_design_shell.py`'s `test_the_tree_glyph_is_the_only_decoration`**
+  protects spec 0028 AC-14: the decoration exemption
+  `CONTRAST_PROBE` grants is bounded rather than trusted. Its census is
+  `the set of [aria-hidden="true"] elements equals the set of .tree
+  glyphs`; FR-9 gives the glyph two more pages and FR-4 adds the flash
+  dot, so the census becomes those four, **named** — the dot identified
+  by the panel it sits in, because FR-4 gives it no class and a census
+  keyed on one the spec does not require would pass for the wrong
+  reason.
+
+  > **Correction (test-authoring): none of these three was in this
+  > list.** Each fails against a correct implementation of this spec —
+  > the first on FR-17's eleven new templates, the second on FR-18's
+  > five, the third on FR-4's dot — and the spec's "What this spec
+  > overturns" table names none of them. Two of the three are argued
+  > elsewhere in the spec (AC-17 inverts the reserved list, FR-9 widens
+  > the census) and only the bookkeeping was missing; the column-template
+  > census is not argued anywhere at all. The table is where a reader
+  > checks what will break, so an entry argued in one requirement and
+  > absent from the table is an entry the reader does not find.
+  >
+  > Spec 0029's own experience is the reason to write this down: three
+  > of the rows in that table "surface when the plan is checked against
+  > 0027's, 0029's and 0016's own text", and these three surface only
+  > when it is checked against the tests.
 
 **Strengthened** — the requirement grows:
 
@@ -1606,9 +1956,14 @@ protects.
   page without the header. _Supersedes spec 0029 AC-1's clause that the
   set of targets has the size 0029 introduces._ It grows in two ways,
   and both are needed for it to keep meaning anything here:
-  1. the expected size becomes 0029's six plus this spec's targets,
-     asserted as an exact number so that a build rendering no `hx-`
-     attribute still cannot pass by finding nothing;
+  1. the expected set becomes 0029's six plus this spec's, **derived**
+     from `certs_ui._page_url`, `audit_ui._page_url` and the fixture's
+     own user rows and asserted as a lower bound, so that a build
+     rendering no `hx-` attribute still cannot pass by finding nothing;
+     and every target found is checked against the routes the
+     application already has — its path is one of them and its query
+     carries nothing beyond the one parameter the Interface Contract
+     adds, which is FR-20 clause 1 measured rather than restated;
   2. **the targets are collected from the rendered pages as well as
      from the template files.** Half of this spec's targets are
      interpolated — `/users?edit={{ row.id }}`, `_page_url`'s output —
@@ -1622,6 +1977,24 @@ protects.
   when it runs — a popped message is a difference between two otherwise
   identical responses, and it is the response that had it that is
   correct.
+
+  > **Correction (test-authoring), clause 1.** It asked for "an exact
+  > number", and this spec never says which targets that number counts.
+  > It is not derivable either: FR-10 gives the inventory's five links
+  > their `hx-` attributes and FR-15 says the inventory **export** page
+  > "takes the same filter-bar treatment", without saying whether that
+  > includes them — so two readers get two numbers and one of them
+  > writes a test the other's build fails for no reason anybody can
+  > name.
+  >
+  > A lower bound built from the same functions the pages build their
+  > links with keeps everything the exact number was for: a build with
+  > no `hx-` attribute fails it, a filter link that quietly dropped `q`
+  > fails it as a missing target rather than as a string nobody
+  > compared. What the exact number was *also* reaching for — that no
+  > sixth kind of target appears — is the no-new-endpoint check above,
+  > which measures the thing itself instead of a count that stands in
+  > for it.
 - **`tests/test_web_design_shell.py`'s contrast and focus probes**
   protect spec 0027 FR-14 and FR-15. They gain `/login`, `/setup` and
   the refused render, three screens they have never covered, and the
@@ -1634,11 +2007,27 @@ protects.
   dot), and AC-18's census names all four (FR-9). It could not
   previously catch a glyph rendered in an unreadable colour on those
   pages, because those pages had no glyph.
-- **`tests/test_store_schema.py`** protects spec 0001 FR-5: every
-  migration runs forward and backward against a populated database. It
-  gains `0011`, and the populated fixture gains a `sessions` row
-  written **before** the upgrade, which is the only way AC-20's last
-  clause can fail on a build that adds the column `NOT NULL`.
+- **`tests/test_store_schema.py` gains migration 0011's own two tests.**
+  There is no sweep to extend: that file holds four tests about the
+  *shape* of a freshly migrated database and no Alembic up/down test at
+  all — the only one in the suite is
+  `test_issuer_grants.py::test_migration_0010_downgrade_drops_both_tables`,
+  written by the spec that added 0010. This spec follows that
+  precedent: one test asserting 0011's `down_revision`, the column's
+  nullability and type, and that the five existing columns are
+  unchanged; one asserting the up/down cycle against a `sessions` row
+  written **before** the upgrade through raw SQL naming only the
+  pre-0011 columns — which is the only way AC-20's last clause can fail
+  on a build that adds the column `NOT NULL`. Inserting through the ORM
+  after the model has gained the attribute supplies a value for it and
+  measures nothing.
+
+  > **Correction (test-authoring).** This entry read "protects spec 0001
+  > FR-5: every migration runs forward and backward against a populated
+  > database. It gains `0011`". No such test exists to gain anything;
+  > see the correction under the users-page entry above for why a spec
+  > naming a test it has not opened is worth recording rather than
+  > quietly fixing.
 
 **Deleted: none.**
 

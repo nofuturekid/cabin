@@ -34,7 +34,7 @@ from pathlib import Path
 import probes
 import pytest
 from fastapi.testclient import TestClient
-from test_web_layout import _populate, page_paths, render_pages
+from test_web_layout import _populate, all_pages, assert_probe_list_is_sound
 
 from cabin.app import create_app
 from cabin.config import Config
@@ -352,7 +352,7 @@ def register_rows() -> list[tuple[str, str, str, str]]:
 
 @pytest.fixture(scope="module")
 def rendered(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
-    """The nineteen screens, with the data that makes them wide.
+    """The twenty-three screens, with the data that makes them wide.
 
     Built once per module rather than per test: `_populate` generates six key
     pairs and signs a cross certificate, and every probe below wants the same
@@ -364,7 +364,10 @@ def rendered(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     cfg = Config(port=8080, data_dir=data_dir, db_url=f"sqlite:///{data_dir}/cabin.db", tls=True)
     with TestClient(create_app(cfg), follow_redirects=False) as client:
         cert_path = _populate(client, cfg, second_issuer=True)
-        return render_pages(client, page_paths(cfg, cert_path))
+        # spec 0030 FR-21: `/login`, `/setup` and a refused render join the
+        # list -- three screens the contrast and focus probes have never
+        # covered -- and a flash panel is staged into one of them.
+        return all_pages(client, cfg, cert_path)
 
 
 needs_chrome = pytest.mark.skipif(
@@ -754,6 +757,7 @@ def test_contrast_holds_on_every_rendered_page(
     difference between a colour that is fine where it was solved for and the
     same colour used somewhere else.
     """
+    assert_probe_list_is_sound(rendered)
     root = tmp_path / f"contrast-{scheme}"
     root.mkdir()
     probes.stage(root, STATIC, rendered, probes.CONTRAST_PROBE, scheme)
@@ -803,6 +807,7 @@ def test_focus_is_visible_on_every_interactive_element(
         f"to a grep: {suppressed}"
     )
 
+    assert_probe_list_is_sound(rendered)
     root = tmp_path / "focus"
     root.mkdir()
     probes.stage(root, STATIC, rendered, probes.FOCUS_PROBE)
@@ -1232,17 +1237,18 @@ def test_no_colour_outside_the_token_blocks() -> None:
 
 #: Spec 0027 FR-18 reserved eight names without defining them, because
 #: `test_stylesheet_and_templates_agree_in_both_directions` fails in its
-#: reverse direction on a rule with no user. Spec 0028 renders two of them
-#: (`.panel`, `.panel-danger`) and drops `.group-row` in favour of two clearer
-#: names; these stay reserved and undefined until the spec that first renders
-#: one.
+#: reverse direction on a rule with no user. Spec 0028 rendered two of them
+#: and spec 0029 a third.
 #:
-#: Spec 0029 FR-15/AC-13 takes `.kicker` off this list -- it renders every
-#: panel heading with it -- which is what supersedes spec 0028 AC-11's second
-#: clause. The list narrows to five rather than being dropped, so the clause
-#: keeps doing its job of stopping spec 0030's components being defined
-#: "while we are in the file".
-RESERVED = ("nav-count", "seg", "pill", "toggle", "flash")
+#: **Spec 0030 FR-18 empties the list.** All five remaining names are the
+#: design's last components and this spec renders every one of them, so the
+#: criterion inverts rather than shrinking: what was "these have no rule"
+#: becomes "each of these has a rule *and* a literal user", which is the same
+#: guard doing the same job from the other side. What it stops is a sixth
+#: component being defined "while we are in the file", and with the list empty
+#: the general reverse direction in
+#: `test_stylesheet_and_templates_agree_in_both_directions` is what stops it.
+RESERVED: tuple[str, ...] = ()
 
 #: FR-10's table: every class spec 0028 defines, each of which must have a
 #: rule *and* a literal user.
@@ -1278,6 +1284,38 @@ DEFINED_BY_0029 = (
     "mark-bad",
 )
 
+#: Spec 0030 FR-18's table: the five names spec 0027 reserved, plus the six
+#: components and the eleven column templates this spec first renders. Every
+#: one of them must have a rule and a literal user, and the status-like ones
+#: (`seg-on`, `pill-on`, `editing`) are in the list for the reason spec 0028
+#: FR-10 gives: written out by a branch, never glued to an interpolation,
+#: because a rule whose only user is `seg-{{ … }}` has no user at all.
+DEFINED_BY_0030 = (
+    "flash",
+    "nav-count",
+    "seg",
+    "seg-on",
+    "pill",
+    "pill-on",
+    "toggle",
+    "copyable",
+    "editing",
+    "avatar",
+    "chips",
+    "crl-grid",
+    "cols-expiring",
+    "cols-authorities",
+    "cols-activity",
+    "cols-certs",
+    "cols-trust-bundle",
+    "cols-ca-keys",
+    "cols-audit",
+    "cols-users",
+    "cols-tokens",
+    "cols-eab",
+    "cols-directories",
+)
+
 
 def literal_class_tokens() -> set[str]:
     """Every class name a template carries *statically* (spec 0027 FR-20).
@@ -1297,32 +1335,35 @@ def literal_class_tokens() -> set[str]:
 
 
 def test_the_reserved_classes_are_still_reserved() -> None:
-    """AC-11, extended by spec 0029 AC-13: a class is defined by the spec
-    that first renders one.
+    """AC-11, extended by spec 0029 AC-13 and **inverted by spec 0030 AC-17**.
 
-    Two directions, and the second is the one that bites today. The names
-    spec 0027 reserved and no spec since renders must still have no rule --
-    "while we are in the file" is how a stylesheet acquires components
-    nothing uses. And each name spec 0028 or spec 0029 *does* define must
-    have both a rule and a literal user, because a rule whose only user is an
-    interpolation has no user at all as far as
+    Two directions, and spec 0030 empties the first one. The names spec 0027
+    reserved and no spec since renders must still have no rule -- and there
+    are none left, because FR-18 renders all five. So the load moves entirely
+    onto the second direction: each name spec 0028, 0029 or 0030 *does*
+    define must have both a rule and a literal user, because a rule whose
+    only user is an interpolation has no user at all as far as
     `test_stylesheet_and_templates_agree_in_both_directions` is concerned.
 
-    Spec 0029 FR-15 supersedes this criterion's second clause by name:
-    `.kicker` leaves `RESERVED` for `DEFINED_BY_0029`, and the reserved list
-    becomes five. It is narrowed by one argued name, not dropped.
+    _Supersedes spec 0029 AC-13's second half_, which asserts that each of
+    `.nav-count`, `.seg`, `.pill`, `.toggle` and `.flash` has **no** rule.
+    All five are rendered here, so the assertion is that each now has one.
     """
     defined = class_selectors(CSS.read_text())
-    rendered_here = DEFINED_BY_0028 + DEFINED_BY_0029
+    rendered_here = DEFINED_BY_0028 + DEFINED_BY_0029 + DEFINED_BY_0030
 
     assert set(RESERVED) & set(rendered_here) == set(), (
         f"a name is both reserved and rendered: {sorted(set(RESERVED) & set(rendered_here))}"
     )
-    assert len(RESERVED) == 5, (
-        f"spec 0029 AC-13 asserts five reserved names -- `.nav-count`, `.seg`, "
-        f"`.pill`, `.toggle`, `.flash` -- and this list holds {len(RESERVED)}: "
-        f"{RESERVED}"
+    assert RESERVED == (), (
+        f"spec 0030 AC-17 asserts the reserved-and-undefined list is empty -- all "
+        f"five of `.nav-count`, `.seg`, `.pill`, `.toggle` and `.flash` are rendered "
+        f"by the pages this spec redesigns -- and this list holds {RESERVED}"
     )
+    for name in ("nav-count", "seg", "pill", "toggle", "flash"):
+        assert name in rendered_here, (
+            f".{name} was reserved by spec 0027 and left the list without being rendered anywhere"
+        )
 
     premature = [name for name in RESERVED if name in defined]
     assert premature == [], (
@@ -1331,24 +1372,27 @@ def test_the_reserved_classes_are_still_reserved() -> None:
     )
 
     without_rule = [name for name in rendered_here if name not in defined]
-    assert without_rule == [], f"rendered by spec 0028/0029, no rule in cabin.css: {without_rule}"
+    assert without_rule == [], (
+        f"rendered by spec 0028/0029/0030, no rule in cabin.css: {without_rule}"
+    )
 
     literal = literal_class_tokens()
     without_user = [name for name in rendered_here if name not in literal]
     assert without_user == [], (
         f"these have a rule and no template writes them out literally. A status "
         f"class glued to an interpolation -- `state-{{{{ row.status }}}}`, or "
-        f"`mark-{{{{ … }}}}` -- contributes no name at all, which is what FR-10's "
-        f"and FR-15's branch requirement is for: {without_user}"
+        f"`seg-{{{{ … }}}}` -- contributes no name at all, which is what FR-10's, "
+        f"FR-15's and FR-18's branch requirement is for: {without_user}"
     )
 
     # The exemption list the agreement test carries is for `tag-*` values that
-    # only ever exist as an interpolation. AC-11 requires this spec to add
-    # nothing to it; a widened list is how a rule with no user gets parked.
+    # only ever exist as an interpolation. AC-11 and spec 0030 AC-17 both
+    # require this spec to add nothing to it; a widened list is how a rule
+    # with no user gets parked.
     agreement = (REPO / "tests/test_ca_names_and_actions.py").read_text()
     assert 'exempt = {name for name in defined - used if re.match(r"^tag-", name)}' in agreement, (
         "the agreement test's exemption list is no longer exactly the `^tag-` names; "
-        "spec 0028 adds nothing to it (AC-11)"
+        "spec 0028 adds nothing to it (AC-11) and neither does spec 0030 (AC-17)"
     )
 
 
@@ -1529,9 +1573,10 @@ window.addEventListener('load', function () {
       return el.tagName.toLowerCase() + '.' + (el.className || '').toString()
         + ' "' + el.textContent.trim().slice(0, 12) + '"';
     }
-    var hidden = [], trees = [], untagged = [];
+    var hidden = [], trees = [], untagged = [], dots = [];
     document.querySelectorAll('[aria-hidden="true"]').forEach(function (el) {
       hidden.push(label(el));
+      if (el.closest('.flash') !== null) dots.push(label(el));
     });
     document.querySelectorAll('.tree').forEach(function (el) {
       trees.push(label(el));
@@ -1539,12 +1584,19 @@ window.addEventListener('load', function () {
     });
     var out = document.createElement('div');
     out.id = 'probe-result';
-    out.textContent = JSON.stringify({hidden: hidden, trees: trees, untagged: untagged});
+    out.textContent = JSON.stringify(
+      {hidden: hidden, trees: trees, untagged: untagged, dots: dots});
     document.body.appendChild(out);
   }, 300);
 });
 </script>
 """
+
+#: FR-9's census, by name: the pages whose grouped lists draw a tree glyph,
+#: and how many rows of each have a parent. `/ca` had them before this spec;
+#: the dashboard's authorities block and the CA-key page's list are the two
+#: users spec 0028 FR-5 said were waiting.
+DECORATION_CENSUS = {"ca": 1, "dashboard": 1, "transfer_ca_key": 1}
 
 #: A span the contrast probe would report: `--accent-deep` (#5d5294) is
 #: 2.60:1 on the page ground, which is what the design draws the tree glyph
@@ -1575,6 +1627,7 @@ def test_the_tree_glyph_is_the_only_decoration(rendered: dict[str, str], tmp_pat
     reporting it with the attribute), and the guard reports the planted
     element as an unbudgeted user of the exemption.
     """
+    assert_probe_list_is_sound(rendered)
     root = tmp_path / "aria"
     root.mkdir()
     probes.stage(root, STATIC, rendered, ARIA_PROBE)
@@ -1594,15 +1647,43 @@ def test_the_tree_glyph_is_the_only_decoration(rendered: dict[str, str], tmp_pat
     untagged = {name: found["untagged"] for name, found in results.items() if found["untagged"]}
     assert untagged == {}, f"a .tree glyph is read out to a screen reader: {untagged}"
 
-    spread = {
-        name: sorted(set(found["hidden"]) - set(found["trees"]))
-        for name, found in results.items()
-        if set(found["hidden"]) != set(found["trees"])
-    }
+    # spec 0030 FR-9 _supersedes spec 0028 AC-14's census_. The grouped list
+    # arrives on two more pages, so the glyph does too, and the flash panel's
+    # dot (FR-4) is a fourth user of the exemption -- the message is the words
+    # beside it. The census is widened by *naming* its users, never by
+    # dropping the count: a fifth still has to be argued for in the spec that
+    # adds it, because anything claiming the exemption that is neither a
+    # `.tree` nor the flash dot still fails here.
+    for page, expected in DECORATION_CENSUS.items():
+        assert page in results, f"the probe list no longer contains {page!r}"
+        drawn = len(results[page]["trees"])
+        assert drawn >= expected, (
+            f"{page} draws {drawn} tree glyphs and FR-9 puts at least {expected} "
+            f"there: the grouped list arrives on the dashboard and the CA-key page, "
+            f"and this census names its users rather than being widened to 'anywhere'"
+        )
+
+    spread = {}
+    for name, found in results.items():
+        # The flash dot is the fourth named user, and only on the page that
+        # carries the panel -- `all_pages` stages exactly one. It is
+        # identified by the panel it sits in rather than by a class of its
+        # own: FR-4 gives it none, and a census keyed on a class the spec
+        # does not require would pass for the wrong reason.
+        allowed = set(found["trees"]) | set(found["dots"])
+        extra = [item for item in found["hidden"] if item not in allowed]
+        if extra:
+            spread[name] = sorted(extra)
     assert spread == {}, (
-        f"aria-hidden is claimed by something that is not a tree glyph. A second "
-        f"user of the decoration exemption is argued for in the spec that adds it, "
-        f"not discovered later in a screenshot: {spread}"
+        f"aria-hidden is claimed by something that is neither a tree glyph nor the "
+        f"flash panel's dot. A fifth user of the decoration exemption is argued for "
+        f"in the spec that adds it, not discovered later in a screenshot: {spread}"
+    )
+    with_dots = {name: found["dots"] for name, found in results.items() if found["dots"]}
+    assert len(with_dots) == 1 and all(len(items) == 1 for items in with_dots.values()), (
+        f"the flash panel's dot is drawn on {with_dots}. FR-4 renders exactly one "
+        f'`<span aria-hidden="true">` inside the one panel `all_pages` stages, and '
+        f"it is the fourth user FR-9's census names"
     )
 
     # Counter-check, three ways, on one page.
@@ -1633,4 +1714,290 @@ def test_the_tree_glyph_is_the_only_decoration(rendered: dict[str, str], tmp_pat
     assert set(guarded["hidden"]) - set(guarded["trees"]) != set(), (
         "the guard did not notice an aria-hidden element that is not a tree glyph -- "
         "it cannot go red, and an exemption nobody bounds is a hole"
+    )
+
+
+# ==========================================================================
+# spec 0030 AC-16: the column templates are the design's
+# ==========================================================================
+
+#: FR-17's table, keyed by the brief section each is read out of. `None`
+#: means "the design has no track list for this one" -- `re-ordered`,
+#: `reduced`, `extended` and `derived` in FR-17's own last column -- so the
+#: ratios are compared against the numbers written in the requirement rather
+#: than against the brief, and the word *verbatim* keeps meaning something
+#: because the six that claim it are checked against the file.
+COLUMN_TEMPLATES = {
+    "cols-expiring": ((2.0, 0.6, 1.1, 0.8), "5.1"),
+    "cols-authorities": ((1.6, 1.1, 1.0, 0.8), "5.1"),
+    "cols-activity": ((1.1, 0.9, 1.3, 2.0), "5.1"),
+    "cols-certs": ((1.7, 0.7, 0.7, 1.5, 1.0, 0.5, 1.2), "5.3"),
+    "cols-trust-bundle": ((2.0, 0.8, 0.9, 1.2), "5.13"),
+    "cols-ca-keys": ((2.0, 1.0, 1.6), "5.14"),
+    "cols-audit": ((1.1, 0.9, 1.2, 2.2, 0.6), None),
+    "cols-users": ((1.5, 0.8, 1.5, 0.7, 0.8), None),
+    "cols-tokens": ((1.2, 0.7, 1.4, 0.7, 1.0, 1.0, 1.0, 0.6), None),
+    "cols-eab": ((1.2, 1.4, 1.2, 0.7, 1.4, 1.0, 0.6), None),
+    "cols-directories": ((1.6, 0.8, 2.2), None),
+}
+
+#: Spec 0028 FR-9's three, which stay exactly as they are. They are named
+#: here so that "the stylesheet declares column templates for exactly these"
+#: has one owner: `test_ca_issuer_pages.test_the_column_templates_are_the_designs`
+#: keeps asserting its own three are right and this test owns the census.
+COLUMN_TEMPLATES_0028 = ("cols-hierarchies", "cols-issuers", "cols-crosses")
+
+
+def split_tracks(value: str) -> list[str]:
+    """One `grid-template-columns` value as its tracks, paren-aware --
+    `minmax(0, 2fr)` carries a comma and a space inside itself."""
+    tracks: list[str] = []
+    depth = 0
+    current = ""
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char.isspace() and depth == 0:
+            if current:
+                tracks.append(current)
+            current = ""
+            continue
+        current += char
+    if current:
+        tracks.append(current)
+    return tracks
+
+
+def declared_column_templates(css_text: str) -> dict[str, list[str]]:
+    templates: dict[str, list[str]] = {}
+    for selector, body in css_rules(css_text):
+        names = re.findall(r"\.(cols-[\w-]+)", selector)
+        if not names:
+            continue
+        for name, value in declarations(body):
+            if name == "grid-template-columns":
+                for cols_class in names:
+                    templates[cols_class] = split_tracks(value)
+    return templates
+
+
+def brief_tracks(section: str) -> list[tuple[float, ...]]:
+    """Every `Nfr Nfr ...` run the brief writes in one section 5 subsection.
+
+    Read out of the file so that the six FR-17 marks *verbatim* are compared
+    against the design and not against numbers repeated in this test. A
+    subsection can name more than one list (5.1 names three), so every run is
+    returned and the caller looks for its own.
+    """
+    text = BRIEF.read_text()
+    start = text.index(f"### {section} ")
+    end = text.index("### ", start + 4)
+    body = text[start:end]
+    found = []
+    for run in re.findall(r"((?:[\d.]+fr[\s`]+){1,9}[\d.]+fr)", body):
+        numbers = tuple(float(value) for value in re.findall(r"([\d.]+)fr", run))
+        if len(numbers) >= 3:
+            found.append(numbers)
+    return found
+
+
+def test_the_column_templates_are_the_designs() -> None:
+    """AC-16's stylesheet half: the eleven templates FR-17 names, in the
+    `minmax(0, Nfr)` form, with the six marked *verbatim* checked against the
+    brief itself.
+
+    The form is load-bearing rather than decorative (spec 0028 FR-9): a bare
+    `Nfr` is `minmax(auto, Nfr)`, whose minimum is the content's, so it
+    bounds a track to whatever the longest cell happens to be in the fixture
+    that measured it.
+    """
+    declared = declared_column_templates(CSS.read_text())
+    expected = set(COLUMN_TEMPLATES) | set(COLUMN_TEMPLATES_0028)
+    assert set(declared) == expected, (
+        f"the stylesheet declares column templates for {sorted(declared)}; spec 0028 "
+        f"FR-9 names three and spec 0030 FR-17 names eleven more.\n"
+        f"  missing: {sorted(expected - set(declared))}\n"
+        f"  extra: {sorted(set(declared) - expected)}"
+    )
+
+    for name, (ratios, section) in sorted(COLUMN_TEMPLATES.items()):
+        tracks = declared[name]
+        assert len(tracks) == len(ratios), (
+            f".{name} declares {len(tracks)} tracks, FR-17 gives it {len(ratios)}: {tracks}"
+        )
+        bare = [track for track in tracks if not re.fullmatch(r"minmax\(\s*0(px)?\s*,.*\)", track)]
+        assert bare == [], (
+            f".{name} has tracks that are not `minmax(0, …)`: {bare}. The form is the "
+            f"design's own (brief section 6.14) and it bounds every track to the "
+            f"container whatever the cell holds"
+        )
+        written = tuple(
+            float(re.search(r"([\d.]+)fr", track).group(1))  # type: ignore[union-attr]
+            for track in tracks
+        )
+        assert written == ratios, f".{name} declares {written}, FR-17 has {ratios}"
+        if section is None:
+            continue
+        assert ratios in brief_tracks(section), (
+            f".{name} is marked *verbatim* from brief section {section} and that "
+            f"section's track lists are {brief_tracks(section)}, none of which is "
+            f"{ratios}. The last clause is what makes the word verbatim mean something"
+        )
+
+
+#: AC-16's rendered half and AC-4's: what the browser resolved each list
+#: row's column template to, and what it resolved the flash panel's
+#: animation to. Both are read in one pass because both need the same staged
+#: pages and Chrome is the most expensive thing in this suite.
+_GRID_PROBE = """
+<script>
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var tables = [];
+    document.querySelectorAll('table').forEach(function (table) {
+      var tr = table.querySelector('tbody tr');
+      if (!tr) return;
+      var style = getComputedStyle(tr);
+      tables.push({
+        classes: (table.className || '').toString(),
+        display: style.display,
+        tracks: style.gridTemplateColumns,
+        cells: tr.children.length
+      });
+    });
+    var flash = null;
+    var panel = document.querySelector('.flash');
+    if (panel) {
+      var cs = getComputedStyle(panel);
+      var box = panel.getBoundingClientRect();
+      flash = {
+        animationName: cs.animationName,
+        fillMode: cs.animationFillMode,
+        delay: cs.animationDelay,
+        left: Math.round(box.left),
+        right: Math.round(box.right)
+      };
+    }
+    var out = document.createElement('div');
+    out.id = 'probe-result';
+    out.textContent = JSON.stringify({
+      tables: tables, flash: flash, viewport: document.documentElement.clientWidth});
+    document.body.appendChild(out);
+  }, 300);
+});
+</script>
+"""
+
+
+def _grids(tmp_path: Path, pages: dict[str, str], width: int = 1440) -> dict[str, object]:
+    root = tmp_path / f"grids-{width}"
+    root.mkdir(parents=True, exist_ok=True)
+    probes.stage(root, STATIC, pages, _GRID_PROBE)
+    httpd, port = probes.serve(root)
+    try:
+        return {
+            name: probes.run(f"http://127.0.0.1:{port}/{name}.html", width, 1150) for name in pages
+        }
+    finally:
+        httpd.shutdown()
+
+
+@needs_chrome
+def test_the_column_templates_resolve_in_the_browser(
+    rendered: dict[str, str], tmp_path: Path
+) -> None:
+    """AC-16's rendered half: the file says which *form* was written, the
+    browser says what the columns came out as.
+
+    They are two different statements and only both together are the
+    requirement -- a template declared and never applied (a row that is not
+    `display: grid`) satisfies the file and draws nothing.
+    """
+    assert_probe_list_is_sound(rendered)
+    measured = _grids(tmp_path, rendered)
+    seen: dict[str, list[float]] = {}
+    for page, found in measured.items():
+        assert isinstance(found, dict)
+        for entry in found["tables"]:  # type: ignore[index]
+            classes = set(str(entry["classes"]).split())
+            for name in COLUMN_TEMPLATES:
+                if name not in classes:
+                    continue
+                assert entry["display"] == "grid", (
+                    f"{page}: a .{name} row is `display: {entry['display']}`, so the "
+                    f"column template is not applied at all: {entry}"
+                )
+                seen[name] = [float(track.rstrip("px")) for track in split_tracks(entry["tracks"])]
+
+    missing = sorted(set(COLUMN_TEMPLATES) - set(seen))
+    assert missing == [], (
+        f"no row of these tables was rendered on any of the {len(rendered)} screens, "
+        f"so their tracks were checked against the file and never against a browser: "
+        f"{missing}"
+    )
+
+    for name, widths in sorted(seen.items()):
+        ratios = COLUMN_TEMPLATES[name][0]
+        assert len(widths) == len(ratios), (
+            f".{name} resolved to {len(widths)} tracks, not {len(ratios)}: {widths}"
+        )
+        total, share = sum(widths), sum(ratios)
+        drift = {
+            index: (round(widths[index], 2), round(total * ratios[index] / share, 2))
+            for index in range(len(widths))
+            if abs(widths[index] - total * ratios[index] / share) > 1.0
+        }
+        assert drift == {}, (
+            f".{name} resolved to widths that are not in the proportion FR-17 "
+            f"describes (measured, expected): {drift}"
+        )
+
+
+@needs_chrome
+def test_the_flash_panel_animates_in_the_browser(rendered: dict[str, str], tmp_path: Path) -> None:
+    """AC-4's rendered half, and AC-19's geometry clause.
+
+    The stylesheet half is
+    `test_web_flash_and_refusal.test_the_flash_animation_is_declared_and_reducible`.
+    What only a browser can say is that the two keyframes are actually on the
+    element -- a rule written for `.flash .dot` or scoped under a media query
+    parses fine and animates nothing -- and where the panel is at 390.
+    """
+    assert_probe_list_is_sound(rendered)
+    staged = [name for name, html in rendered.items() if 'class="flash' in html]
+    assert len(staged) == 1, (
+        f"`all_pages` staged {len(staged)} flash panels; AC-4's rendered half needs "
+        f"exactly one page carrying the panel: {staged}"
+    )
+    page = {staged[0]: rendered[staged[0]]}
+
+    wide = _grids(tmp_path, page, width=1440)[staged[0]]
+    assert isinstance(wide, dict)
+    flash = wide["flash"]
+    assert flash is not None, "the browser drew no `.flash` element"
+    assert "cabinToast" in flash["animationName"], flash  # type: ignore[index]
+    assert "cabinToastOut" in flash["animationName"], (  # type: ignore[index]
+        f"the computed animation-name is {flash['animationName']!r}; the hide half "  # type: ignore[index]
+        f"is not on the panel"
+    )
+    assert "forwards" in flash["fillMode"], (  # type: ignore[index]
+        f"animation-fill-mode is {flash['fillMode']!r}; without `forwards` the panel "  # type: ignore[index]
+        f"reappears when the animation ends"
+    )
+    assert "3.2s" in flash["delay"], flash  # type: ignore[index]
+    assert flash["left"] == 250, (  # type: ignore[index]
+        f"at 1440 the panel's left edge is {flash['left']}, not the design's 250"  # type: ignore[index]
+    )
+
+    narrow = _grids(tmp_path, page, width=390)[staged[0]]
+    assert isinstance(narrow, dict)
+    small = narrow["flash"]
+    assert small is not None
+    assert small["left"] >= 0 and small["right"] <= narrow["viewport"], (  # type: ignore[index]
+        f"at 390 the panel is drawn from {small['left']} to {small['right']} in a "  # type: ignore[index]
+        f"{narrow['viewport']}px viewport. The design's `left: 250px` unqualified "
+        f"puts a 520px panel 250px into a phone screen, which is the one piece of "
+        f"geometry this spec adds and the one an eye on a desktop screenshot cannot see"
     )
