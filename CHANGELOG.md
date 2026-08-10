@@ -6,7 +6,7 @@ All notable changes to cabin are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-08-10
 
 Ten specifications, 0017–0026. cabin stops assuming there is one CA: it runs
 several hierarchies side by side, rotates between them, restricts who may
