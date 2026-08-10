@@ -502,9 +502,22 @@ def test_no_constraint_column_exists_in_the_migrated_schema(db: Session) -> None
     versions_dir = (
         Path(__file__).parent.parent / "src" / "cabin" / "store" / "migrations" / "versions"
     )
+    #: Spec 0020's requirement is that name constraints add no migration --
+    #: no column, no table, no revision. "0011 does not exist" was that written
+    #: as the head this spec happened to leave behind, and spec 0030 FR-2 adds
+    #: `0011_session_flash`, a column on `sessions`. The requirement is
+    #: asserted as itself instead: no revision after 0010 names `certificates`
+    #: or `ca_certificates`, which is what a name-constraint column would have
+    #: to. The two column censuses above already say the tables are unchanged;
+    #: this says nobody has a migration waiting to change them either.
     revisions = {p.stem.split("_", 1)[0] for p in versions_dir.glob("00*.py")}
-    assert "0011" not in revisions, revisions
     assert "0010" in revisions, revisions
+    later = [p for p in versions_dir.glob("00*.py") if p.stem.split("_", 1)[0] > "0010"]
+    touching = sorted(p.name for p in later if "certificates" in p.read_text())
+    assert touching == [], (
+        f"{touching} alter a certificates table in a revision after 0010; this spec "
+        f"stores name constraints in no column at all"
+    )
 
 
 # === FR-5: the matching rules ====================================================

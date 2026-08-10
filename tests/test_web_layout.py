@@ -10,7 +10,9 @@ geometric, and only a browser can see it.
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
+import dom
 import probes
 import pytest
 from fastapi.testclient import TestClient
@@ -463,13 +465,24 @@ def _populate(client: TestClient, cfg: Config, *, second_issuer: bool = False) -
         ).status_code
         == 303
     )
-    client.post(
+    # The base URL, **asserted**, and with no explicit port. `settings_ui`
+    # refuses a base URL that names one while TLS is on -- "the plaintext
+    # CRL/AIA listener runs on a different port" -- and this helper is called
+    # with `tls=True` by the two probe fixtures. The status was not checked, so
+    # the refusal was silent and no base URL was ever set: `/acme/admin` then
+    # renders "No base URL is set" instead of its directories table, the CRL
+    # cards on `/` render the no-distribution-point sentence, and spec 0030
+    # AC-16's browser half reported `.cols-directories` as never drawn. A
+    # fixture whose POST is refused is a fixture that never reaches the state
+    # the criterion is about.
+    saved = client.post(
         "/settings",
         data={
-            "base_url": "https://cabin.internal.example.com:8443",
+            "base_url": "https://cabin.internal.example.com",
             "csrf_token": _csrf(client, cfg),
         },
     )
+    assert saved.status_code == 303, saved.text
     issued = client.post(
         "/certs/issue",
         data={
@@ -490,6 +503,25 @@ def _populate(client: TestClient, cfg: Config, *, second_issuer: bool = False) -
         },
     )
     assert issued.status_code == 303
+    # A second certificate inside the 30-day window, so that the dashboard's
+    # `Expiring soon` table exists at all. Spec 0030 AC-16's own note says
+    # `.cols-expiring` needs one and that "the criterion's fixture has all of
+    # them"; this fixture's only certificate ran for 90 days, so the table was
+    # never rendered and its column template was checked against the file and
+    # never against a browser. It is also what makes the rail's count badge
+    # (FR-7) appear on every page these probes walk.
+    expiring = client.post(
+        "/certs/issue",
+        data={
+            "subject_cn": "vault-unseal.platform.internal.example.com",
+            "sans": "vault-unseal.platform.internal.example.com",
+            "profile": "server",
+            "key_type": "ecdsa-p256",
+            "days": 20,
+            "csrf_token": _csrf(client, cfg),
+        },
+    )
+    assert expiring.status_code == 303, expiring.text
     client.post(
         "/tokens",
         data={
@@ -498,13 +530,21 @@ def _populate(client: TestClient, cfg: Config, *, second_issuer: bool = False) -
             "csrf_token": _csrf(client, cfg),
         },
     )
-    client.post(
+    # An EAB key, **asserted**, and with the `issuer_id` the route requires.
+    # Without it the POST is a 422 from FastAPI's own validation, the key is
+    # never created, and `/acme/admin` renders no `.cols-eab` table for a probe
+    # to measure -- the same silent-refusal failure as the base URL above.
+    # `POST /acme/admin/eab-keys` answers 200 with the secret shown once
+    # (spec 0030 FR-3's second named exclusion), not 303.
+    eab = client.post(
         "/acme/admin/eab-keys",
         data={
             "label": "traefik.edge.internal.example.com",
+            "issuer_id": _first_intermediate_id(cfg),
             "csrf_token": _csrf(client, cfg),
         },
     )
+    assert eab.status_code == 200, eab.text
     if second_issuer:
         assert (
             client.post(
@@ -585,7 +625,18 @@ def test_nav_current_marked_once_per_page(client: TestClient, cfg: Config) -> No
     }
     for path, label in expected.items():
         html = client.get(path).text
-        marked = re.findall(r'<a href="[^"]*" aria-current="page">([^<]+)</a>', html)
+        # Parsed rather than matched with a regex over the anchor's whole
+        # inner text: spec 0030 FR-7 puts a `.nav-count` badge inside the
+        # Inventory link when a certificate is expiring, so `>([^<]+)<` stops
+        # matching that one entry the moment the fixture has one -- which it
+        # now does, because AC-16 needs `.cols-expiring` rendered. The label
+        # is the anchor's *own* text; the badge is a child element and is a
+        # number, not a label.
+        marked = [
+            " ".join(" ".join(node.own_text).split())
+            for node in dom.parse(html).find_all(tag="a")
+            if node.get("aria-current") == "page"
+        ]
         assert marked == [label], f"{path}: {marked}"
 
 
@@ -892,6 +943,68 @@ def all_pages(client: TestClient, cfg: Config, cert_path: str) -> dict[str, str]
     return rendered
 
 
+#: What each walking probe has to have examined on a screen before its
+#: `bad == []` means anything (spec 0027 FR-4/FR-14/AC-11, spec 0030 AC-19).
+#:
+#: **Per page, and it stays per page.** AC-19 words the floor "per run"; summed
+#: over a run, a screen the probe went blind on hides behind the twenty-two it
+#: did not, and a probe that measured nothing on one page while reporting
+#: `bad == []` is the exact failure the floor exists to catch. The criterion is
+#: corrected to say per page rather than the floors being loosened to match it.
+#:
+#: **Two tiers, because the three screens spec 0030 FR-16 adds are not
+#: application screens.** `/login` offers two fields and a submit and draws
+#: four elements with text of their own; `/setup` adds one paragraph; the
+#: refused render is a viewer's rail, a heading, a sentence and a link. FR-16
+#: adds no markup to any of them and forbids inventing some, so a floor
+#: calibrated on a page with a table on it is a floor they cannot reach, and
+#: dropping the application tier to fit them would take the guard off the
+#: twenty screens it was built for.
+#:
+#: Every number here is still far above what a blind probe reports: the
+#: overflow walker leaves exactly **one** element examined when it excuses a
+#: page (spec 0027 FR-4's own measurement, and
+#: `test_the_pre_repair_walker_would_have_missed_it` still pins it), and the
+#: contrast and focus probes leave **none**. On the four readings whose numbers
+#: are smallest the entry is not a floor at all but the count the page's own
+#: markup declares, which is *stronger* than the floor the application screens
+#: carry: a probe that excused one control on `/login` reports two and fails,
+#: where `>= 3` would pass it.
+PROBE_FLOORS = {"overflow": 20, "contrast": 30, "focus": 5}
+
+#: probe -> screen -> (comparison, number). "exactly" is the page's own count:
+#: `/login` has two fields and a submit (focus) and a heading, two labels and
+#: that submit drawing text (contrast); `/setup` adds its one `.note`
+#: paragraph. The refused render keeps a floor rather than a count, because it
+#: wears the rail and a viewer's rail is role-gated -- what it holds is a
+#: property of the role table, not of the page.
+SMALL_SCREEN_FLOORS: dict[str, dict[str, tuple[str, int]]] = {
+    "overflow": {"login": ("at least", 10), "setup": ("at least", 10)},
+    "contrast": {
+        "login": ("exactly", 4),
+        "setup": ("exactly", 5),
+        "not_permitted": ("at least", 15),
+    },
+    "focus": {"login": ("exactly", 3), "setup": ("exactly", 3)},
+}
+
+
+def assert_examined_enough(probe: str, results: dict[str, Any]) -> None:
+    """Every screen reported having looked at what that screen has."""
+    floor = PROBE_FLOORS[probe]
+    small = SMALL_SCREEN_FLOORS[probe]
+    thin = {}
+    for name, found in results.items():
+        seen = int(str(found["examined"]))
+        comparison, want = small.get(name, ("at least", floor))
+        if seen < want if comparison == "at least" else seen != want:
+            thin[name] = f"{seen} examined, {comparison} {want} expected"
+    assert thin == {}, (
+        f"the {probe} probe did not look at these screens: {thin}. A green run that "
+        f"measured no page is the failure spec 0027 FR-4 exists to catch"
+    )
+
+
 def assert_probe_list_is_sound(rendered: dict[str, str]) -> None:
     """The two preconditions every walking probe over `all_pages` depends on.
 
@@ -1030,8 +1143,4 @@ def test_no_horizontal_overflow(tmp_path: Path, width: int, height: int, scheme:
 
     offenders = {name: found["bad"] for name, found in results.items() if found["bad"]}
     assert offenders == {}
-    thin = {name: found for name, found in results.items() if int(str(found["examined"])) < 20}
-    assert thin == {}, (
-        f"the probe examined almost nothing on {sorted(thin)} -- a green run that "
-        f"measured no page is the failure spec 0027 FR-4 exists to catch: {thin}"
-    )
+    assert_examined_enough("overflow", results)

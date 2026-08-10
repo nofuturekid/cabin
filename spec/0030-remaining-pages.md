@@ -499,6 +499,24 @@ entry that reader does not find.
   rule is written for any of them** — AC-8 asserts each of those names
   has exactly one rule block in `cabin.css`.
 
+  > **Correction (test-authoring): "no second rule" is about this spec,
+  > not about the count.** The sentence above read that AC-8 asserts each
+  > of those names has *exactly one* rule block in `cabin.css`, and no
+  > build can satisfy that — spec 0028's grouped list ships a base rule
+  > **and** descendant rules under the same names (`.row-root` and
+  > `.row-root td:first-child a`, `.row-child` and
+  > `.row-child td:first-child`, `.rowlink::after` beside the two
+  > `tr:has(.rowlink)` rules). The count was already false at this spec's
+  > base commit, so a build that met it would have had to delete part of
+  > the component this requirement asks to be *reused*.
+  >
+  > What the requirement means is that **this spec** writes no rule for
+  > any of those names, and that is what AC-8 clause 4 now measures: the
+  > selectors naming each of the six are the ones the file carried at the
+  > base commit. A grouped list re-implemented here under these names
+  > adds a selector and fails; one re-implemented under new names is
+  > caught by clauses 1 to 3, which read the rendered rows.
+
   What each of the three lists gets of its own is exactly one class:
   its column template (FR-17). That is 0028's own vocabulary — a column
   set is a `cols-*` class on the `<table>` and nothing else — and it is
@@ -1009,10 +1027,20 @@ entry that reader does not find.
   (0027 FR-14) and the focus probe (0027 AC-11) run over the full page
   list **plus** `/login`, `/setup` and a refused render, at 1440×1150
   and 390×900, in the dark and the light stylesheet, with `bad == []`
-  and `examined >= 20` per run. The flash is staged into at least one
-  of those pages with a real message rather than left absent, since a
-  panel that is not rendered is not a panel that can push a page
-  sideways.
+  and, **per page**, an `examined` floor that page can reach (AC-19).
+  The flash is staged into at least one of those pages with a real
+  message rather than left absent, since a panel that is not rendered
+  is not a panel that can push a page sideways.
+
+  **The three screens this spec adds have to be in the states they are
+  probed for**, which is the other half of what "the fixture has all of
+  them" means (AC-16's note). The probe fixture sets a base URL, holds
+  an EAB key and holds a certificate expiring inside 30 days, because
+  `.cols-directories`, `.cols-eab` and `.cols-expiring` are rendered by
+  nothing otherwise — and every one of those states is reached by a
+  request whose status is **asserted**, so that a refused fixture POST
+  cannot leave a criterion looking satisfied by a page that was never
+  drawn.
 
 - FR-22: **Templates, the stylesheet and this spec's markdown are
   edited by a script through Bash, never with Edit/Write, and
@@ -1369,8 +1397,9 @@ days and one expiring outside it, and a base URL set.
   - a `viewer` session `GET /tokens` (a plain UI prefix) → 403,
     `Content-Type` starts `text/html`, the body parses to an `<html>`
     with `<aside class="rail">`, `<main id="main">`, exactly one `<h1>`
-    reading `Not permitted`, exactly one `<a>` whose `href` is
-    `/certs`, and **no** element carrying `aria-current="page"`;
+    reading `Not permitted`, exactly one `<a>` **inside
+    `<main id="main">`** — carrying `button-link`, whose `href` is
+    `/certs` — and **no** element carrying `aria-current="page"`;
   - a `viewer` session `GET /acme/admin` → the same, which is the
     clause a path test on `/acme` fails;
   - a `viewer` session `POST /users/{id}/delete` with a valid CSRF
@@ -1413,6 +1442,22 @@ days and one expiring outside it, and a base URL set.
   > with the streamable-HTTP `Accept` header, which reaches MCP's own
   > credential check and answers 401. Any door whose refusal is a 405
   > measures routing, not this boundary.
+
+  > **Correction (test-authoring): this criterion contradicted FR-5 and
+  > the requirement is the half that was right.** It asked for "exactly
+  > one `<a>` whose `href` is `/certs`" over the whole page, and FR-5's
+  > own first sentence puts the rail on that page — a rail whose
+  > Inventory entry is `href="/certs"`. The two cannot both hold, and the
+  > only way to satisfy the count as written is to point the button
+  > somewhere else, which makes FR-5's own literal
+  > `<a class="button-link" href="/certs">` false.
+  >
+  > FR-5 is right and stands unchanged. What the clause is for is the
+  > design's §5.2 "one primary link", and a primary link is part of the
+  > page's own content, not of the shell around it — so it is counted
+  > inside `<main id="main">`, where exactly one is exactly the claim.
+  > The rail's link is not a second primary link; it is the rail, and
+  > FR-5 wants it there.
 
   _Goes red if_: the classifier is a path prefix (the `/acme/admin`
   clause), if it is registered for every status (a 404 on `/api/v1`
@@ -1462,9 +1507,12 @@ days and one expiring outside it, and a base URL set.
      tag reading `cross`;
   3. each row's expiry text equals `_ca_expiry(row, now)["not_after"]`
      for that row;
-  4. in `cabin.css`, each of `row-root`, `row-child`, `tree`,
-     `state-active`, `state-retired` and `rowlink` is the subject of
-     **exactly one** rule block.
+  4. in `cabin.css`, the set of rule-block selectors naming each of
+     `row-root`, `row-child`, `tree`, `state-active`, `state-retired`
+     and `rowlink` is **the set the file carried at this spec's base
+     commit** — this spec adds a rule for none of them (FR-9's
+     correction; each set is also asserted non-empty, so the comparison
+     cannot pass on a stylesheet that never had the component in it).
 
   _Goes red if_: the grouped list is re-implemented here under new
   names (clause 4), or a cross row is dropped because it has no root to
@@ -1534,18 +1582,33 @@ days and one expiring outside it, and a base URL set.
   once.
 
 - AC-12: **The audit pills are links and carry the other filters.** On
-  `GET /audit?q=cabin&action=ca_renewed&actor_kind=api`:
+  `GET /audit?q=cabin&action=ca_renewed&actor_kind=token`:
   1. the `.pill` elements are exactly the `ACTOR_KIND_FILTERS` values,
      in order, and every one is an `<a>`; zero `<button>` elements
      appear among them;
   2. each `href` equals `audit_ui._page_url("cabin", "ca_renewed", that_kind, 1)`,
      so each carries the search text and the action filter through;
-  3. exactly one carries `pill-on`, the one for `api`;
+  3. exactly one carries `pill-on`, the one for `token`;
   4. the `action` `<select>` is still inside the GET form, with one
      `<option>` per `ACTION_FILTERS` entry and the same submit button.
 
-  Then, with no `HX-Request` header, following the `mcp` pill returns
-  200 with `pill-on` on `mcp` and `action=ca_renewed` still active.
+  Then, with no `HX-Request` header, following the `acme` pill returns
+  200 with `pill-on` on `acme` and `action=ca_renewed` still active.
+
+  > **Correction (test-authoring): this criterion still used the design's
+  > five.** FR-12's own correction records that cabin's pill values are
+  > `ACTOR_KIND_FILTERS` — `all / user / token / system / acme` — and not
+  > the design's `all / ui / api / acme / mcp`; only the cardinality
+  > matches. The criterion was written before that correction and kept
+  > `api` and `mcp`, neither of which cabin has. `audit_ui.py:67`
+  > normalises an unrecognised `actor_kind` to `all`, so clause 3 asked
+  > for `pill-on` on a filter the page cannot carry and the last clause
+  > asked a pill that does not exist to be followed — a criterion no
+  > build could pass, in the requirement whose own correction was written
+  > to stop exactly this. `token` is the value the design calls `api`;
+  > `acme` is the one name both lists share, which is why it is the pill
+  > that gets followed.
+
   _Goes red if_: the pills drop the action filter, which would make
   every pill a reset disguised as a narrowing.
 
@@ -1627,6 +1690,20 @@ days and one expiring outside it, and a base URL set.
   > rendered row uses is reported as missing rather than skipped, so
   > "measured against a browser" cannot quietly become "measured
   > against the file twice".
+  >
+  > **Correction (test-authoring): the fixture did not have them, and
+  > saying it did is how that went unnoticed.** The probe fixture's
+  > base-URL POST was refused (a base URL may not name a port while TLS
+  > is on, and the probes run with TLS on) and its EAB-key POST was a
+  > 422 (no `issuer_id`), and neither status was asserted — so no base
+  > URL was ever set, no EAB key ever existed, and `/acme/admin` rendered
+  > neither `.cols-directories` nor `.cols-eab` for a browser to measure.
+  > Its one certificate ran for 90 days, so the dashboard's
+  > `Expiring soon` table was never drawn either. Three of the eleven
+  > column templates were checked against the file and against nothing
+  > else. FR-21 now states the states, and each of them is reached by a
+  > request whose status is asserted: a fixture whose POST is refused is
+  > a fixture that never arrives, and it is the assertion that says so.
 
 - AC-17: **The stylesheet and the templates agree, in both directions,
   and nothing is reserved any more.** Stated as the property, over the
@@ -1650,6 +1727,17 @@ days and one expiring outside it, and a base URL set.
   > is satisfied by editing that test, and the reader cannot tell from
   > it what the build has to do. The three clauses above are the
   > property; which test carries them is a matter for the Test list.
+
+  > **Confirmed (test-authoring): clause 1 bites, and what it caught is
+  > `tag-unused`.** With the probe fixture actually holding an EAB key
+  > (FR-21), `/acme/admin` renders `<span class="tag tag-unused">` for a
+  > key that has not been bound — `acme_ui.py:133`'s third status,
+  > unchanged by this spec — and `cabin.css` declares a rule for
+  > `.tag-bound` and for `.tag-revoked` and none for `.tag-unused`. The
+  > gap is older than this spec and no criterion could see it, because no
+  > fixture in the suite had ever created an EAB key. Clause 1 takes no
+  > exemption: the `tag-*` exemption belongs to clause 2 and is about
+  > rules with no user, not about markup with no rule.
 
   _Goes red if_: a `cols-*` or a state class is written as
   `cols-{{ … }}` or `seg-{{ … }}` — the rule would have no literal
@@ -1715,11 +1803,48 @@ days and one expiring outside it, and a base URL set.
   flash is inside the viewport.** The overflow probe, the contrast
   probe and the focus probe over the full page list plus `/login`,
   `/setup` and a refused render, at 1440×1150 and 390×900, in the dark
-  and the light stylesheet, `bad == []` and `examined >= 20` per run,
-  with a flash staged into at least one page in each run rather than
-  left absent. In the same run, at 390 the flash element's
+  and the light stylesheet, `bad == []` **and an `examined` floor per
+  page**, with a flash staged into at least one page in each run rather
+  than left absent. In the same run, at 390 the flash element's
   `getBoundingClientRect().left` is `>= 0` and its `right` is
   `<= innerWidth`; at 1440 its `left` is the design's 250.
+
+  The floors are two tiers:
+
+  | Probe    | The twenty application screens | `/login` | `/setup` | the refused render |
+  | -------- | ------------------------------ | -------- | -------- | ------------------ |
+  | overflow | `>= 20`                        | `>= 10`  | `>= 10`  | `>= 20`            |
+  | contrast | `>= 30`                        | `== 4`   | `== 5`   | `>= 15`            |
+  | focus    | `>= 5`                         | `== 3`   | `== 3`   | `>= 5`             |
+
+  > **Correction (test-authoring), twice over.**
+  >
+  > **The floor is per page, and it is written per page here because
+  > that is what it has always been measured as.** This criterion said
+  > "per run". Summed over a run, a screen the probe went blind on hides
+  > behind the twenty-two it did not, which is the failure the floor
+  > exists to catch — so the wording is corrected to the measurement
+  > rather than the measurement loosened to the wording.
+  >
+  > **And a floor calibrated on an application screen is one the three
+  > screens FR-16 adds cannot reach.** `/login` offers two fields and a
+  > submit and draws four elements carrying text of their own; `/setup`
+  > adds one `.note` paragraph; the refused render is a viewer's rail,
+  > a heading, a sentence and a link. FR-16 adds no markup to any of
+  > them and forbids inventing some, so `examined >= 30` on `/login` is
+  > a criterion that can only be met by changing the page it is about.
+  > They get their own tier, and every number in it is far above what a
+  > blind probe reports — the overflow walker leaves exactly **one**
+  > element examined when it excuses a page (spec 0027 FR-4), the
+  > contrast and focus probes leave **none**. On the four readings whose
+  > numbers are smallest the entry is not a floor at all but the count
+  > the page's own markup declares, which is *stronger* than the floor
+  > the application screens carry: a probe that excused one control on
+  > `/login` reports two and fails, where `>= 3` would pass it. The
+  > refused render keeps floors rather than counts, because it wears the
+  > rail and what a viewer's rail holds is a property of the role table
+  > rather than of this page.
+
   _Goes red if_: the design's `left: 250px` ships unqualified — at 390
   the panel starts 250px into a 390px viewport, which is the one piece
   of geometry this spec adds and the one an eye on a desktop screenshot
@@ -1948,6 +2073,80 @@ protects.
   > of the rows in that table "surface when the plan is checked against
   > 0027's, 0029's and 0016's own text", and these three surface only
   > when it is checked against the tests.
+
+- **`tests/test_ca_issuer_pages.py`'s `test_no_sentence_changed_on_the_five_pages`**
+  and **`tests/test_web_form_previews.py`'s
+  `test_no_sentence_changed_on_the_form_pages`** protect spec 0028 FR-15
+  and spec 0029 FR-14: nothing those specs' pages said is gone. Both
+  render whole pages through a *template directory* — the baseline one
+  for the `before` pass and today's for the `after` — so `layout.html` is
+  in both renders and this spec's two changes to it land on every page
+  they cover. Each names them, per page: FR-19's one changed string
+  (`Transfer` → `Export`) as a permitted removal and an addition, and
+  FR-11's rail-footer avatar as an addition, derived from the fixture's
+  own username rather than typed as a letter. AC-18's own instrument sees
+  neither, because it compares template *files*, where the avatar is a
+  Jinja expression and not a literal.
+- **`tests/test_cross_signing.py`'s `test_migration_chain_still_ends_at_0010`**
+  and **`tests/test_name_constraints.py`'s
+  `test_no_constraint_column_exists_in_the_migrated_schema`** protect
+  spec 0021's and spec 0020's "this spec adds no migration". Both wrote
+  it as the head those specs happened to leave behind, and FR-2 moves the
+  head to 0011. Each is re-pointed at the requirement itself: the
+  migrated head equals the newest revision on disk — a stale head still
+  fails — and no revision after 0010 touches `ca_certificates` or
+  `certificates`, which a name-constraint column or a cross-signing
+  column would have to.
+- **`tests/test_issuer_permissions.py`'s `test_granted_viewer_still_refused`**
+  protects spec 0018 AC-3: a viewer holding every grant is refused at
+  every door, with the *role* refusal and not a grant refusal. FR-6 makes
+  a UI refusal an HTML page, so the string that told the causes apart is
+  no longer `{"detail": "forbidden for this role"}` but FR-19's role
+  sentence — asserted present, with the CSRF sentence asserted absent, so
+  that "refused" still means refused for the role.
+- **`tests/test_web_certs_inventory.py`'s `test_list_page_filters`**
+  protects spec 0006 FR-2: a status filter narrows the list. It read
+  `"printer.lan" not in resp.text`, and FR-3 puts
+  `issued certificate for 'printer.lan'` on the next page the fixture's
+  own POST sends it to, so the page-wide reading measures the flash panel
+  rather than the filter. Re-pointed at the inventory's rows, which is
+  what spec 0006 is about.
+- **`tests/test_cross_chains.py`'s
+  `test_dashboard_warns_a_year_before_a_cross_certificate_expires`**
+  protects spec 0021 AC-16: a cross certificate is on the dashboard and
+  is flagged a year ahead. FR-8/FR-9 replace the flat table with the
+  grouped list, so the row is no longer `<tr><th>name</th>`. Re-pointed
+  at the grouped block and scoped by the row's own `cross` kind tag
+  rather than by "the last row naming X" — a cross row's name equals its
+  subject root's, and FR-9 gives it the one mark that tells them apart.
+- **`tests/test_web_design_shell.py`'s `test_the_twelve_numbers`**
+  protects spec 0027 FR-22's twelfth number, the design's `10px 12px`
+  list row. Spec 0028 FR-12 moved that reading onto `/certs` because
+  every table on `/ca/{root}` had become a `.rows` grid; FR-17 makes
+  `/certs` one too, so there is no unconverted list left to move it to.
+  It stays on `/certs` in the grid form — the cell's `10px` and the row's
+  `12px` — and the clause asking whether the row is a grid **inverts**:
+  it now has to be one, which is the same check AC-16 splits its two
+  tests over.
+- **`tests/test_web_layout.py`'s `test_nav_current_marked_once_per_page`**
+  protects spec 0027 AC-5: exactly one rail entry is marked, and it is
+  the page being viewed. It read the marked label with
+  `>([^<]+)</a>`, and FR-7 puts the count badge *inside* the Inventory
+  link, so that anchor stops matching the moment a certificate is
+  expiring — which FR-21's fixture now guarantees. Re-pointed at the
+  anchor's own text; the badge is a child element and a number, not a
+  label.
+
+  > **Correction (test-authoring): none of the eight above was in this
+  > list either.** Each fails against a correct implementation of this
+  > spec, for a reason argued in one of its requirements, and the earlier
+  > correction three entries up says exactly why that matters: "the table
+  > is where a reader checks what will break, so an entry argued in one
+  > requirement and absent from the table is an entry the reader does not
+  > find." Three were found when the spec was checked against the tests;
+  > these eight were found only when the tests were run against the
+  > build, which is one round later than it should have taken and is the
+  > reason they are written down rather than quietly repaired.
 
 **Strengthened** — the requirement grows:
 

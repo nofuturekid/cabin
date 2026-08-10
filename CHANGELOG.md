@@ -454,6 +454,58 @@ certificate under it, not only the ones the key holder made.
   typo, not an error. A rejected create or cross-sign comes back with its own
   panel open and the submitted values still in the fields.
 
+- **Spec 0030 (remaining-pages): every page an operator sees now says what
+  just happened, and a refusal is a page.** The dashboard, the inventory,
+  users, API tokens, ACME, the audit log, settings and the three remaining
+  transfer pages take the design's arrangement — grouped authority lists,
+  the design's column templates, service chips, a segmented status filter and
+  filter pills that are real links with addresses, toggle switches drawn on
+  the real checkboxes, and `user-select: all` on the values that used to have
+  a copy button. Not one sentence on any of them changed.
+
+- **A flash message, in one nullable column.** A UI POST that answers 303 and
+  records exactly one audit event now leaves that event's own summary on the
+  session row; the next page pops it, shows it once and clears it in the same
+  transaction. Migration `0011` adds `sessions.flash` (nullable `TEXT`, no
+  server default) and is the only schema change in the redesign. The message
+  is deliberately **not** a query parameter: a `?flash=` survives a bookmark,
+  survives `F5`, leaks into `Referer` and every proxy log, and is forgeable —
+  any link anybody sends would become a sentence cabin says in its own voice.
+  The cost is named rather than glossed: an authenticated GET becomes a write
+  whenever a message is pending. There is one tone and no close button; no
+  failing UI POST redirects, so an error flash would have no producer, and
+  spec 0029's rule leaves no route-shaped way to dismiss one early.
+  `POST /tokens` and `POST /acme/admin/eab-keys` are excluded by name — both
+  render a live credential exactly once, and routing them through a column
+  would store it in clear text and show it again.
+
+- **A refusal reaches a browser as cabin's own page.** `deps.py`'s bare
+  `HTTPException(403)` used to arrive as `{"detail": "forbidden for this
+  role"}` in a browser window. It is now `not_permitted.html`, inside the
+  shell with the rail, naming which of cabin's two actual causes applied —
+  a role that may not open the page, or a form submitted with a token this
+  session does not recognise — and offering a way back. **The other three
+  front doors are unchanged, byte for byte.** The handler decides by which
+  router owns the matched route and never by the request path: `/acme/admin`
+  is an interface page whose path begins `/acme`, so a prefix test would
+  answer cabin's own ACME settings page as `application/problem+json`. A new
+  API, ACME or MCP route lands outside the interface set with nobody
+  remembering anything, which is the direction a mistake here has to fail in.
+
+- **The rail's fourth group is `Export`.** It holds Trust bundle, CA key and
+  Inventory export; `Import a CA` and `Import a cross certificate` move under
+  `Certificate authority`, which is where the design puts them. Sixteen
+  entries, every `href` and every label unchanged. The Inventory entry gains a
+  count badge when something is expiring — the same `status_counts` figure the
+  dashboard's tile shows — and no badge at all at zero.
+
+- **A user row is edited at its own URL.** `GET /users?edit={id}` opens one
+  row as a form; without it every row is text with an `Edit` link. It works
+  with JavaScript off, it survives an error re-render, it can be linked to,
+  and it adds no endpoint — htmx fetches the same page and takes the row out
+  of it. `?edit=` is a request to open a row and never a grant: a viewer is
+  offered nothing at either URL.
+
 ### Changed
 
 - **Seven environment variables, not five.** `CABIN_TLS` (default `false`) and

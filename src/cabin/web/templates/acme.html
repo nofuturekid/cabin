@@ -25,11 +25,11 @@
     <form method="post" action="/acme/admin">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <label class="field-check">
-        <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
+        <input id="acme_enabled" class="toggle" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
         Enable the ACME server
       </label>
       <label class="field-check">
-        <input id="acme_require_eab" type="checkbox" name="acme_require_eab" value="on" {{ "checked" if acme_require_eab else "" }} />
+        <input id="acme_require_eab" class="toggle" type="checkbox" name="acme_require_eab" value="on" {{ "checked" if acme_require_eab else "" }} />
         Require external account binding (clients must present a key below)
       </label>
       <div class="actions"><button type="submit" class="primary">Save</button></div>
@@ -68,7 +68,7 @@
     </p>
     {% elif issuers %}
     <div class="scroller">
-      <table>
+      <table class="rows cols-directories">
         <thead>
           <tr>
             <th>Issuer</th>
@@ -81,7 +81,7 @@
           <tr>
             <td>{{ issuer.name }}</td>
             <td><span class="tag{% if issuer.status == "retired" %} tag-bad{% endif %}">{{ issuer.status }}</span></td>
-            <td class="mono">{{ issuer.directory_url }}</td>
+            <td><code class="copyable">{{ issuer.directory_url }}</code></td>
           </tr>
           {% endfor %}
         </tbody>
@@ -106,7 +106,7 @@
   <p class="note">Key ID</p>
   <pre class="pem">{{ secret_key_id }}</pre>
   <p class="note">HMAC key (base64url)</p>
-  <pre class="pem">{{ secret }}</pre>
+  <p><code class="copyable">{{ secret }}</code></p>
 </div>
 {% endif %}
 
@@ -118,7 +118,7 @@
 
 {% if keys %}
 <div class="scroller">
-  <table>
+  <table class="rows cols-eab">
     <thead>
       <tr>
         <th>Label</th>
@@ -140,10 +140,10 @@
         <td>
           {% if key.bound_account_id %}
           <span class="mono">{{ key.bound_account_id }}</span>
-          <span class="nowrap">({{ key.bound_at }})</span>
+          <span>({{ key.bound_at }})</span>
           {% else %}—{% endif %}
         </td>
-        <td class="nowrap">{{ key.created_at }}</td>
+        <td class="mono">{{ key.created_at }}</td>
         <td class="row-actions">
           {% if key.can_revoke %}
           <form method="post" action="/acme/admin/eab-keys/{{ key.id }}/revoke">

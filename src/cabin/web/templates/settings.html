@@ -99,7 +99,7 @@
     </div>
     <div>
       <label class="field-check">
-        <input id="acme_enabled" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
+        <input id="acme_enabled" class="toggle" type="checkbox" name="acme_enabled" value="on" {{ "checked" if acme_enabled else "" }} />
         Enable the ACME server
       </label>
       <p class="note">
@@ -150,7 +150,7 @@
     </div>
     <div>
       <label class="field-check">
-        <input id="mcp_enabled" type="checkbox" name="mcp_enabled" value="on" {{ "checked" if mcp_enabled else "" }} />
+        <input id="mcp_enabled" class="toggle" type="checkbox" name="mcp_enabled" value="on" {{ "checked" if mcp_enabled else "" }} />
         Enable the MCP server
       </label>
       {% if mcp_enabled %}

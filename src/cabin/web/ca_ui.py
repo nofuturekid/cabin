@@ -43,6 +43,7 @@ from cabin.web.deps import (
     base_context,
     client_ip,
     current_actor,
+    flash,
     get_current_user,
     get_db,
     is_htmx,
@@ -556,7 +557,7 @@ def _detail_page(
     ``_issuer_page``, which is where the URL is rendered.
     """
     rows = ca_service.list_cas(db)
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["error"] = error
     context["group"] = _group(db, rows, root)
     context["values"] = values or {}
@@ -609,7 +610,7 @@ def _issuer_page(
             view["served"] = "not_served"
         signer = ca_service.get_ca(db, row.parent_id) if row.parent_id is not None else None
         view["signed_by"] = signer.name if signer is not None else "unknown"
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["error"] = error
     context["root"] = {"id": root.id, "name": root.name}
     context["row"] = view
@@ -618,6 +619,7 @@ def _issuer_page(
 
 def _new_page(
     request: Request,
+    db: Session,
     user: User,
     error: str | None,
     status_code: int = 200,
@@ -630,7 +632,7 @@ def _new_page(
     preview dictionary the aside's macro renders under ``values["preview"]``
     rather than as a context key of its own -- the macro reads its one
     argument and nothing else, and a first GET hands it nothing."""
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["error"] = error
     context["values"] = values or {}
     return templates.TemplateResponse(request, "ca_new.html", context, status_code=status_code)
@@ -646,15 +648,19 @@ def ca_page(
     FR-10's TLS note under the same condition ``ca_setup.html`` did: visible
     only while both hold -- self-signed TLS and no hierarchy at all."""
     rows = ca_service.list_cas(db)
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["overview"] = _overview(db, rows)
     context["tls_self_signed"] = _tls_self_signed(request)
     return templates.TemplateResponse(request, "ca_list.html", context)
 
 
 @router.get("/new")
-def ca_new_page(request: Request, user: User = Depends(require_admin)) -> Response:
-    return _new_page(request, user, None)
+def ca_new_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    return _new_page(request, db, user, None)
 
 
 @router.get("/{ca_id:int}")
@@ -767,7 +773,7 @@ def ca_create(
         or _path_length_error(path_length)
     )
     if form_error is not None:
-        return _new_page(request, user, form_error, status_code=400)
+        return _new_page(request, db, user, form_error, status_code=400)
     root = ca_service.create_root(
         db,
         request.app.state.secrets,
@@ -776,11 +782,14 @@ def ca_create(
         years=root_years,
         path_length=path_length,
     )
+    # Spec 0030 FR-3: one sentence, bound once, handed to the log and to the
+    # panel -- the two cannot drift apart.
+    summary = f"created CA root {stripped_name!r}"
     audit.record(
         db,
         actor,
         AuditAction.ca_created,
-        summary=f"created CA root {stripped_name!r}",
+        summary=summary,
         target_type="ca_certificate",
         target_id=root.id,
         detail={
@@ -805,6 +814,7 @@ def ca_create(
     tls_manager = request.app.state.tls
     if tls_manager is not None:
         tls_manager.ensure_current(db, request.app.state.secrets)
+    flash(request, db, summary)
     return RedirectResponse("/ca", status_code=303)
 
 
@@ -846,6 +856,7 @@ def ca_create_preview(
     key_type: str = Form("ecdsa-p256"),
     root_years: int = Form(20),
     path_length: int = Form(1),
+    db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
@@ -865,7 +876,7 @@ def ca_create_preview(
     if is_htmx(request):
         return preview_fragment("create_panel", preview)
     values["preview"] = preview
-    return _new_page(request, user, None, values=values)
+    return _new_page(request, db, user, None, values=values)
 
 
 @router.post("/{root_id}/intermediate")
@@ -958,11 +969,12 @@ def ca_create_intermediate(
     # FR-10: read back off the certificate that was actually produced.
     produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     permitted, excluded = _canonical_entries(leaf.constraints_of(produced))
+    summary = f"created intermediate {row.name!r} under root {root_id}"
     audit.record(
         db,
         actor,
         AuditAction.ca_created,
-        summary=f"created intermediate {row.name!r} under root {root_id}",
+        summary=summary,
         target_type="ca_certificate",
         target_id=row.id,
         detail={
@@ -986,6 +998,7 @@ def ca_create_intermediate(
     tls_manager = request.app.state.tls
     if tls_manager is not None:
         tls_manager.ensure_current(db, request.app.state.secrets)
+    flash(request, db, summary)
     return RedirectResponse(f"/ca/{root_id}", status_code=303)
 
 
@@ -1028,11 +1041,12 @@ def ca_cross_sign(
             request, db, user, root, str(exc), status_code=400, open_form="cross-sign"
         )
     produced = x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
+    summary = f"cross-signed {row.name!r} with root {signing_root_id}"
     audit.record(
         db,
         actor,
         AuditAction.ca_cross_signed,
-        summary=f"cross-signed {row.name!r} with root {signing_root_id}",
+        summary=summary,
         target_type="ca_certificate",
         target_id=row.id,
         detail={
@@ -1043,6 +1057,7 @@ def ca_cross_sign(
         },
         ip=client_ip(request, db),
     )
+    flash(request, db, summary)
     return RedirectResponse(f"/ca/{ca_id}", status_code=303)
 
 
@@ -1072,16 +1087,18 @@ def ca_renew(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (CANotConfiguredError, RowRetiredError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    summary = f"renewed CA {row.name!r}"
     audit.record(
         db,
         actor,
         AuditAction.ca_renewed,
-        summary=f"renewed CA {row.name!r}",
+        summary=summary,
         target_type="ca_certificate",
         target_id=row.id,
         detail={"years": years},
         ip=client_ip(request, db),
     )
+    flash(request, db, summary)
     return RedirectResponse(_page_of(row), status_code=303)
 
 
@@ -1131,15 +1148,17 @@ def ca_retire(
     # Retiring an already-retired row is a no-op (FR-4): only a real state
     # change is worth an event, the same rule the role/token routes apply.
     if was_active:
+        summary = f"retired CA {row.name!r}"
         audit.record(
             db,
             actor,
             AuditAction.ca_retired,
-            summary=f"retired CA {row.name!r}",
+            summary=summary,
             target_type="ca_certificate",
             target_id=ca_id,
             ip=client_ip(request, db),
         )
+        flash(request, db, summary)
     return RedirectResponse(_page_of(row), status_code=303)
 
 

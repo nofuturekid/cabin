@@ -238,6 +238,26 @@ def test_list_page_shows_certificates(client: TestClient, cfg: Config) -> None:
     assert "+00:00" not in resp.text
 
 
+def _listed(html: str) -> list[str]:
+    """The common names the inventory's own rows carry.
+
+    Read off the rows rather than searched for in the page, because spec 0030
+    FR-3 puts the summary of the last mutation on the next page the operator
+    sees: `_issue` posts `/certs/issue`, which answers 303 and records exactly
+    one audit event, so the following `GET /certs` carries
+    `issued certificate for 'printer.lan'` in its flash panel. A page-wide
+    `"printer.lan" not in resp.text` then measures the panel and not the
+    filter, and would go green again the moment the flash was removed. What
+    spec 0006 FR-2 requires is about the rows, so the rows are what is read.
+    """
+    tree = dom.parse(html)
+    tables = tree.find_all(cls="cols-certs")
+    assert len(tables) <= 1, f"the inventory renders {len(tables)} certificate tables"
+    if not tables:
+        return []
+    return [node.text() for node in tables[0].find_all(cls="rowlink")]
+
+
 def test_list_page_filters(client: TestClient, cfg: Config) -> None:
     _setup_superadmin(client)
     _create_ca(client, cfg)
@@ -247,14 +267,15 @@ def test_list_page_filters(client: TestClient, cfg: Config) -> None:
     resp = client.get("/certs", params={"q": "nas", "status": "valid"})
 
     assert resp.status_code == 200
-    assert "nas.lan" in resp.text
-    assert "printer.lan" not in resp.text
+    listed = _listed(resp.text)
+    assert "nas.lan" in listed, listed
+    assert "printer.lan" not in listed, listed
     # FR-2: the filter is reflected back into the form, so a reload keeps it
     assert 'value="nas"' in resp.text
 
     empty = client.get("/certs", params={"q": "nas", "status": "expired"})
     assert empty.status_code == 200
-    assert "nas.lan" not in empty.text
+    assert _listed(empty.text) == []
     # empty state, and it points an admin at issuance (FR-1)
     assert "No certificates match" in empty.text
     assert "Issue one" in empty.text

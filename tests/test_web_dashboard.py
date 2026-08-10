@@ -22,6 +22,7 @@ from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from test_web_flash_and_refusal import BASE_COMMIT, _git_show
 
 from cabin.app import create_app
 from cabin.ca.certs import Certificate, CertStatus, list_certificates, status_counts
@@ -82,7 +83,11 @@ def _last_root_id(cfg: Config) -> int:
 
 
 def _create_ca(
-    client: TestClient, cfg: Config, name: str = "cabin", intermediate_years: int = 10
+    client: TestClient,
+    cfg: Config,
+    name: str = "cabin",
+    intermediate_years: int = 10,
+    path_length: int = 1,
 ) -> None:
     """``POST /ca/create`` then ``POST /ca/{root_id}/intermediate`` -- the
     two steps spec 0024 FR-3 split a single create into (FR-11).
@@ -91,6 +96,13 @@ def _create_ca(
     " Root CA"/" Intermediate CA" appended by *this test file*, not by
     production) so this file's many name/window-based lookups below keep
     telling the two rows apart.
+
+    ``path_length`` defaults to what the form defaults to (``ca_ui.py:751``),
+    which is what every caller here wanted until spec 0030's AC-8 needed a
+    root that can cross-sign another: ``cross_path_length_error`` refuses a
+    signing root whose ``path_length`` is 1, and the refusal is a 200
+    re-render, so a fixture that leaves it at the default builds two roots
+    that cannot be cross-signed at all.
     """
     assert (
         client.post(
@@ -99,6 +111,7 @@ def _create_ca(
                 "name": f"{name} Root CA",
                 "key_type": "ecdsa-p256",
                 "root_years": 20,
+                "path_length": path_length,
                 "csrf_token": _csrf(client, cfg),
             },
         ).status_code
@@ -458,7 +471,13 @@ def test_the_dashboard_authorities_block_is_the_grouped_list(
     its class names has exactly one rule block in `cabin.css`.
     """
     _superadmin(client)
-    _create_ca(client, cfg, name="alpha")
+    #: alpha is the signing root, so it needs `path_length=2`: a root at the
+    #: form's default cannot cross-sign anything (`ca_x509
+    #: .cross_path_length_error`), and the refusal is a 200 re-render rather
+    #: than an exception. Without it this fixture builds two roots that cannot
+    #: be cross-signed, no cross row exists, and clause 1 -- the row a grouped
+    #: list built by filtering for roots would drop -- has nothing to measure.
+    _create_ca(client, cfg, name="alpha", path_length=2)
     _create_ca(client, cfg, name="beta")
     alpha_root = _root_id_named(cfg, "alpha Root CA")
     beta_root = _root_id_named(cfg, "beta Root CA")
@@ -517,21 +536,33 @@ def test_the_dashboard_authorities_block_is_the_grouped_list(
         else:
             assert seen_root is not None, f"row {index} is a child before any root"
 
-    by_name = {row.children[0].text(): row for row in rows}
+    #: A row is found by its name **and** its kind, not by its name alone. A
+    #: cross row's name equals its subject root's -- that is the whole reason
+    #: spec 0028 FR-5 refuses to indent one -- so a name lookup finds two rows
+    #: for `beta Root CA`, silently takes the first, and checks the root twice
+    #: while never looking at the cross row this criterion exists for. The kind
+    #: tag in the name cell is what tells them apart, and FR-9 requires it to
+    #: be there.
+    def kind_tag(row: dom.Node) -> str:
+        tags = [node.text() for node in row.children[0].find_all(cls="tag")]
+        assert len(tags) == 1, f"the name cell carries {tags}; FR-9 gives it one kind tag"
+        return tags[0]
+
     for name, row_id in names.items():
-        matching = [label for label in by_name if name in label]
-        assert matching, f"the authorities block does not name {name!r}: {sorted(by_name)}"
-        row = by_name[matching[0]]
+        matching = [
+            row for row in rows if name in row.children[0].text() and kind_tag(row) == kinds[row_id]
+        ]
+        assert len(matching) == 1, (
+            f"the authorities block draws {len(matching)} rows named {name!r} of kind "
+            f"{kinds[row_id]!r}: {[row.children[0].text() for row in rows]}"
+        )
+        row = matching[0]
         expected_kind = "row-child" if kinds[row_id] == "intermediate" else "row-root"
         assert expected_kind in row.classes, (
             f"{name} ({kinds[row_id]}) is a {sorted(row.classes)} row, not {expected_kind}. "
             f"Spec 0028 FR-5 refuses to indent a cross row under a root, because a "
             f"cross row's name equals its subject root's"
         )
-        if kinds[row_id] == "cross":
-            assert "cross" in row.text().split(), (
-                f"the cross row carries no `cross` kind tag: {row.text()!r}"
-            )
         # clause 3: the expiry the row prints is the expiry `_ca_expiry` computes
         assert expected_expiry[row_id] in row.text(), (
             f"{name}'s row prints {row.text()!r}, which does not carry "
@@ -539,18 +570,39 @@ def test_the_dashboard_authorities_block_is_the_grouped_list(
             f"row is the number it prints today"
         )
 
-    # clause 4: reused, not re-implemented
+    # clause 4: reused, not re-implemented.
+    #
+    # Corrected: "exactly one rule block per name" is not satisfiable and was
+    # not satisfiable at this spec's base commit either. Spec 0028's grouped
+    # list ships a base rule *and* descendant rules for the same names --
+    # `.row-root` and `.row-root td:first-child a`, `.row-child` and
+    # `.row-child td:first-child`, `.rowlink::after` beside the two
+    # `tr:has(.rowlink)` rules -- so the component this criterion asks to be
+    # reused fails a count of one by construction, and a build that satisfied
+    # the count would have had to delete part of it.
+    #
+    # What FR-9 means by "no second rule is written for any of them" is that
+    # *this spec* writes none, so that is what is measured: the selectors
+    # naming each of the six are compared against the same file at the base
+    # commit. A grouped list re-implemented here under these names adds a
+    # selector and fails; one re-implemented under new names is caught by
+    # clauses 1 to 3, which read the rendered rows.
     css = CSS.read_text()
+    baseline_css = _git_show("src/cabin/web/static/cabin.css")
     for name in ("row-root", "row-child", "tree", "state-active", "state-retired", "rowlink"):
-        blocks = [
-            selector
-            for selector, _body in _css_rules(css)
-            if re.search(rf"\.{name}(?![\w-])", selector)
+        pattern = rf"\.{name}(?![\w-])"
+        blocks = [selector for selector, _body in _css_rules(css) if re.search(pattern, selector)]
+        before = [
+            selector for selector, _body in _css_rules(baseline_css) if re.search(pattern, selector)
         ]
-        assert len(blocks) == 1, (
-            f".{name} is the subject of {len(blocks)} rule blocks in cabin.css: "
-            f"{blocks}. FR-9 reuses spec 0028's grouped list; a second rule for one "
-            f"of its names is the component written twice"
+        assert before, (
+            f".{name} has no rule at {BASE_COMMIT}, so the comparison below would "
+            f"pass on a stylesheet that never had spec 0028's grouped list in it"
+        )
+        assert blocks == before, (
+            f".{name} is the subject of {blocks} in cabin.css and of {before} at "
+            f"{BASE_COMMIT}. FR-9 reuses spec 0028's grouped list; a rule this spec "
+            f"adds for one of its names is the component written twice"
         )
 
 

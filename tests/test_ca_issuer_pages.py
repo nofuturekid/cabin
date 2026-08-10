@@ -152,8 +152,14 @@ def _secrets(cfg: Config) -> SecretStore:
     return SecretStore.open(cfg.data_dir, cfg.master_passphrase)
 
 
+#: The superadmin every test here sets up. Named, because the rail footer's
+#: avatar (spec 0030 FR-11) renders its first character and a test below has
+#: to be able to say so without repeating the letter.
+_SUPERADMIN = "alice"
+
+
 def _setup_superadmin(
-    client: TestClient, username: str = "alice", password: str = "correcthorse1"
+    client: TestClient, username: str = _SUPERADMIN, password: str = "correcthorse1"
 ) -> None:
     resp = client.post("/setup", data={"username": username, "password": password})
     assert resp.status_code == 303
@@ -1230,7 +1236,7 @@ def test_empty_state_for_admin_viewer_and_keyless_root(client: TestClient, cfg: 
     assert viewer_note.anchor_hrefs == []
     assert _form_actions(viewer_resp.text) == ["/logout"]
 
-    _login(client, "alice", "correcthorse1")
+    _login(client, _SUPERADMIN, "correcthorse1")
     cross_id = _import_foreign_cross(client, cfg, solo_id, "foreign root")
     keyless_root = _keyless_root_of(cfg, cross_id)
     keyless_resp = client.get(f"/ca/{keyless_root}")
@@ -2640,6 +2646,33 @@ def _rendering_from(directory: Path) -> Iterator[None]:
         env.cache.clear()
 
 
+#: What spec 0030 changes in the shell, and therefore on every page this
+#: instrument renders -- it renders whole pages through a template directory,
+#: the baseline layout for the `before` pass and today's for the `after`, so
+#: `layout.html`'s two changes show up on all five pages here.
+#:
+#: * `Transfer` -> `Export` on the rail's fourth group is FR-19's one changed
+#:   string, and FR-19's table is where spec 0030 wrote it down.
+#: * the rail footer's avatar is FR-11's, and is deliberately **not** in that
+#:   table: it renders the logged-in username's first character, a string that
+#:   is already on the page, rather than the `@login` line the design stacks
+#:   under it. Spec 0030's own AC-18 check compares template *files*, where
+#:   that character is a Jinja expression and not a literal, which is why only
+#:   this rendered copy sees it. Derived from the fixture's own username, so
+#:   that it stays the avatar's rule and not a letter someone typed.
+#:
+#: Named rather than filtered out of the comparison: this test's whole job is
+#: that a string which moved has to be written down somewhere.
+#:
+#: Spec 0030 AC-18 rebuilt its own version of this check against the template
+#: files for a different reason -- one instance cannot render both generations
+#: of `dashboard.html`, since FR-8 drops a context key and the environment is
+#: `StrictUndefined`. None of the five pages below is the dashboard, so this
+#: copy still renders both generations and still means what it did.
+_SHELL_REMOVED = {"Transfer"}
+_SHELL_ADDED = {"Export", _SUPERADMIN[0].upper()}
+
+
 def test_no_sentence_changed_on_the_five_pages(
     client: TestClient, cfg: Config, tmp_path: Path
 ) -> None:
@@ -2700,6 +2733,23 @@ def test_no_sentence_changed_on_the_five_pages(
             assert resp.status_code == 200, f"{path} -> {resp.status_code}"
             found |= _text_nodes(resp.text)
         return found
+
+    #: spec 0030 FR-3: `_issue_leaf` posts `/certs/issue`, which answers 303
+    #: and records exactly one audit event, so a flash is pending and the next
+    #: authenticated page rendered carries a sentence no template holds. It is
+    #: popped here, before either generation is rendered, so that what is
+    #: compared is two sets of templates and not one page that happened to
+    #: have a panel against one that did not. The counter-check is both ways
+    #: round: a drain that found nothing to drain would be a line that reads
+    #: like care and does nothing.
+    drained = client.get("/certs")
+    assert drained.status_code == 200
+    assert 'class="flash"' in drained.text, (
+        "no flash was pending after an issuance, so this drain measures nothing"
+    )
+    assert 'class="flash"' not in client.get("/certs").text, (
+        "the flash survived the render that showed it; FR-2 clears in the same call as the read"
+    )
 
     after = render()
     after_pooled = {name: pooled(name) for name in paths}
@@ -2773,18 +2823,18 @@ def test_no_sentence_changed_on_the_five_pages(
         # states for this page and the claim is the set; every other page here
         # keeps the exact multiset it always had.
         lost = (set(old) - set(new)) if name in states else set(old - new)
-        assert lost <= removals[name], (
+        assert lost <= removals[name] | _SHELL_REMOVED, (
             f"{name}: text that was on this page before this spec is gone from it. "
-            f"FR-15 takes no exception: {sorted(lost - removals[name])}"
+            f"FR-15 takes no exception: {sorted(lost - removals[name] - _SHELL_REMOVED)}"
         )
         # Symmetrical with `lost` above: on the pooled page a string that
         # appears more often than before is not a new sentence, it is the same
         # sentence at a second URL, so both directions are the set there.
         gained = (set(new) - set(old)) if name in states else set(new - old)
-        assert gained <= additions[name], (
+        assert gained <= additions[name] | _SHELL_ADDED, (
             f"{name}: text this spec did not name appears on the page. Every "
             f"addition is argued in an FR or it is a wording change: "
-            f"{sorted(gained - additions[name])}"
+            f"{sorted(gained - additions[name] - _SHELL_ADDED)}"
         )
 
 

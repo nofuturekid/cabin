@@ -94,7 +94,7 @@ def _page(
     error: str | None = None,
     status_code: int = 200,
 ) -> Response:
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context.update(
         {
             "base_url": base_url,

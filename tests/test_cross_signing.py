@@ -1076,11 +1076,30 @@ def test_schema_admits_kind_cross_and_has_cross_of_id(db: Session, secrets: Secr
     db.rollback()
 
 
-def test_migration_chain_still_ends_at_0010(db: Session) -> None:
-    version = db.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0010"
+def test_this_spec_adds_no_migration_of_its_own(db: Session) -> None:
+    """What spec 0021 requires is that cross-signing edits migration 0003
+    again rather than adding a revision of its own; "the chain ends at 0010"
+    was that requirement written as the head this spec happened to leave
+    behind. Spec 0030 FR-2 adds `0011_session_flash`, a column on `sessions`
+    and on no table this spec is about, so the head moves and the requirement
+    does not. It is asserted as the requirement now: the migrated head is the
+    newest revision on disk -- a stale head still fails -- and every revision
+    after 0010 is one another spec is entitled to have added, which for a
+    revision touching `ca_certificates` would not be true.
+    """
     versions_dir = Path(store_pkg.__file__).resolve().parent / "migrations" / "versions"
-    assert not list(versions_dir.glob("0011*"))
+    revisions = sorted(path.stem.split("_", 1)[0] for path in versions_dir.glob("0*.py"))
+    version = db.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == revisions[-1], (
+        f"a fresh database migrates to {version!r} and the newest revision on disk "
+        f"is {revisions[-1]!r}"
+    )
+    later = [path for path in versions_dir.glob("0*.py") if path.stem.split("_", 1)[0] > "0010"]
+    touching = sorted(path.name for path in later if "ca_certificates" in path.read_text())
+    assert touching == [], (
+        f"{touching} alter `ca_certificates` in a revision of their own; this spec's "
+        f"schema change is an edit to migration 0003 and no revision after it"
+    )
 
 
 def test_every_cross_row_has_null_key_sealed_and_non_null_parent_and_cross_of(

@@ -819,7 +819,12 @@ table.facts tr {
    6.2) -- the rule cabin's global tbody tr:hover did not honour, since it
    also lit up the certificate page's fact rows, which go nowhere. */
 .rows tbody tr:has(.rowlink):hover {
-  background: var(--surface-hover);
+  /* The longhand rather than the `background` shorthand: a shorthand whose
+     value is a `var()` cannot be expanded at parse time, so CSSOM reports
+     every longhand as the empty string and a rule read back out of
+     `document.styleSheets` -- which is how spec 0030 AC-15 measures which
+     rows this applies to -- looks like a rule that sets no background. */
+  background-color: var(--surface-hover);
 }
 
 /* FR-3's focus treatment is *additive*. Spec 0027 FR-15 forbids `outline:
@@ -844,13 +849,87 @@ table.facts tr {
 }
 
 .cols-issuers tr {
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) minmax(
+      0,
+      0.8fr
+    ) minmax(0, 1.1fr);
 }
 
 .cols-crosses tr {
   grid-template-columns:
     minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.8fr)
     minmax(0, 0.9fr) minmax(0, 1fr);
+}
+
+/* Spec 0030 FR-17: the eleven column sets the remaining screens need. Six
+   are the design's own numbers unchanged; the other five are derived by the
+   rule FR-17 states once -- an extra column takes the share the design gives
+   that *kind* of cell elsewhere, and a column the design has and cabin does
+   not is dropped with the rest keeping their shares. */
+.cols-expiring tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 0.6fr) minmax(
+      0,
+      1.1fr
+    ) minmax(0, 0.8fr);
+}
+
+.cols-authorities tr {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.1fr) minmax(
+      0,
+      1fr
+    ) minmax(0, 0.8fr);
+}
+
+.cols-activity tr {
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(
+      0,
+      1.3fr
+    ) minmax(0, 2fr);
+}
+
+.cols-certs tr {
+  grid-template-columns:
+    minmax(0, 1.7fr) minmax(0, 0.7fr) minmax(0, 0.7fr) minmax(0, 1.5fr)
+    minmax(0, 1fr) minmax(0, 0.5fr) minmax(0, 1.2fr);
+}
+
+.cols-trust-bundle tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 0.8fr) minmax(
+      0,
+      0.9fr
+    ) minmax(0, 1.2fr);
+}
+
+.cols-ca-keys tr {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.6fr);
+}
+
+.cols-audit tr {
+  grid-template-columns:
+    minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(0, 1.2fr)
+    minmax(0, 2.2fr) minmax(0, 0.6fr);
+}
+
+.cols-users tr {
+  grid-template-columns:
+    minmax(0, 1.5fr) minmax(0, 0.8fr) minmax(0, 1.5fr)
+    minmax(0, 0.7fr) minmax(0, 0.8fr);
+}
+
+.cols-tokens tr {
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(0, 0.7fr) minmax(0, 1.4fr) minmax(0, 0.7fr)
+    minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.6fr);
+}
+
+.cols-eab tr {
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(0, 1.4fr) minmax(0, 1.2fr) minmax(0, 0.7fr)
+    minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.6fr);
+}
+
+.cols-directories tr {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 0.8fr) minmax(0, 2.2fr);
 }
 
 /* The stretched link (brief section 9.4): the whole row is the target, the
@@ -981,6 +1060,15 @@ table.facts tr {
   border: 1px solid var(--flat-line);
   color: var(--flat-fg);
   white-space: nowrap;
+}
+
+/* An EAB key nobody has bound yet is a fact, not an alarm -- the same
+   neutral tone the bare `.tag` rule above already uses, spelled out so the
+   stylesheet-and-templates agreement test has a rule to find. */
+.tag-unused {
+  background: var(--flat-bg);
+  border-color: var(--flat-line);
+  color: var(--flat-fg);
 }
 
 .tag-ok,
@@ -1211,6 +1299,207 @@ footer {
   text-transform: uppercase;
 }
 
+/* ---- the design's remaining components (spec 0030 FR-18) ---- */
+
+/* The rail's count badge (brief section 4, section 6.8). Rendered only when
+   something is expiring, which is why there is no "zero" state to style. */
+.nav-count {
+  font-size: 0.625rem;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  color: var(--warn-fg);
+  flex: none;
+}
+
+/* The segmented control (brief section 6.5), as five links. It wraps rather
+   than overflowing: five status words plus their padding do not fit a 390px
+   viewport in one row, and .scroller is the only thing allowed to scroll. */
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--line-control);
+  border-radius: var(--r-control);
+  overflow: hidden;
+}
+
+.seg a {
+  font-size: 0.75rem;
+  padding: 7px 13px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.seg a + a {
+  border-left: 1px solid var(--line-control);
+}
+
+.seg-on {
+  color: var(--text);
+  background: var(--accent-tint);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* The audit log's filter pills (brief section 6.6). The design's second
+   selection idiom, kept because the two answer different questions. */
+.pill {
+  font-size: 0.75rem;
+  padding: 6px 13px;
+  border-radius: var(--r-control);
+  border: 1px solid var(--line-control);
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.pill-on {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+}
+
+/* The toggle switch (brief section 6.7), drawn on the real checkbox rather
+   than on a submit button that is the track: both pages this appears on read
+   every flag from one submission, so a per-toggle button would post the whole
+   form and clear the others (spec 0030 FR-13). Because the checkbox is still
+   the focusable element, spec 0027 FR-15's ring lands on the track with no
+   rule of its own. */
+.toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 38px;
+  height: 21px;
+  padding: 2px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--line-control);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.toggle::after {
+  content: "";
+  display: block;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform 0.15s;
+}
+
+.toggle:checked {
+  background: var(--accent-deep);
+}
+
+.toggle:checked::after {
+  transform: translateX(17px);
+}
+
+/* Brief section 9.8's answer to the two copy buttons the design draws, which
+   are impossible without JavaScript: one click selects the whole value. Not
+   put on .pem, where selecting one line of a PEM body is a thing an operator
+   does. */
+.copyable {
+  display: inline-block;
+  max-width: 100%;
+  user-select: all;
+  -webkit-user-select: all;
+  background: var(--surface-low);
+  border: 1px solid var(--line-control);
+  border-radius: var(--r-control);
+  padding: 9px 12px;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+/* The open row on /users -- URL state, not a client-side widget, so this is
+   the whole of what "open" looks like (spec 0030 FR-11). */
+.editing {
+  background: var(--surface-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Brief section 6.13. One uppercase initial: cabin has a username and no
+   first name, last name or email, so the second line the design stacks under
+   it has nothing to hold. */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-edge);
+  color: var(--accent-bright);
+  font-size: 0.625rem;
+  font-weight: 600;
+}
+
+/* The dashboard's services row: three inline chips (brief section 5.1). */
+.chips {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.chips > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line-panel);
+  border-radius: var(--r-panel);
+  padding: 10px 14px;
+  font-size: 0.78125rem;
+}
+
+/* The dashboard's revocation section: one card per CRL, two to a row where
+   there is room (brief section 5.1). A two-row table per CRL is a definition
+   list wearing a <table>, and the design draws cards. */
+.crl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 14px;
+}
+
+/* ---- the flash message (brief section 6.12, spec 0030 FR-4) ---- */
+
+/* A sibling of the rail and of <main>, drawn against the shell's own
+   position:relative, which is what section 4 says that declaration is for.
+   The 3.2s timer is a delayed animation that fills forwards: the prototype's
+   is a setTimeout, and the only way to spend 3.2 seconds without JavaScript
+   is this. No close control -- spec 0029's rule admits no route for one. */
+.flash {
+  position: absolute;
+  left: 250px;
+  bottom: 22px;
+  max-width: 520px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-radius: var(--r-panel);
+  background: var(--surface);
+  border: 1px solid var(--accent-edge);
+  font-size: 0.78125rem;
+  color: var(--text);
+}
+
+/* The dot. One span, aria-hidden, because the message is the words beside
+   it -- the fourth and last user of the decoration exemption. */
+.flash span {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 /* ---- entry animation ---- */
 
 @keyframes cabinIn {
@@ -1235,9 +1524,54 @@ footer {
   }
 }
 
+/* A third keyframe where brief section 7 says there are exactly two, and
+   recorded in the brief's register as a divergence with its reason: the
+   prototype's 3.2 seconds is a setTimeout (section 8), and a delayed
+   animation that fills forwards is the only way to spend them with no
+   JavaScript. It can hide the panel; it cannot remove it and cannot be
+   interrupted. */
+@keyframes cabinToastOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+/* Both the entry and the hide are covered here. The flash therefore appears
+   with no motion and *stays* until the next navigation -- deliberate, since
+   hiding it on a timer is the motion, and a message that lingers is readable
+   where one that vanishes early is not. */
 @media (prefers-reduced-motion: reduce) {
   main > div {
     animation: none;
+  }
+
+  .flash {
+    animation: none;
+  }
+
+  .rail nav a,
+  .tile,
+  .toggle,
+  .toggle::after {
+    transition-duration: 0.01ms;
+    transition-delay: 0ms;
+  }
+}
+
+/* The panel's own motion is declared where it applies rather than declared
+   and then overridden: a reader who has asked for less of it never gets the
+   rule at all. The entry is the design's `cabinToast`; the hide is a 0.3s
+   fade delayed by the prototype's own 3200 ms and filled `forwards`, because
+   an animation is the only way to spend 3.2 seconds with no JavaScript. */
+@media (prefers-reduced-motion: no-preference) {
+  .flash {
+    animation:
+      cabinToast 0.2s ease-out,
+      cabinToastOut 0.3s ease-in 3.2s forwards;
   }
 }
 
@@ -1296,5 +1630,15 @@ footer {
      verdict below them, and the tab order is the same order. */
   .form-split {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Spec 0030 FR-4: there is no 230px rail here, and 250px of left offset on
+     a 390px viewport with a 520px panel is a page that scrolls sideways. The
+     panel takes the content column's own width and the page's own padding
+     instead. */
+  .flash {
+    left: 16px;
+    right: 16px;
+    max-width: none;
   }
 }

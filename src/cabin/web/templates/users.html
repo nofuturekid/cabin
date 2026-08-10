@@ -11,7 +11,7 @@
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
 <div class="scroller">
-  <table>
+  <table class="rows cols-users">
     <thead>
       <tr>
         <th>Username</th>
@@ -23,13 +23,13 @@
     </thead>
     <tbody>
       {% for row in users %}
-      <tr>
-        <td>{{ row.username }}</td>
+      <tr id="user-{{ row.id }}" class="{% if can_manage and row.id == edit %} editing {% endif %}">
+        <td><span class="avatar">{{ row.username[:1] | upper }}</span> {{ row.username }}</td>
         <td><span class="tag">{{ row.role }}</span></td>
         <td>
           {% if row.is_superadmin %}
           <span class="tag">all issuers</span>
-          {% elif can_manage %}
+          {% elif can_manage and row.id == edit %}
           <form method="post" action="/users/{{ row.id }}/issuers">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             {% for issuer in active_intermediates %}
@@ -53,9 +53,10 @@
           {{ row.granted_names | join(", ") if row.granted_names else "none" }}
           {% endif %}
         </td>
-        <td class="nowrap">{{ row.created_at }}</td>
+        <td>{{ row.created_at }}</td>
         {% if can_manage %}
         <td class="row-actions">
+          {% if row.id == edit %}
           <form method="post" action="/users/{{ row.id }}/role">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <select name="role">
@@ -74,6 +75,10 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button type="submit" class="danger">Delete</button>
           </form>
+          <a href="/users">Cancel</a>
+          {% else %}
+          <a href="/users?edit={{ row.id }}#user-{{ row.id }}" hx-get="/users?edit={{ row.id }}" hx-select="#user-{{ row.id }}" hx-target="#user-{{ row.id }}" hx-swap="outerHTML">Edit</a>
+          {% endif %}
         </td>
         {% endif %}
       </tr>

@@ -75,6 +75,7 @@ from cabin.web.deps import (
     certificate_or_404,
     client_ip,
     current_actor,
+    flash,
     get_current_user,
     get_db,
     is_htmx,
@@ -174,6 +175,7 @@ def _no_issuer_message(db: Session) -> _NoIssuer:
 
 def _form_page(
     request: Request,
+    db: Session,
     user: User,
     error: str | None,
     template: str,
@@ -197,7 +199,7 @@ def _form_page(
     wording for AC-7 to hold, so the link rides alongside ``error`` rather
     than being folded into that string, which stays plain autoescaped text.
     """
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context.update(
         {
             "error": error,
@@ -220,6 +222,7 @@ def _form_page(
 
 def _new_page(
     request: Request,
+    db: Session,
     user: User,
     error: str | None,
     *,
@@ -231,6 +234,7 @@ def _new_page(
 ) -> Response:
     return _form_page(
         request,
+        db,
         user,
         error,
         "certs_new.html",
@@ -244,6 +248,7 @@ def _new_page(
 
 def _sign_page(
     request: Request,
+    db: Session,
     user: User,
     error: str | None,
     *,
@@ -255,6 +260,7 @@ def _sign_page(
 ) -> Response:
     return _form_page(
         request,
+        db,
         user,
         error,
         "certs_sign.html",
@@ -315,13 +321,18 @@ def certs_list(
         db, q=term, status=active, page=page, per_page=PER_PAGE, now=now
     )
     pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context.update(
         {
             "certs": [_cert_row(row, now) for row in rows],
             "q": term,
             "status": active,
             "statuses": STATUS_FILTERS,
+            # Spec 0030 FR-10: the segmented control's five links, built by
+            # the same `_page_url` the pager uses -- which is what keeps a
+            # filter link and a pager link from disagreeing about what
+            # "carry the other parameters through" means.
+            "status_urls": {option: _page_url(term, option, 1) for option in STATUS_FILTERS},
             "page": page,
             "pages": pages,
             "total": total,
@@ -345,6 +356,7 @@ def certs_new(
     no_issuer = None if issuers else _no_issuer_message(db)
     return _new_page(
         request,
+        db,
         user,
         no_issuer.message if no_issuer else None,
         issuers=issuers,
@@ -363,6 +375,7 @@ def certs_sign_form(
     no_issuer = None if issuers else _no_issuer_message(db)
     return _sign_page(
         request,
+        db,
         user,
         no_issuer.message if no_issuer else None,
         issuers=issuers,
@@ -433,11 +446,14 @@ def certs_issue(
             issuer_id=issuer_id,
         )
     except IssueError as exc:
-        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
+        return _new_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=400
+        )
     except CANotConfiguredError:
         no_issuer = _no_issuer_message(db)
         return _new_page(
             request,
+            db,
             user,
             no_issuer.message,
             issuers=issuers,
@@ -447,15 +463,21 @@ def certs_issue(
             error_href_text=no_issuer.link_text,
         )
     except _GRANT_ERRORS as exc:
-        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
+        return _new_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=403
+        )
     except _ISSUER_ERRORS as exc:
-        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
+        return _new_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=400
+        )
     row, capped_from = issued.row, issued.capped_from
+    # Spec 0030 FR-3: the panel says what the log says, from one local.
+    summary = audit.issued_summary(row)
     audit.record(
         db,
         actor,
         AuditAction.cert_issued,
-        summary=audit.issued_summary(row),
+        summary=summary,
         target_type="certificate",
         target_id=row.id,
         detail=audit.certificate_detail(
@@ -467,6 +489,7 @@ def certs_issue(
         ip=client_ip(request, db),
     )
     _remember_capped(row.id, days, capped_from)
+    flash(request, db, summary)
     # The key is never carried in the redirect: the result page re-derives
     # it from the sealed column for whoever is authorized to see it (FR-6).
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
@@ -506,11 +529,14 @@ def certs_sign(
             issuer_id=issuer_id,
         )
     except IssueError as exc:
-        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
+        return _sign_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=400
+        )
     except CANotConfiguredError:
         no_issuer = _no_issuer_message(db)
         return _sign_page(
             request,
+            db,
             user,
             no_issuer.message,
             issuers=issuers,
@@ -520,17 +546,22 @@ def certs_sign(
             error_href_text=no_issuer.link_text,
         )
     except _GRANT_ERRORS as exc:
-        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
+        return _sign_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=403
+        )
     except _ISSUER_ERRORS as exc:
-        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=400)
+        return _sign_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=400
+        )
     # The CSR itself is not recorded: it is bulky, and what it asked for is
     # already described by the certificate that came out of it (FR-3).
     row, capped_from = issued.row, issued.capped_from
+    summary = audit.signed_summary(row)
     audit.record(
         db,
         actor,
         AuditAction.cert_signed,
-        summary=audit.signed_summary(row),
+        summary=summary,
         target_type="certificate",
         target_id=row.id,
         detail=audit.certificate_detail(
@@ -541,6 +572,7 @@ def certs_sign(
         ip=client_ip(request, db),
     )
     _remember_capped(row.id, days, capped_from)
+    flash(request, db, summary)
     return RedirectResponse(f"/certs/{row.id}", status_code=303)
 
 
@@ -743,7 +775,9 @@ def certs_issue_preview(
             db, principal, subject_cn=subject_cn, sans=sans, issuer_id=issuer_id, days=days
         )
     except _GRANT_ERRORS as exc:
-        return _new_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
+        return _new_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=403
+        )
     # `days` rides alongside the seven keys the Interface Contract fixes for
     # `_issue_preview`: the clamp note names the validity that was asked for,
     # and the macro reads nothing but the dictionary it is handed.
@@ -751,7 +785,7 @@ def certs_issue_preview(
     if is_htmx(request):
         return preview_fragment("issue_panel", preview)
     values["preview"] = preview
-    return _new_page(request, user, None, issuers=issuers, values=values)
+    return _new_page(request, db, user, None, issuers=issuers, values=values)
 
 
 @router.post("/sign/preview")
@@ -785,18 +819,21 @@ def certs_sign_preview(
     try:
         resolve_granted_issuer(db, principal, issuer_id)
     except _GRANT_ERRORS as exc:
-        return _sign_page(request, user, str(exc), issuers=issuers, values=values, status_code=403)
+        return _sign_page(
+            request, db, user, str(exc), issuers=issuers, values=values, status_code=403
+        )
     except (CANotConfiguredError, *_ISSUER_ERRORS):
         pass
     preview = _sign_preview(csr_pem)
     if is_htmx(request):
         return preview_fragment("sign_panel", preview)
     values["preview"] = preview
-    return _sign_page(request, user, None, issuers=issuers, values=values)
+    return _sign_page(request, db, user, None, issuers=issuers, values=values)
 
 
 def _detail_page(
     request: Request,
+    db: Session,
     user: User,
     row: Certificate,
     error: str | None = None,
@@ -805,7 +842,7 @@ def _detail_page(
     days_requested: int | None = None,
     capped_from: datetime | None = None,
 ) -> Response:
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["cert"] = row
     # FR-6: viewers see the certificate, never the private key. A key we can
     # no longer unseal must not take the whole page down either -- the
@@ -852,6 +889,7 @@ def cert_detail(
     days_requested, capped_from = _take_capped(cert_id)
     return _detail_page(
         request,
+        db,
         user,
         certificate_or_404(db, cert_id),
         days_requested=days_requested,
@@ -877,14 +915,14 @@ def cert_revoke(
     # this request changes anything -- and only a change is an event.
     was_revoked = row.revoked_at is not None
     if not confirm:
-        return _detail_page(request, user, row, _CONFIRM_REVOKE, status_code=400)
+        return _detail_page(request, db, user, row, _CONFIRM_REVOKE, status_code=400)
     try:
         # A reason cabin does not know is refused rather than quietly
         # downgraded: the operator would be told the certificate was revoked
         # for a reason that never reaches the CRL.
         parsed = RevocationReason(reason)
     except ValueError:
-        return _detail_page(request, user, row, _UNKNOWN_REASON.format(reason), status_code=400)
+        return _detail_page(request, db, user, row, _UNKNOWN_REASON.format(reason), status_code=400)
     try:
         crl_service.revoke_certificate(
             db, request.app.state.secrets, cert_id, parsed, principal=user_principal(user)
@@ -894,18 +932,22 @@ def cert_revoke(
         # make, though this page's own `_detail_page` carries no link -- a
         # revoke that hits this is already deep in a specific certificate's
         # page, not the issuer-selection form the link is for.
-        return _detail_page(request, user, row, _no_issuer_message(db).message, status_code=400)
+        return _detail_page(request, db, user, row, _no_issuer_message(db).message, status_code=400)
     except IssuerForbiddenError as exc:
-        return _detail_page(request, user, row, str(exc), status_code=403)
+        return _detail_page(request, db, user, row, str(exc), status_code=403)
     if not was_revoked:
+        # Spec 0030 FR-3: re-revoking an already-revoked certificate records
+        # nothing and so announces nothing.
+        summary = audit.revoked_summary(row, parsed)
         audit.record(
             db,
             actor,
             AuditAction.cert_revoked,
-            summary=audit.revoked_summary(row, parsed),
+            summary=summary,
             target_type="certificate",
             target_id=row.id,
             detail=audit.revocation_detail(row, parsed),
             ip=client_ip(request, db),
         )
+        flash(request, db, summary)
     return RedirectResponse(f"/certs/{cert_id}", status_code=303)

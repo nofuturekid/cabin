@@ -92,6 +92,19 @@ from cabin.users import Role, User, create_user
 
 _PASSWORD = "whatever12345"
 
+#: spec 0030 FR-5/FR-6: a 403 raised on an interface route is answered with
+#: cabin's own page rather than `{"detail": "forbidden for this role"}`. The
+#: detail string itself is unchanged (Interface Contract: the two
+#: `raise HTTPException(403, ...)` statements are not touched) -- it is the
+#: handler that now reads it to choose a body, and the body is what a UI door's
+#: response carries. These are the two bodies, so that a UI refusal can still
+#: be told apart by its cause.
+_ROLE_REFUSAL = "Your role does not allow this page. Ask a superadmin if you need it."
+_CSRF_REFUSAL = (
+    "This form was submitted with a token this session does not recognise. "
+    "Open the page again and retry."
+)
+
 
 # --- fixtures ------------------------------------------------------------------
 
@@ -717,7 +730,11 @@ def test_granted_viewer_still_refused(client: TestClient, cfg: Config) -> None:
         result = door.attempt(client, cfg, secret, None)
         assert result.refused, f"{door.name}: a viewer must be refused despite holding every grant"
         if door.kind == "ui":
-            assert "forbidden for this role" in result.detail, result.detail
+            assert _ROLE_REFUSAL in result.detail, result.detail
+            assert _CSRF_REFUSAL not in result.detail, (
+                f"{door.name}: the refusal names a stale form rather than the role. "
+                f"This test's whole subject is which refusal a granted viewer gets"
+            )
         elif door.kind == "api":
             assert "not allowed to use this endpoint" in result.detail, result.detail
         else:

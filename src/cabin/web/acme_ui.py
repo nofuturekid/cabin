@@ -67,6 +67,7 @@ from cabin.web.deps import (
     client_ip,
     current_actor,
     current_principal,
+    flash,
     get_db,
     require_admin,
     verify_csrf,
@@ -161,7 +162,7 @@ def _page(
     keys = eab.list_keys(db)
     issuer_names = {row.id: row.name for row in ca_service.list_cas(db, kind="intermediate")}
     issuer_options = granted_issuers(db, principal)
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context.update(
         {
             # The submitted values win over the stored ones when a save was
@@ -331,14 +332,18 @@ def revoke_eab_key(
     either way."""
     row = eab.get_key(db, key_id)
     if eab.revoke_key(db, row) and row is not None:
+        # Spec 0030 FR-3: an already-revoked key records nothing, so it
+        # announces nothing.
+        summary = f"revoked ACME external account key {row.label!r}"
         audit.record(
             db,
             actor,
             AuditAction.acme_eab_key_revoked,
-            summary=f"revoked ACME external account key {row.label!r}",
+            summary=summary,
             target_type="acme_eab_key",
             target_id=row.id,
             detail={"key_id": row.id, "label": row.label},
             ip=client_ip(request, db),
         )
+        flash(request, db, summary)
     return RedirectResponse(PATH, status_code=303)

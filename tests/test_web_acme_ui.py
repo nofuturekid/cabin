@@ -196,8 +196,16 @@ def test_acme_ui_key_lifecycle(client: TestClient, cfg: Config) -> None:
 # every flag the form carries ==============================================
 
 
-def _toggle(html: str, element_id: str) -> dom.Node:
-    tree = dom.parse(html)
+def _toggle(tree: dom.Node, element_id: str) -> dom.Node:
+    """The one element carrying ``id``, out of a tree the caller already has.
+
+    It takes the parsed tree rather than the page's text on purpose:
+    ``dom.parse`` builds a fresh tree on every call and memoises nothing, so a
+    node taken from a second parse is never the same object as a node taken
+    from the first, and ``control.closest(tag="form") is form`` can then only
+    ever be false. The containment claim AC-13 clause 1 makes is about one
+    document, so it is measured on one tree.
+    """
     found = [node for node in tree.walk() if node.get("id") == element_id]
     assert len(found) == 1, f"the page carries {len(found)} elements with id={element_id!r}"
     return found[0]
@@ -235,7 +243,7 @@ def test_one_save_still_writes_both_flags(client: TestClient, cfg: Config) -> No
     )
 
     for element_id in ("acme_enabled", "acme_require_eab"):
-        control = _toggle(page.text, element_id)
+        control = _toggle(tree, element_id)
         assert control.tag == "input" and control.get("type") == "checkbox", (
             f"#{element_id} is a <{control.tag} type={control.get('type')!r}>. FR-13 "
             f"keeps the real control -- its id, its name, its value and its position "
@@ -301,7 +309,7 @@ def test_one_save_still_writes_every_settings_flag(client: TestClient, cfg: Conf
         f"/settings carries {len(submits)} submit buttons; seven fields share one form"
     )
     for element_id in ("acme_enabled", "mcp_enabled"):
-        control = _toggle(page.text, element_id)
+        control = _toggle(tree, element_id)
         assert control.tag == "input" and control.get("type") == "checkbox", control.attrs
         assert "toggle" in control.classes, (
             f"#{element_id} on /settings does not carry `toggle`: {sorted(control.classes)}"
@@ -486,16 +494,22 @@ def test_the_eab_secret_is_stored_nowhere(client: TestClient, cfg: Config) -> No
     db = _db(cfg)
     try:
         columns = {column["name"] for column in sa.inspect(db.get_bind()).get_columns("sessions")}
-        if "flash" in columns:
-            stored = [
-                str(value)
-                for (value,) in db.execute(sa.text("SELECT flash FROM sessions")).all()
-                if value is not None
-            ]
-            assert not any(secret in value for value in stored), (
-                "the EAB secret is sitting in a `sessions.flash` column in clear text"
-            )
-        events = db.execute(sa.text("SELECT summary, detail FROM audit_events")).all()
+        assert "flash" in columns, (
+            "`sessions` has no `flash` column, so the clause below reads nothing. "
+            "FR-2 adds it; a build without it cannot be measured for what it puts "
+            "there and must fail rather than skip"
+        )
+        stored = [
+            str(value)
+            for (value,) in db.execute(sa.text("SELECT flash FROM sessions")).all()
+            if value is not None
+        ]
+        assert not any(secret in value for value in stored), (
+            "the EAB secret is sitting in a `sessions.flash` column in clear text"
+        )
+        #: The column is `detail_json` (`audit.py:190`); `AuditEvent.detail` is
+        #: the decoded property beside it and is not a column raw SQL can name.
+        events = db.execute(sa.text("SELECT summary, detail_json FROM audit_events")).all()
     finally:
         db.close()
     for summary, detail in events:

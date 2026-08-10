@@ -75,7 +75,7 @@ def audit_page(
         per_page=PER_PAGE,
     )
     pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context.update(
         {
             "events": [_row(event) for event in rows],
@@ -84,6 +84,12 @@ def audit_page(
             "actions": ACTION_FILTERS,
             "actor_kind": active_kind,
             "actor_kinds": ACTOR_KIND_FILTERS,
+            # Spec 0030 FR-12: the five `actor_kind` pills, built by the same
+            # `_page_url` the pager uses, so a pill carries the search text
+            # and the action filter through rather than resetting them.
+            "kind_urls": {
+                option: _page_url(term, active_action, option, 1) for option in ACTOR_KIND_FILTERS
+            },
             # What the page *says* it is showing is clamped to a page that
             # exists: a hand-edited ?page=10000000 still answers with an
             # empty list (AC-4), but it must not print "page 10000000 of 3".

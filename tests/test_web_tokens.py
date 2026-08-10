@@ -319,17 +319,23 @@ def _assert_secret_is_nowhere(client: TestClient, cfg: Config, secret: str, page
     db = _db(cfg)
     try:
         columns = {column["name"] for column in sa.inspect(db.get_bind()).get_columns("sessions")}
-        if "flash" in columns:
-            stored = [
-                str(value)
-                for (value,) in db.execute(sa.text("SELECT flash FROM sessions")).all()
-                if value is not None
-            ]
-            assert not any(secret in value for value in stored), (
-                "the one-time secret is sitting in a `sessions.flash` column in clear "
-                "text. AC-14 forbids by effect the tidy-up that would put it there"
-            )
-        events = db.execute(sa.text("SELECT summary, detail FROM audit_events")).all()
+        assert "flash" in columns, (
+            "`sessions` has no `flash` column, so the clause below reads nothing. "
+            "FR-2 adds it; a build without it cannot be measured for what it puts "
+            "there and must fail rather than skip"
+        )
+        stored = [
+            str(value)
+            for (value,) in db.execute(sa.text("SELECT flash FROM sessions")).all()
+            if value is not None
+        ]
+        assert not any(secret in value for value in stored), (
+            "the one-time secret is sitting in a `sessions.flash` column in clear "
+            "text. AC-14 forbids by effect the tidy-up that would put it there"
+        )
+        #: The column is `detail_json` (`audit.py:190`); `AuditEvent.detail` is
+        #: the decoded property beside it and is not a column raw SQL can name.
+        events = db.execute(sa.text("SELECT summary, detail_json FROM audit_events")).all()
     finally:
         db.close()
     for summary, detail in events:

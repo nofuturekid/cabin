@@ -16,7 +16,7 @@ from starlette.responses import Response
 
 from cabin import sessions, users
 from cabin.audit import Actor, user_actor
-from cabin.ca.certs import Certificate, get_certificate
+from cabin.ca.certs import Certificate, get_certificate, status_counts
 from cabin.issuer_grants import Principal, user_principal
 from cabin.secrets import SecretStore
 from cabin.sessions import SESSION_LIFETIME, UserSession
@@ -80,7 +80,19 @@ def preview_fragment(macro: str, preview: dict[str, object]) -> Response:
     return HTMLResponse(str(render(preview)))
 
 
-def base_context(request: Request, user: User) -> dict[str, object]:
+def flash(request: Request, db: Session, message: str) -> None:
+    """Spec 0030 FR-2: the only door from the web layer to ``sessions.flash``.
+
+    ``request.state.session`` is the row :func:`get_current_user` has already
+    loaded, on the same :class:`Session` every call site holds -- a second
+    session opened for this would be a second transaction around a
+    read-modify-write on one row.
+    """
+    session_row: UserSession = request.state.session
+    sessions.set_flash(db, session_row, message)
+
+
+def base_context(request: Request, db: Session, user: User) -> dict[str, object]:
     """Context every authenticated page needs: current user, the session's
     csrf_token (layout.html's logout form needs this on *every* page -- see
     ui.py's BUG 1 regression test), and the nav flags below, for use across
@@ -90,13 +102,22 @@ def base_context(request: Request, user: User) -> dict[str, object]:
     so the menu stops offering pages that only answer 403. It is cosmetic --
     every route still guards itself with its own dependency -- but a nav
     full of dead ends is a bug report waiting to happen.
+
+    Spec 0030 FR-2/FR-7 adds two keys and the ``db`` this file did not need
+    before. ``flash`` is the pending message, read *and cleared* here, which
+    is why an authenticated GET becomes a write whenever one is waiting; and
+    ``nav["expiring"]`` is the count the rail's badge renders, taken from the
+    same :func:`status_counts` call the dashboard's tiles make so that the
+    badge and the tile cannot show two different numbers.
     """
     session_row: UserSession = request.state.session
     role = Role(user.role)
     return {
         "user": user,
         "csrf_token": session_row.csrf_token,
+        "flash": sessions.pop_flash(db, session_row),
         "nav": {
+            "expiring": status_counts(db)["expiring"],
             "issue": role in ADMIN_ROLES,
             "ca_admin": role in ADMIN_ROLES,
             # Spec 0025 FR-3: deliberately its own flag, not a reuse of

@@ -17,7 +17,7 @@
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
 <div class="scroller">
-  <table>
+  <table class="rows cols-ca-keys">
     <thead>
       <tr>
         <th>Name</th>
@@ -27,11 +27,18 @@
     </thead>
     <tbody>
       {% for row in rows %}
-      <tr>
+      <tr class="row-root state-active">
         <td>{{ row.name }}</td>
         <td>{{ row.kind }}</td>
-        <td>{% if row.exportable %}stored on this instance{% else %}no private key on this instance{% endif %}</td>
+        <td>{% if row.exportable %}<span class="tag tag-valid">stored on this instance</span>{% else %}<span class="tag">no private key on this instance</span>{% endif %}</td>
       </tr>
+      {% for issuer in row.issuers %}
+      <tr class="row-child state-active">
+        <td><span class="tree" aria-hidden="true">{{ "└" if loop.last else "├" }}</span>{{ issuer.name }}</td>
+        <td>{{ issuer.kind }}</td>
+        <td>{% if issuer.exportable %}<span class="tag tag-valid">stored on this instance</span>{% else %}<span class="tag">no private key on this instance</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
       {% endfor %}
     </tbody>
   </table>

@@ -871,8 +871,20 @@ def test_the_audit_pills_carry_the_other_filters(client: TestClient, cfg: Config
     _create_ca(client, cfg)
     _issue(client, cfg, "pills.lan")
 
-    page = client.get("/audit", params={"q": "cabin", "action": "ca_renewed", "actor_kind": "api"})
+    #: `actor_kind=token` and not `api`: FR-12's own correction records that
+    #: cabin's five pill values are `ACTOR_KIND_FILTERS` -- all / user / token
+    #: / system / acme -- and not the design's all / ui / api / acme / mcp.
+    #: Only the cardinality matches, and a request for a value the enum does
+    #: not have is normalised to `all` (`audit_ui.py:67`), so the earlier
+    #: reading asserted that a filter cabin cannot express was the active one.
+    page = client.get(
+        "/audit", params={"q": "cabin", "action": "ca_renewed", "actor_kind": "token"}
+    )
     assert page.status_code == 200
+    assert "token" in [str(value) for value in ACTOR_KIND_FILTERS], (
+        "`token` is not one of ACTOR_KIND_FILTERS, so the active-pill clause below "
+        "is asserting about a filter this page cannot carry"
+    )
 
     pills = _pills(page.text)
     assert [node.text() for node in pills] == [str(value) for value in ACTOR_KIND_FILTERS], (
@@ -896,7 +908,7 @@ def test_the_audit_pills_carry_the_other_filters(client: TestClient, cfg: Config
         assert pill.get("hx-target") == "#audit-log"
 
     on = [node.text() for node in pills if "pill-on" in node.classes]
-    assert on == ["api"], f"`pill-on` is on {on}; exactly one pill carries it"
+    assert on == ["token"], f"`pill-on` is on {on}; exactly one pill carries it"
 
     tree = dom.parse(page.text)
     regions = [node for node in tree.walk() if node.get("id") == "audit-log"]
@@ -916,10 +928,12 @@ def test_the_audit_pills_carry_the_other_filters(client: TestClient, cfg: Config
     assert form[0].find_all(tag="button"), "the GET form lost its submit"
 
     # --- and following a pill works with no htmx at all
-    mcp_pill = next(node for node in pills if node.text() == "mcp")
-    followed = client.get(mcp_pill.get("href") or "")
+    #: `acme` rather than `mcp`, for the reason above: it is the one value the
+    #: design's list and cabin's share, and cabin has no `mcp` actor kind.
+    acme_pill = next(node for node in pills if node.text() == "acme")
+    followed = client.get(acme_pill.get("href") or "")
     assert followed.status_code == 200, f"following a pill -> {followed.status_code}"
-    assert [node.text() for node in _pills(followed.text) if "pill-on" in node.classes] == ["mcp"]
+    assert [node.text() for node in _pills(followed.text) if "pill-on" in node.classes] == ["acme"]
     followed_tree = dom.parse(followed.text)
     selected = [
         node.text()

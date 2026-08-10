@@ -34,7 +34,12 @@ from pathlib import Path
 import probes
 import pytest
 from fastapi.testclient import TestClient
-from test_web_layout import _populate, all_pages, assert_probe_list_is_sound
+from test_web_layout import (
+    _populate,
+    all_pages,
+    assert_examined_enough,
+    assert_probe_list_is_sound,
+)
 
 from cabin.app import create_app
 from cabin.config import Config
@@ -776,8 +781,7 @@ def test_contrast_holds_on_every_rendered_page(
         f"{scheme}: {len(offenders)} of {len(results)} pages draw text below the "
         f"threshold, {len(distinct)} distinct pairs:\n" + "\n".join(distinct[:20])
     )
-    thin = {name: found["examined"] for name, found in results.items() if found["examined"] < 30}
-    assert thin == {}, f"{scheme}: the probe barely looked at these pages: {thin}"
+    assert_examined_enough("contrast", results)
 
 
 # === AC-11: focus is visible on every interactive element ==================
@@ -826,8 +830,7 @@ def test_focus_is_visible_on_every_interactive_element(
         f"{len(offenders)} of {len(results)} pages have an element with no "
         f"visible focus ring, {len(distinct)} distinct:\n" + "\n".join(distinct[:20])
     )
-    thin = {name: found["examined"] for name, found in results.items() if found["examined"] < 5}
-    assert thin == {}, f"the probe focused almost nothing on these pages: {thin}"
+    assert_examined_enough("focus", results)
 
 
 # === AC-12: the shell does not scroll, and main does =======================
@@ -922,18 +925,24 @@ window.addEventListener('load', function () {
 </script>
 """
 
-#: The twelfth number, on a table spec 0028 does not convert (FR-12).
+#: The twelfth number, on the inventory's list row (FR-12, re-pointed again
+#: by spec 0030 FR-17). It reports the cell's padding, the row's padding and
+#: whether the row is a grid, because after FR-17 the two numbers live on two
+#: elements and a reading of the cell alone can no longer see the 12px.
 ORDINARY_ROW_PROBE = """
 <script>
 window.addEventListener('load', function () {
   setTimeout(function () {
     var el = document.querySelector('tbody td');
+    var row = el ? el.parentElement : null;
     var out = document.createElement('div');
     out.id = 'probe-result';
     out.textContent = JSON.stringify(el ? {
       paddingTop: getComputedStyle(el).paddingTop,
       paddingLeft: getComputedStyle(el).paddingLeft,
-      grid: getComputedStyle(el.parentElement).display
+      grid: getComputedStyle(row).display,
+      rowPaddingTop: getComputedStyle(row).paddingTop,
+      rowPaddingLeft: getComputedStyle(row).paddingLeft
     } : null);
     document.body.appendChild(out);
   }, 300);
@@ -954,17 +963,27 @@ def test_the_twelve_numbers(rendered: dict[str, str], tmp_path: Path) -> None:
     FR-6 gives it no class name -- it is "main's inner wrapper", the one
     element 0027 owns and the one `cabinIn` is applied to (FR-16).
 
-    **The twelfth number is re-pointed** (spec 0028 FR-12/AC-13) and not
-    dropped. It asserts that a list row's padding is the design's `10px 12px`.
-    After spec 0028 FR-8 every table on `/ca/{root}` is a `.rows` table, where
-    the 12px horizontal inset is on the `<tr>` and the cells are `10px 0` -- so
-    the old reading would fail against a build that is exactly right. It is
-    therefore read from `/certs`, whose table spec 0028 does not convert and
-    which is the design's ordinary list row (brief section 6.2, "10px 12px
-    (inventory, issuer lists)"), and a thirteenth reading asserts the same two
-    numbers on the page they were read from before. A number moved to a page
-    where it can be read is still that number; a number left where it cannot
-    be is a criterion that gets deleted the first time someone is in a hurry.
+    **The twelfth number is re-pointed twice** and never dropped. It asserts
+    that a list row's padding is the design's `10px 12px` (brief section 6.2,
+    "10px 12px (inventory, issuer lists)").
+
+    Spec 0028 FR-12 moved the reading off `/ca/{root}` and onto `/certs`,
+    because after FR-8 every table on `/ca/{root}` is a `.rows` table, where
+    the 12px horizontal inset is on the `<tr>` and the cells are `10px 0` --
+    so a reading of the cell's two paddings would fail against a build that is
+    exactly right. Spec 0030 FR-17 gives `/certs` `.cols-certs`, which is a
+    `.rows` table too, so there is no unconverted list left in cabin and the
+    reading has nowhere flatter to move to.
+
+    It therefore stays on `/certs` and takes the grid form: the cell's `10px`
+    and the row's `12px`, the two elements the design's one declaration is
+    split across. The clause that asked whether the row is a grid is kept and
+    **inverted** -- it now has to be one. That is not a weakening: a `/certs`
+    row that is not `display: grid` means `.cols-certs` was declared in the
+    stylesheet and never applied to anything, which is exactly the build AC-16
+    splits its own two tests to catch. The thirteenth reading keeps asserting
+    the same two numbers on `/ca/{root}`, so both of the design's named users
+    of the number are still measured, on the page each names.
     """
     found = one_page(tmp_path, "ca_detail", rendered["ca_detail"], NUMBERS_PROBE)
     assert isinstance(found, dict)
@@ -988,17 +1007,24 @@ def test_the_twelve_numbers(rendered: dict[str, str], tmp_path: Path) -> None:
     assert found["h1"]["fontSize"] == "29px"
     assert found["h2"]["fontSize"] == "17px"
 
-    # twelfth, re-pointed: the design's ordinary list row, on a table this
-    # redesign step does not convert.
+    # twelfth, re-pointed again: the inventory's list row, in the grid form
+    # spec 0030 FR-17 gives it.
     ordinary = one_page(tmp_path, "certs", rendered["certs"], ORDINARY_ROW_PROBE)
     assert ordinary is not None, "/certs renders no table row to read the number off"
     assert isinstance(ordinary, dict)
-    assert ordinary["grid"] != "grid", (
-        "/certs' table is a grid table too, so this reading is no longer the "
-        "ordinary list row it was moved here to be (spec 0028 FR-12)"
+    assert ordinary["grid"] == "grid", (
+        f"/certs' list row is `display: {ordinary['grid']}`. FR-17 puts `.cols-certs` "
+        f"on that table, and a column template that is declared but never applied "
+        f"draws nothing"
     )
-    assert ordinary["paddingTop"] == "10px"
-    assert ordinary["paddingLeft"] == "12px"
+    assert ordinary["paddingTop"] == "10px", ordinary
+    assert ordinary["paddingLeft"] == "0px", (
+        f"the inventory's cell keeps its own horizontal inset, so the rule between "
+        f"rows would not run the full width of the row as the design draws it: "
+        f"{ordinary}"
+    )
+    assert ordinary["rowPaddingTop"] == "0px", ordinary
+    assert ordinary["rowPaddingLeft"] == "12px", ordinary
 
     # thirteenth: the same two numbers, on the page the twelfth was read from,
     # in the two places the grid row puts them.

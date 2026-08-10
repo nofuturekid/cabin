@@ -185,8 +185,14 @@ def _secrets(cfg: Config) -> SecretStore:
     return SecretStore.open(cfg.data_dir, cfg.master_passphrase)
 
 
+#: The superadmin every test here sets up. Named, because the rail footer's
+#: avatar (spec 0030 FR-11) renders its first character and a test below has
+#: to be able to say so without repeating the letter.
+_SUPERADMIN = "alice"
+
+
 def _setup_superadmin(
-    client: TestClient, username: str = "alice", password: str = "correcthorse1"
+    client: TestClient, username: str = _SUPERADMIN, password: str = "correcthorse1"
 ) -> None:
     resp = client.post("/setup", data={"username": username, "password": password})
     assert resp.status_code == 303
@@ -822,13 +828,25 @@ def test_every_hx_target_answers_a_full_page(client: TestClient, cfg: Config) ->
     assert len(targets) >= len(expected) > 0, (targets, expected)
 
     # FR-20 clause 1: htmx adds no endpoint and no query parameter but `edit`.
-    known_paths = {
-        getattr(route, "path", None)
+    #
+    # Matched against the routes, not compared with their paths. Half of spec
+    # 0030's targets are interpolated -- `/users?edit={{ row.id }}`, the output
+    # of `_page_url`, `/ca/{{ row.id }}?add=` -- so what the walker resolves off
+    # a rendered page is `/ca/1`, while `route.path` is `/ca/{root_id}`. A set
+    # membership between a resolved URL and a route template is false for every
+    # such target and true only for the literal ones, which is why this clause
+    # was green while the walker collected from templates alone and cannot be
+    # once it collects from pages. Starlette's own `path_regex` is what decides
+    # whether a path is one this application already routes.
+    known = [
+        route
         for route in _flatten_routes(client.app.routes)  # type: ignore[attr-defined]
-    }
+        if getattr(route, "path_regex", None) is not None
+    ]
+    assert known, "no route carries a path_regex, so the clause below matches nothing"
     for method, url in sorted(targets):
         parsed = urlparse(url)
-        assert parsed.path in known_paths, (
+        assert any(route.path_regex.fullmatch(parsed.path) for route in known), (
             f"{method} {parsed.path} is not a route this application already has. "
             f"'Every htmx target is a URL that also works as a page' (ADR-0003) and "
             f"spec 0030 FR-20 adds no endpoint at all"
@@ -1723,6 +1741,33 @@ def test_the_create_panel_flips_tone_with_path_length(client: TestClient, cfg: C
 # --- AC-14 -----------------------------------------------------------------
 
 
+#: What spec 0030 changes in the shell, and therefore on every page this
+#: instrument renders -- it renders whole pages through a template directory,
+#: the baseline layout for the `before` pass and today's for the `after`, so
+#: `layout.html`'s two changes show up on all six pages here.
+#:
+#: * `Transfer` -> `Export` on the rail's fourth group is FR-19's one changed
+#:   string, and FR-19's table is where spec 0030 wrote it down.
+#: * the rail footer's avatar is FR-11's, and is deliberately **not** in that
+#:   table: it renders the logged-in username's first character, a string that
+#:   is already on the page, rather than the `@login` line the design stacks
+#:   under it. Spec 0030's own AC-18 check compares template *files*, where
+#:   that character is a Jinja expression and not a literal, which is why only
+#:   this rendered copy sees it. Derived from the fixture's own username, so
+#:   that it stays the avatar's rule and not a letter someone typed.
+#:
+#: Named rather than filtered out of the comparison: this test's whole job is
+#: that a string which moved has to be written down somewhere.
+#:
+#: Spec 0030 AC-18 rebuilt its own version of this check against the template
+#: files for a different reason -- one instance cannot render both generations
+#: of `dashboard.html`, since FR-8 drops a context key and the environment is
+#: `StrictUndefined`. None of the six pages below is the dashboard, so this
+#: copy still renders both generations and still means what it did.
+_SHELL_REMOVED = {"Transfer"}
+_SHELL_ADDED = {"Export", _SUPERADMIN[0].upper()}
+
+
 def test_no_sentence_changed_on_the_form_pages(
     client: TestClient, cfg: Config, tmp_path: Path
 ) -> None:
@@ -1858,13 +1903,13 @@ def test_no_sentence_changed_on_the_form_pages(
         # candidates, and a hard-coded exception would pass or fail on that
         # rather than on the markup.
         lost = (set(old) - set(new)) if name in states else set(old - new)
-        assert lost == set(), (
+        assert lost <= _SHELL_REMOVED, (
             f"{name}: text that was on this page before this spec is gone from it. "
-            f"FR-14 permits no removal: {sorted(lost)}"
+            f"FR-14 permits no removal: {sorted(lost - _SHELL_REMOVED)}"
         )
         # Symmetrical with `lost` above, for the same reason.
         gained_all = (set(new) - set(old)) if name in states else set(new - old)
-        gained = gained_all - additions[name]
+        gained = gained_all - additions[name] - _SHELL_ADDED
         assert gained == set(), (
             f"{name}: text this spec did not name appears on the page. Every "
             f"addition is in FR-14's table or it is a wording change: "

@@ -9,13 +9,17 @@
   </div>
 </div>
 
+<div class="filters">
+  <div class="seg">
+    {% for option in statuses %}
+    <a class="{% if option == status %} seg-on {% endif %}" href="{{ status_urls[option] }}">{{ option }}</a>
+    {% endfor %}
+  </div>
+</div>
+
 <form method="get" action="/transfer/inventory" class="filters">
   <input type="search" name="q" value="{{ q }}" placeholder="common name, SAN or serial" />
-  <select name="status">
-    {% for option in statuses %}
-    <option value="{{ option }}" {% if option == status %}selected{% endif %}>{{ option }}</option>
-    {% endfor %}
-  </select>
+  <input type="hidden" name="status" value="{{ status }}" />
   <button type="submit">Filter</button>
 </form>
 

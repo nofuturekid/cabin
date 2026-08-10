@@ -25,6 +25,7 @@ from cabin.web.deps import (
     base_context,
     client_ip,
     current_actor,
+    flash,
     get_db,
     require_superadmin,
     verify_csrf,
@@ -97,7 +98,7 @@ def _page(
     active_intermediates = ca_service.active_issuers(db)
     active_ids = {row.id for row in active_intermediates}
     all_intermediates = {row.id: row for row in ca_service.list_cas(db, kind="intermediate")}
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context.update(
         {
             "tokens": [
@@ -237,17 +238,22 @@ def update_token_issuers_route(
         change = issuer_grants.set_issuers(db, issuer_grants.token_principal(row), issuer_id)
     except ValueError as exc:
         return _page(request, db, user, error=str(exc), status_code=400)
+    # Spec 0030 FR-3: an unchanged set records nothing, so it announces
+    # nothing either -- the panel and the log say the same thing or neither
+    # says anything.
     if change.changed:
+        summary = f"changed issuer grants for token {row.label!r}"
         audit.record(
             db,
             actor,
             AuditAction.token_issuers_changed,
-            summary=f"changed issuer grants for token {row.label!r}",
+            summary=summary,
             target_type="api_token",
             target_id=row.id,
             detail={"added": change.added, "removed": change.removed, "issuers": change.issuers},
             ip=client_ip(request, db),
         )
+        flash(request, db, summary)
     return RedirectResponse("/tokens", status_code=303)
 
 
@@ -269,14 +275,16 @@ def revoke_token(
     if row is None or row.revoked_at is not None:
         return RedirectResponse("/tokens", status_code=303)
     api_tokens.revoke_token(db, token_id)
+    summary = f"revoked API token {row.label!r}"
     audit.record(
         db,
         actor,
         AuditAction.token_revoked,
-        summary=f"revoked API token {row.label!r}",
+        summary=summary,
         target_type="api_token",
         target_id=row.id,
         detail={"label": row.label, "role": row.role},
         ip=client_ip(request, db),
     )
+    flash(request, db, summary)
     return RedirectResponse("/tokens", status_code=303)

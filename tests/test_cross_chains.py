@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import dom
 import pytest
 from acme_client import Acme, AcmeKey
 from acme_orders import Flow, csr_der
@@ -1031,15 +1032,33 @@ def test_dashboard_warns_a_year_before_a_cross_certificate_expires(
     page = client.get("/").text
     cross_row = _row(cfg, scenario.cross)
     assert "tag-warn" in page
-    # The dashboard's CA table has no per-row class to scope on (spec
-    # 0016's plain <tr>), so the row itself -- not a fixed character count
-    # past a marker -- is what is checked: every <tr> naming the cross
-    # row's name (see the /ca test above for why that name recurs), the
-    # *last* of which is the cross row's own entry, not its subject root's
-    # (list_cas orders by id, and the cross row is created after both).
-    rows = re.findall(rf"<tr>\s*<th>{re.escape(cross_row.name)}</th>.*?</tr>", page, re.DOTALL)
-    assert rows, f"no dashboard row found for {cross_row.name!r}"
-    assert "tag-warn" in rows[-1]
+    # Re-pointed, spec 0030 FR-8/FR-9: the flat `The CA itself` table becomes
+    # the grouped list, so this row is a `<tr class="row-root">` in the
+    # `.cols-authorities` table and not a `<tr><th>name</th>` any more. What
+    # this criterion measures is unchanged -- the cross row is on the
+    # dashboard and it is flagged a year ahead -- and it is now scoped by the
+    # row's own `cross` kind tag rather than by "the last row naming X". A
+    # cross row's name equals its subject root's (see the /ca test above for
+    # why that name recurs) and FR-9 gives the cross row the one mark on the
+    # page that tells the two apart, so this is the stronger reading as well
+    # as the one that still resolves.
+    tree = dom.parse(page)
+    cross_rows = [
+        row
+        for row in tree.find(cls="cols-authorities").find_all(tag="tr")
+        if any(tag.text() == "cross" for tag in row.find_all(cls="tag"))
+    ]
+    assert len(cross_rows) == 1, (
+        f"the dashboard's authorities block holds {len(cross_rows)} rows tagged "
+        f"`cross`; spec 0017 FR-14 puts exactly one there per cross certificate"
+    )
+    row = cross_rows[0]
+    assert cross_row.name in row.find_all(tag="td")[0].text(), (
+        f"the cross row on the dashboard does not name {cross_row.name!r}: {row.text()!r}"
+    )
+    assert any("tag-warn" in tag.classes for tag in row.find_all(cls="tag")), (
+        f"the cross row carries no `tag-warn` 300 days before it expires: {row.text()!r}"
+    )
 
 
 # --- AC-17: the REST surface reports a cross row ---------------------------------

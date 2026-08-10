@@ -19,7 +19,7 @@
     a hash of it and cannot show it again — if it is lost, revoke the token
     and create a new one.
   </p>
-  <pre class="pem">{{ secret }}</pre>
+  <p><code class="copyable">{{ secret }}</code></p>
   <p class="note">
     Use it as <code>Authorization: Bearer &lt;token&gt;</code> against
     <code>/api/v1</code>. The API is documented at
@@ -29,7 +29,7 @@
 {% endif %}
 
 <div class="scroller">
-  <table>
+  <table class="rows cols-tokens">
     <thead>
       <tr>
         <th>Label</th>
@@ -70,9 +70,9 @@
           {% endif %}
         </td>
         <td><span class="tag tag-{{ token.status }}">{{ token.status }}</span></td>
-        <td class="nowrap">{{ token.created_at }}</td>
-        <td class="nowrap">{{ token.last_used_at }}</td>
-        <td class="nowrap">{{ token.expires_at }}</td>
+        <td class="mono">{{ token.created_at }}</td>
+        <td class="mono">{{ token.last_used_at }}</td>
+        <td class="mono">{{ token.expires_at }}</td>
         <td class="row-actions">
           {% if token.can_revoke %}
           <form method="post" action="/tokens/{{ token.id }}/revoke">

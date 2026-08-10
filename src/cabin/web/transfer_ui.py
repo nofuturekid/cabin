@@ -21,6 +21,7 @@ import io
 import json
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -47,6 +48,7 @@ from cabin.web.deps import (
     base_context,
     client_ip,
     current_actor,
+    flash,
     get_current_user,
     get_db,
     is_htmx,
@@ -97,6 +99,7 @@ def _subject(row: CACertificate) -> str:
 
 def _ca_import_page(
     request: Request,
+    db: Session,
     user: User,
     error: str | None,
     status_code: int = 200,
@@ -109,7 +112,7 @@ def _ca_import_page(
     (FR-3). It carries only what that endpoint declares -- the two
     certificates -- so the private key and its passphrase have nowhere here
     to come back from either (FR-11)."""
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["error"] = error
     context["values"] = values or {}
     return templates.TemplateResponse(
@@ -158,9 +161,9 @@ def _import_preview(cert_pem: str, chain_pem: str) -> dict[str, object]:
 
 
 def _cross_import_page(
-    request: Request, user: User, error: str | None, status_code: int = 200
+    request: Request, db: Session, user: User, error: str | None, status_code: int = 200
 ) -> Response:
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["error"] = error
     return templates.TemplateResponse(
         request, "transfer_cross_import.html", context, status_code=status_code
@@ -168,13 +171,21 @@ def _cross_import_page(
 
 
 @router.get("/ca-import")
-def ca_import_page(request: Request, user: User = Depends(require_admin)) -> Response:
-    return _ca_import_page(request, user, None)
+def ca_import_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    return _ca_import_page(request, db, user, None)
 
 
 @router.get("/cross-import")
-def cross_import_page(request: Request, user: User = Depends(require_admin)) -> Response:
-    return _cross_import_page(request, user, None)
+def cross_import_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Response:
+    return _cross_import_page(request, db, user, None)
 
 
 @ca_router.post("/import/preview")
@@ -182,6 +193,7 @@ def ca_import_preview(
     request: Request,
     cert_pem: str = Form(""),
     chain_pem: str = Form(""),
+    db: Session = Depends(get_db),
     user: User = Depends(require_admin),
     _csrf: None = Depends(verify_csrf),
 ) -> Response:
@@ -208,7 +220,7 @@ def ca_import_preview(
         "chain_pem": chain_pem,
         "preview": preview,
     }
-    return _ca_import_page(request, user, None, values=values)
+    return _ca_import_page(request, db, user, None, values=values)
 
 
 @ca_router.post("/import")
@@ -236,17 +248,20 @@ def ca_import(
             chain_pem,
         )
     except CAImportError as exc:
-        return _ca_import_page(request, user, str(exc), status_code=400)
+        return _ca_import_page(request, db, user, str(exc), status_code=400)
     # The subject only -- neither the submitted key nor its passphrase has any
     # business in a log (spec 0004 FR-3).
     subject = _subject(hierarchy.intermediate)
     # Spec 0018 FR-8: the importer is granted the new intermediate immediately.
     grant(db, user_principal(user), hierarchy.intermediate.id)
+    # Spec 0030 FR-3: the longest message this project can produce, which is
+    # why `sessions.flash` is `sa.Text` -- a subject is operator-supplied.
+    summary = f"imported CA {subject}"
     audit.record(
         db,
         actor,
         AuditAction.ca_imported,
-        summary=f"imported CA {subject}",
+        summary=summary,
         target_type="ca_certificate",
         target_id=hierarchy.intermediate.id,
         detail={"subject": subject, "granted_to": user.id},
@@ -257,6 +272,7 @@ def ca_import(
     tls_manager = request.app.state.tls
     if tls_manager is not None:
         tls_manager.ensure_current(db, request.app.state.secrets)
+    flash(request, db, summary)
     return RedirectResponse("/ca", status_code=303)
 
 
@@ -275,18 +291,19 @@ def ca_cross_import(
     try:
         row = ca_service.import_cross(db, cross_pem, issuer_pem)
     except CAImportError as exc:
-        return _cross_import_page(request, user, str(exc), status_code=400)
+        return _cross_import_page(request, db, user, str(exc), status_code=400)
     cross_info = ca_x509.describe_certificate(
         x509.load_pem_x509_certificate(row.cert_pem.encode("utf-8"))
     )
     issuer_info = ca_x509.describe_certificate(
         x509.load_pem_x509_certificate(issuer_pem.encode("utf-8"))
     )
+    summary = f"imported cross certificate for {row.name!r}"
     audit.record(
         db,
         actor,
         AuditAction.ca_cross_imported,
-        summary=f"imported cross certificate for {row.name!r}",
+        summary=summary,
         target_type="ca_certificate",
         target_id=row.id,
         detail={
@@ -297,6 +314,7 @@ def ca_cross_import(
         },
         ip=client_ip(request, db),
     )
+    flash(request, db, summary)
     return RedirectResponse("/ca", status_code=303)
 
 
@@ -362,7 +380,7 @@ def trust_bundle_page(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
-    context = base_context(request, user)
+    context = base_context(request, db, user)
     context["roots"] = _root_rows(db)
     return templates.TemplateResponse(request, "transfer_trust_bundle.html", context)
 
@@ -424,15 +442,33 @@ def _ca_key_page(
     an operator who cannot find a row in the select is told why, instead of
     wondering whether it exists at all.
     """
-    rows = [
-        {"id": row.id, "name": row.name, "kind": row.kind, "exportable": _exportable(row)}
-        for row in ca_service.list_cas(db)
-    ]
-    context = base_context(request, user)
+    all_rows = ca_service.list_cas(db)
+
+    def view(row: CACertificate) -> dict[str, object]:
+        return {"id": row.id, "name": row.name, "kind": row.kind, "exportable": _exportable(row)}
+
+    # Spec 0030 FR-9/FR-15: the same grouped list `/ca` and the dashboard
+    # draw -- one entry per root with its intermediates under `issuers`, one
+    # per cross row at root level -- carrying the same three cell values per
+    # row this page carries today.
+    children: dict[int | None, list[CACertificate]] = {}
+    for row in all_rows:
+        if row.kind == "intermediate":
+            children.setdefault(row.parent_id, []).append(row)
+    grouped: list[dict[str, object]] = []
+    for row in all_rows:
+        if row.kind not in {"root", "cross"}:
+            continue
+        entry = view(row)
+        entry["issuers"] = [
+            view(child) for child in (children.get(row.id, []) if row.kind == "root" else [])
+        ]
+        grouped.append(entry)
+    context = base_context(request, db, user)
     context["error"] = error
     context["values"] = values or {}
-    context["rows"] = rows
-    context["exportable_rows"] = [row for row in rows if row["exportable"]]
+    context["rows"] = grouped
+    context["exportable_rows"] = [view(row) for row in all_rows if _exportable(row)]
     return templates.TemplateResponse(
         request, "transfer_ca_key.html", context, status_code=status_code
     )
@@ -632,8 +668,22 @@ def inventory_page(
     now = datetime.now(UTC)
     term, active = _normalize_filters(q, status)
     total = len(_inventory_rows(db, q, status, now))
-    context = base_context(request, user)
-    context.update({"q": term, "status": active, "statuses": STATUS_FILTERS, "total": total})
+    context = base_context(request, db, user)
+    context.update(
+        {
+            "q": term,
+            "status": active,
+            "statuses": STATUS_FILTERS,
+            # Spec 0030 FR-15: the same segmented control the inventory has,
+            # built from the same `_normalize_filters` values -- the only way
+            # this page can look like the rest of the application.
+            "status_urls": {
+                option: "/transfer/inventory?" + urlencode({"q": term, "status": option})
+                for option in STATUS_FILTERS
+            },
+            "total": total,
+        }
+    )
     return templates.TemplateResponse(request, "transfer_inventory.html", context)
 
 

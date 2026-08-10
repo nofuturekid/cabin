@@ -1021,11 +1021,26 @@ def _refusal_page(html: str) -> dom.Node:
     assert len(headings) == 1 and headings[0].text() == NOT_PERMITTED_TITLE, (
         f"the refusal's <h1> elements are {[node.text() for node in headings]}"
     )
-    links = [node for node in tree.find_all(tag="a") if node.get("href") == "/certs"]
-    assert len(links) == 1, (
-        f"the refusal carries {len(links)} link(s) to /certs; FR-5 gives it exactly "
-        f"one, and /certs is the one page every refusable role can still open"
+    #: AC-5's corrected clause. The count is over the page's own content, not
+    #: over the whole document: FR-5 puts the rail on this page and the rail's
+    #: Inventory entry is `href="/certs"`, so "exactly one anchor to /certs on
+    #: the page" and FR-5's own
+    #: `<a class="button-link" href="/certs">Back to the inventory</a>` cannot
+    #: both hold. What the design's section 5.2 asks for is one *primary* link,
+    #: and a primary link is inside `<main>`.
+    primary = [node for node in mains[0].find_all(tag="a") if "button-link" in node.classes]
+    assert len(primary) == 1, (
+        f"the refusal's content carries {len(primary)} `.button-link` element(s); "
+        f"brief section 5.2 gives it one primary link"
     )
+    assert primary[0].get("href") == "/certs", (
+        f"the refusal's primary link points at {primary[0].get('href')!r}. FR-5 names "
+        f"`/certs`: it is guarded by `get_current_user` alone, so it is the one page "
+        f"every role that can be refused anything can still open, and it is the "
+        f"address the rail's own Inventory entry uses. A second address for the same "
+        f"page is not a way round AC-5's count -- the count is scoped to `<main>`"
+    )
+    assert primary[0].text() == BACK_TO_INVENTORY, primary[0].text()
     marked = [node for node in tree.walk() if node.get("aria-current") == "page"]
     assert marked == [], (
         f"a rail entry is marked current on the refusal page: {marked}. The page is "
