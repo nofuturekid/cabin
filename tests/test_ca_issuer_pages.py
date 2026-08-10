@@ -26,14 +26,14 @@ other web test files already do (there is no conftest.py, and each file
 owns its own client/session/CSRF and HTML-scoping plumbing).
 """
 
+import inspect
 import json
 import re
 import shutil
 import subprocess
 import threading
 from collections import Counter
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -46,8 +46,8 @@ import probes
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
+from fastapi import params as fastapi_params
 from fastapi.testclient import TestClient
-from jinja2 import FileSystemLoader
 from sqlalchemy.orm import Session
 
 # Spec 0027 FR-2's rule, one level up: the stylesheet parser has one
@@ -55,7 +55,6 @@ from sqlalchemy.orm import Session
 # next time a selector form appears that it cannot read.
 from test_web_design_shell import css_rules, declarations
 
-from cabin import web as cabin_web
 from cabin.acme import http as acme_http
 from cabin.app import create_app
 from cabin.ca import certs as ca_certs
@@ -69,18 +68,13 @@ from cabin.sessions import get_session
 from cabin.settings import ACME_ENABLED, BASE_URL, TRUE, set_setting
 from cabin.store import create_session_factory
 from cabin.web import ca_ui
+from cabin.web.deps import verify_csrf
 
 REPO = Path(__file__).resolve().parents[1]
 STATIC_DIR = REPO / "src/cabin/web/static"
 TEMPLATES_DIR = REPO / "src/cabin/web/templates"
 CSS_PATH = STATIC_DIR / "cabin.css"
 CHROME = "/opt/google/chrome/chrome"
-
-#: The commit spec 0028 starts from. AC-16 renders each of the five pages
-#: twice -- once through the templates as they stand and once through the
-#: templates as they stood here -- against one database, so that every text
-#: node that differs differs because of markup and not because of data.
-BASELINE = "051b006"
 
 #: FR-1's five templates.
 FIVE_TEMPLATES = (
@@ -2566,276 +2560,43 @@ def test_no_row_is_dimmed_with_opacity(client: TestClient, cfg: Config, tmp_path
         assert found["bad"] == [], f"{name}: {found['bad']}"
 
 
-# === AC-16: not one sentence changed ======================================
-
-
-class _TextNodes(HTMLParser):
-    """Every visible text node of a page, whitespace-collapsed."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.texts: list[str] = []
-        self._muted = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"script", "style"}:
-            self._muted += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style"} and self._muted:
-            self._muted -= 1
-
-    def handle_data(self, data: str) -> None:
-        if self._muted:
-            return
-        text = " ".join(data.split())
-        if text:
-            self.texts.append(text)
-
-
-def _text_nodes(html: str) -> Counter[str]:
-    parser = _TextNodes()
-    parser.feed(html)
-    return Counter(parser.texts)
-
-
-def _baseline_templates(tmp_path: Path, ref: str = BASELINE) -> Path:
-    """The templates as they stood at `ref`, in a directory of their own.
-
-    `ref` is a parameter rather than a read of `BASELINE` because spec 0029
-    needs the same instrument against its own base commit
-    (`test_web_form_previews.test_no_sentence_changed_on_the_form_pages`),
-    and a second copy of it would be a second thing to repair.
-    """
-    out = tmp_path / f"templates-before-{ref}"
-    out.mkdir(parents=True, exist_ok=True)
-    listed = subprocess.run(
-        ["git", "-C", str(REPO), "ls-tree", "-r", "--name-only", ref, str(TEMPLATES_DIR)],
-        capture_output=True,
-        text=True,
-    )
-    assert listed.returncode == 0, listed.stderr
-    names = [line for line in listed.stdout.split() if line.endswith(".html")]
-    assert len(names) > 10, f"{ref} has {len(names)} templates: {names}"
-    for name in names:
-        blob = subprocess.run(
-            ["git", "-C", str(REPO), "show", f"{ref}:{name}"], capture_output=True
-        )
-        assert blob.returncode == 0, blob.stderr
-        (out / Path(name).name).write_bytes(blob.stdout)
-    return out
-
-
-@contextmanager
-def _rendering_from(directory: Path) -> Iterator[None]:
-    """Render through another set of templates, against the same database.
-
-    One environment, one instance, one set of rows: every difference between
-    the two renderings is a difference of markup, which is the only thing
-    FR-15 is about. Rendering a second instance would compare two different
-    fingerprints and two different expiry dates and prove nothing.
-    """
-    env = cabin_web.templates.env
-    original = env.loader
-    env.loader = FileSystemLoader(str(directory))
-    env.cache.clear()
-    try:
-        yield
-    finally:
-        env.loader = original
-        env.cache.clear()
-
-
-#: What spec 0030 changes in the shell, and therefore on every page this
-#: instrument renders -- it renders whole pages through a template directory,
-#: the baseline layout for the `before` pass and today's for the `after`, so
-#: `layout.html`'s two changes show up on all five pages here.
-#:
-#: * `Transfer` -> `Export` on the rail's fourth group is FR-19's one changed
-#:   string, and FR-19's table is where spec 0030 wrote it down.
-#: * the rail footer's avatar is FR-11's, and is deliberately **not** in that
-#:   table: it renders the logged-in username's first character, a string that
-#:   is already on the page, rather than the `@login` line the design stacks
-#:   under it. Spec 0030's own AC-18 check compares template *files*, where
-#:   that character is a Jinja expression and not a literal, which is why only
-#:   this rendered copy sees it. Derived from the fixture's own username, so
-#:   that it stays the avatar's rule and not a letter someone typed.
-#:
-#: Named rather than filtered out of the comparison: this test's whole job is
-#: that a string which moved has to be written down somewhere.
-#:
-#: Spec 0030 AC-18 rebuilt its own version of this check against the template
-#: files for a different reason -- one instance cannot render both generations
-#: of `dashboard.html`, since FR-8 drops a context key and the environment is
-#: `StrictUndefined`. None of the five pages below is the dashboard, so this
-#: copy still renders both generations and still means what it did.
-_SHELL_REMOVED = {"Transfer"}
-_SHELL_ADDED = {"Export", _SUPERADMIN[0].upper()}
-
-
-def test_no_sentence_changed_on_the_five_pages(
-    client: TestClient, cfg: Config, tmp_path: Path
-) -> None:
-    """FR-15/AC-16: nothing is lost, and every addition is named.
-
-    An equality would be the stronger claim and it is not available: FR-2
-    adds a `Kind` heading and a kind cell, FR-5 a row per intermediate, FR-4
-    a section heading and its help line, FR-6 splits the comma-joined SANs,
-    and FR-7 takes two labels off the cross page -- four of the five are this
-    spec's own requirements. So the comparison is exact in the direction that
-    carries FR-15 (nothing the page said before is gone) and named in the
-    other (every new string is listed, per page, from the fixture's own
-    data). A heading "improved" while the markup around it is rewritten fails
-    both halves at once: the old wording disappears and the new wording is in
-    nobody's list.
-    """
-    _setup_superadmin(client)
-    fix = _seed(cfg)
-    cert_path, sans = _issue_leaf(client, cfg, fix)
-
-    paths = {
-        "ca": "/ca",
-        "ca_detail": f"/ca/{fix.beta_root}",
-        "ca_issuer": f"/ca/{fix.alpha_root}/issuer/{fix.alpha_int}",
-        "ca_cross": f"/ca/{fix.beta_root}/cross/{fix.cross}",
-        "cert_detail": cert_path,
-    }
-
-    #: spec 0029 FR-13 turns `ca_detail`'s two action forms into URL state, so
-    #: the closed page deliberately renders neither form's labels. This
-    #: criterion's "nothing is lost" is about the page, and the page is now
-    #: three URLs; the multiset it is compared against is their union, at the
-    #: larger multiplicity of each. Nothing is weakened -- a sentence absent
-    #: from all three still fails -- and the other four pages are one URL
-    #: each, exactly as before. Spec 0029's own AC-14 carries the same
-    #: correction for the same reason; this is where the claim about *these*
-    #: five pages lives, so it is corrected here too.
-    states = {
-        "ca_detail": (
-            f"/ca/{fix.beta_root}",
-            f"/ca/{fix.beta_root}?add=intermediate",
-            f"/ca/{fix.beta_root}?add=cross-sign",
-        )
-    }
-
-    def render() -> dict[str, str]:
-        pages = {}
-        for name, path in paths.items():
-            resp = client.get(path)
-            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-            pages[name] = resp.text
-        return pages
-
-    def pooled(name: str) -> Counter[str]:
-        found: Counter[str] = Counter()
-        for path in states.get(name, (paths[name],)):
-            resp = client.get(path)
-            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-            found |= _text_nodes(resp.text)
-        return found
-
-    #: spec 0030 FR-3: `_issue_leaf` posts `/certs/issue`, which answers 303
-    #: and records exactly one audit event, so a flash is pending and the next
-    #: authenticated page rendered carries a sentence no template holds. It is
-    #: popped here, before either generation is rendered, so that what is
-    #: compared is two sets of templates and not one page that happened to
-    #: have a panel against one that did not. The counter-check is both ways
-    #: round: a drain that found nothing to drain would be a line that reads
-    #: like care and does nothing.
-    drained = client.get("/certs")
-    assert drained.status_code == 200
-    assert 'class="flash"' in drained.text, (
-        "no flash was pending after an issuance, so this drain measures nothing"
-    )
-    assert 'class="flash"' not in client.get("/certs").text, (
-        "the flash survived the render that showed it; FR-2 clears in the same call as the read"
-    )
-
-    after = render()
-    after_pooled = {name: pooled(name) for name in paths}
-    with _rendering_from(_baseline_templates(tmp_path)):
-        before = render()
-        before_pooled = {name: pooled(name) for name in paths}
-
-    assert any(before[name] != after[name] for name in paths), (
-        f"the five pages render byte-identically through the templates of "
-        f"{BASELINE} and through today's -- either this spec has not been "
-        f"implemented, or the template loader was not actually swapped and this "
-        f"test is comparing every page with itself"
-    )
-
-    glyphs = {"├", "└"}  # the tree glyphs, named rather than matched
-    kind_words = {"root", "intermediate", "cross"}
-    statuses = {"active", "retired"}
-    row_data = {
-        fix.alpha_int_name,
-        fix.beta_int_name,
-        _expiry_of(cfg, fix.alpha_int),
-        _expiry_of(cfg, fix.beta_int),
-    }
-    additions = {
-        # FR-5: one row per intermediate under its own root.
-        "ca": glyphs | kind_words | statuses | row_data,
-        # FR-2's Kind column, and FR-4's section heading and help line, which
-        # are lifted verbatim from `ca_issuer.html` rather than written.
-        "ca_detail": {
-            "Kind",
-            "intermediate",
-            "Renew and retire",
-            "The two things that can be done to this certificate from here.",
-            # spec 0029 FR-13/FR-14: the two closed states' trigger anchors.
-            # Their text is taken from the existing empty-state link and the
-            # existing `<h2>`, so neither is new copy -- but on this fixture's
-            # root the empty state does not render, so the first is a string
-            # the page did not carry before and is named here.
-            "Add an intermediate",
-            "Cross-sign with another root",
-        },
-        "ca_issuer": set(),
-        "ca_cross": set(),
-        # FR-6: one element per SAN instead of one comma-joined string.
-        "cert_detail": set(sans),
-    }
-    removals = {
-        "ca": set(),
-        "ca_detail": set(),
-        "ca_issuer": set(),
-        # FR-7: the two labels the banner takes over. The sentences beside
-        # them move unchanged and must not show up here.
-        "ca_cross": {"Signed by", "Serving"},
-        "cert_detail": {", ".join(sans)},
-    }
-
-    # The pooling actually pooled something, or the union is one render under
-    # another name and the clause below is measuring nothing.
-    assert after_pooled["ca_detail"] != _text_nodes(after["ca_detail"]), (
-        "the three ca_detail URLs pool to exactly the closed render, so either "
-        "`?add=` renders nothing extra or the states above were not fetched"
-    )
-
-    for name in paths:
-        old, new = before_pooled[name], after_pooled[name]
-        assert sum(old.values()) >= 20, f"{name}: the baseline page has {sum(old.values())} texts"
-        # spec 0029 FR-13: a disclosure can reduce how often a sentence
-        # appears on one URL and may never remove one from the page. The two
-        # action forms both carried a `Validity (years)` label and can never
-        # be open at once again, so multiplicity is not comparable across
-        # states for this page and the claim is the set; every other page here
-        # keeps the exact multiset it always had.
-        lost = (set(old) - set(new)) if name in states else set(old - new)
-        assert lost <= removals[name] | _SHELL_REMOVED, (
-            f"{name}: text that was on this page before this spec is gone from it. "
-            f"FR-15 takes no exception: {sorted(lost - removals[name] - _SHELL_REMOVED)}"
-        )
-        # Symmetrical with `lost` above: on the pooled page a string that
-        # appears more often than before is not a new sentence, it is the same
-        # sentence at a second URL, so both directions are the set there.
-        gained = (set(new) - set(old)) if name in states else set(new - old)
-        assert gained <= additions[name] | _SHELL_ADDED, (
-            f"{name}: text this spec did not name appears on the page. Every "
-            f"addition is argued in an FR or it is a wording change: "
-            f"{sorted(gained - additions[name] - _SHELL_ADDED)}"
-        )
+# === AC-16: not one sentence changed, and the test that said so is retired =
+#
+# `test_no_sentence_changed_on_the_five_pages` lived here, with the
+# instrument it needed: `_TextNodes`/`_text_nodes`, `_baseline_templates` and
+# `_rendering_from`. It rendered the five pages twice against one database --
+# once through the templates as they stand, once through the templates as
+# they stood at spec 0028's base commit `051b006` -- and asserted that no
+# text node had disappeared and that every new one was named.
+#
+# It is retired, for the reason spec 0028 itself retired
+# `test_only_layout_html_changed` (see `test_web_design_shell.py`): what it
+# asserted is **a property of one commit, not of the codebase**. "The diff
+# from 051b006 to the 0028 merge removed no sentence from these five pages"
+# was true when it was written, is true now, and nothing a later commit can
+# do makes it false. Its evidence is the diff, and a diff cannot be edited
+# into agreeing with the code.
+#
+# Two things sharpen that argument rather than merely repeating it.
+#
+# * **It stopped being about spec 0028 two specs ago.** Spec 0029 had to
+#   teach it that `ca_detail` is three URLs now; spec 0030 had to teach it
+#   `Transfer` -> `Export` and the rail's avatar. Each correction was right
+#   and each was written down, but what the test measures after them is not
+#   0028's diff -- it is everything since 0028 that somebody remembered to
+#   name. An exception list that grows once per spec is a test being kept
+#   green, not a test catching anything.
+# * **CI is what forced the question.** `051b006` is a commit on
+#   `feat/0.2.0`, the runner's checkout is shallow, and PR #17 may squash --
+#   so this failed on the runner while passing locally. Deepening the
+#   checkout would have moved the failure to the day the branch merged.
+#
+# What was verified about *today's* pages is verified without it: FR-2's Kind
+# column, FR-4's `Renew and retire` section, FR-5's grouped rows and FR-6's
+# per-SAN elements are each asserted positively, by name, on the rendered
+# page, by the criteria above and by `test_web_flash_and_refusal`'s AC-15.
+# Only the "and nothing else moved" half needed a baseline, and that half is
+# the claim about the diff.
 
 
 # === AC-18: the view builders return exactly what the contract says =======
@@ -2942,7 +2703,22 @@ def _control_names(form_html: str) -> set[str]:
     return names
 
 
-def test_the_disclosure_is_url_state(client: TestClient, cfg: Config, tmp_path: Path) -> None:
+def _accepted_fields(*endpoints: Callable[..., object]) -> set[str]:
+    """Every name these callables take as a form field, off their signatures.
+
+    `verify_csrf` is passed beside the handler because `csrf_token` is
+    declared on that dependency rather than on the route, and a form that
+    drops it is a form the mutation answers 403 to.
+    """
+    found: set[str] = set()
+    for endpoint in endpoints:
+        for name, parameter in inspect.signature(endpoint).parameters.items():
+            if isinstance(parameter.default, fastapi_params.Form):
+                found.add(name)
+    return found
+
+
+def test_the_disclosure_is_url_state(client: TestClient, cfg: Config) -> None:
     """Spec 0029 AC-12: both directions, and the error re-render.
 
     The three defects this is written against are named in the criterion. A
@@ -2952,19 +2728,26 @@ def test_the_disclosure_is_url_state(client: TestClient, cfg: Config, tmp_path: 
     page is the defect spec 0023 AC-3 was written for and that spec 0024
     retired along with the `<details>` it could not open.
 
-    "Every field it carries today" is read off the page as it renders at
-    `BASELINE`, where the form is unconditionally open, rather than typed out
-    here: a list of field names in a test is a second original, and this one
-    would stop tracking the form the day the form gained a field.
+    **"Every field it carries" is read off the mutation, not off an old
+    commit.** This used to render the page through the templates of spec
+    0028's base commit, where the form was unconditionally open, and take the
+    field list from there -- a list typed into a test is a second original,
+    and it would stop tracking the form the day the form gained a field. But
+    a commit on a feature branch is a worse original still: it is gone the
+    moment the branch squashes, and until then it is only reachable on a full
+    checkout. The invariant underneath was never about that commit anyway. A
+    disclosure is sound when the form behind the link can complete the
+    mutation, so what the opened form is compared against is what
+    `ca_create_intermediate` and `verify_csrf` actually accept. That is
+    stronger than the old baseline in both directions: a control the form
+    drops fails, and so does a field the handler gains that the form never
+    offers -- which the baseline could not see at all.
     """
     _setup_superadmin(client)
     fix = _seed(cfg)
     action = f"/ca/{fix.alpha_root}/intermediate"
 
-    with _rendering_from(_baseline_templates(tmp_path)):
-        baseline = client.get(f"/ca/{fix.alpha_root}")
-        assert baseline.status_code == 200
-    expected_fields = _control_names(_row(baseline.text, f'action="{action}"', tag="form"))
+    expected_fields = _accepted_fields(ca_ui.ca_create_intermediate, verify_csrf)
     assert "name" in expected_fields and "csrf_token" in expected_fields, expected_fields
 
     # --- closed ------------------------------------------------------------
@@ -3002,7 +2785,7 @@ def test_the_disclosure_is_url_state(client: TestClient, cfg: Config, tmp_path: 
     )
     assert (
         _control_names(_row(open_section, f'action="{action}"', tag="form")) == expected_fields
-    ), "the opened form is not the form that stood here at BASELINE"
+    ), "the opened form does not carry exactly the fields the mutation behind it accepts"
     cross_section = _row(
         opened.text, ">Cross-sign with another root<", class_name="section", tag=None
     )

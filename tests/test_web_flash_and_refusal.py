@@ -30,20 +30,26 @@ routes themselves, so the census walks them; and the MCP door is a ``POST``,
 because ``GET /mcp`` is a 405 answered while routing, before any handler
 runs, and a comparison made on it is green against every implementation.
 
-**"At this spec's base commit" is read out of git, not out of a second
-running application.** AC-15's and AC-18's wording asks for the same page
-rendered through the base commit's templates. That cannot be done in this
-process for the dashboard -- FR-8 removes ``ca_certs`` from its context and
-``StrictUndefined`` makes the old template a hard error against the new one
--- so what is compared is the *text the templates carry*, extracted from
-``git show`` at :data:`BASE_COMMIT` and from the working tree, which is what
-FR-19 is actually about ("every sentence, label, heading, help line and hint
-that exists on the thirteen templates today is byte-identical afterwards").
+**"At this spec's base commit" is recorded, not resolved.** AC-15's and
+AC-18's wording asks for the same page rendered through the base commit's
+templates. That cannot be done in this process for the dashboard -- FR-8
+removes ``ca_certs`` from its context and ``StrictUndefined`` makes the old
+template a hard error against the new one -- so what these criteria compare
+is the *text*, and it used to be extracted with ``git show``.
+
+It is written down instead, for a reason CI found first and that holds
+without CI: the base commit sits on a feature branch, a shallow checkout does
+not have it and a squash merge deletes it, so a suite that resolves it is
+pinned to a history that by definition changes. Each such comparison was
+therefore taken on its own. What was a claim about *the diff* is retired with
+its argument where the test was (AC-18 below). What was a standing invariant
+kept its assertion and lost the lookup: :data:`CA_KEY_STATES` and
+``tests/data/0030_routes.json`` are both frozen baselines, and both are
+regenerated only by a deliberate act.
 """
 
 import json
 import re
-import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,13 +87,6 @@ REPO = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO / "src/cabin/web/templates"
 STATIC = REPO / "src/cabin/web/static"
 CSS = STATIC / "cabin.css"
-
-#: The commit spec 0030 is written against -- `docs(spec): 0030 -- the
-#: remaining pages, the flash and the 403 page`. Every "unchanged from
-#: today" comparison in this file resolves its baseline out of git at this
-#: revision rather than out of a literal repeated in a test, so a reworded
-#: heading fails instead of being copied into both sides of the assertion.
-BASE_COMMIT = "964a208"
 
 #: FR-19's new copy, verbatim. The two bodies are what AC-6 tells apart.
 NOT_PERMITTED_TITLE = "Not permitted"
@@ -1250,20 +1249,29 @@ def test_the_refusal_names_its_cause(client: TestClient, cfg: Config) -> None:
 # ==========================================================================
 
 
-def _git_show(path: str) -> str:
-    result = subprocess.run(
-        ["git", "show", f"{BASE_COMMIT}:{path}"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"cannot read {path} at {BASE_COMMIT}: {result.stderr.strip()}. Every "
-        f"'unchanged from today' comparison in this file resolves its baseline "
-        f"out of git rather than out of a literal"
-    )
-    return result.stdout
+#: The two sentences the CA-key page's `Key` cell can carry, frozen.
+#:
+#: These were read out of `transfer_ca_key.html` at this spec's base commit,
+#: which is where the `{% if row.exportable %}` branch's two literals stood.
+#: They are written down here instead for the reason spec 0030's route census
+#: is written down in `tests/data/0030_routes.json`: a baseline that lives in
+#: git history is only reachable while that history is, and this one sits on
+#: a feature branch that a squash merge deletes. It failed on CI for the
+#: nearer version of the same problem -- a shallow checkout has no such
+#: object -- and deepening the checkout would only have postponed it.
+#:
+#: What FR-15 claims is not "these strings match a commit" but "the page
+#: keeps the strings it has", and a frozen pair states that directly. The
+#: cost is that this file and the template can be edited together into
+#: agreement, which the git read prevented; what replaces that guarantee is
+#: that both edits land in one diff, where the second is the reviewer's
+#: question. Regenerated only by a deliberate act.
+CA_KEY_STATES = frozenset(
+    {
+        "stored on this instance",
+        "no private key on this instance",
+    }
+)
 
 
 def _rows_of(table: dom.Node) -> list[dom.Node]:
@@ -1301,10 +1309,11 @@ def test_the_ca_key_page_groups_and_the_bundle_does_not_click(
     """AC-15, three clauses.
 
     Clause 1's "the multiset the page renders at this spec's base commit" is
-    read off the base commit's own template: the three key-state sentences
-    are literals in ``transfer_ca_key.html`` and FR-15 keeps the strings it
-    has, so the comparison is between the strings that template carried and
-    the strings the page renders now.
+    compared against :data:`CA_KEY_STATES`, the two literals the
+    ``{% if row.exportable %}`` branch carried there. FR-15 keeps the strings
+    it has, so what the criterion is really about is those two sentences and
+    not the commit they were copied from; the constant says why it is frozen
+    rather than resolved out of git.
     """
     fix = _seed(client, cfg)
 
@@ -1322,18 +1331,18 @@ def test_the_ca_key_page_groups_and_the_bundle_does_not_click(
         "intermediates and none of them is a row-child"
     )
 
-    base_template = _git_show("src/cabin/web/templates/transfer_ca_key.html")
-    states = re.findall(
-        r"\{%\s*if row\.exportable\s*%\}(.*?)\{%\s*endif\s*%\}", base_template, re.S
-    )
-    assert states, "the base commit's transfer_ca_key.html has no `exportable` branch"
-    expected_states = {" ".join(part.split()) for part in re.split(r"\{%\s*else\s*%\}", states[0])}
     rendered_states = {row.children[-1].text() for row in rows}
-    assert rendered_states <= expected_states, (
-        f"the Key cell renders {sorted(rendered_states - expected_states)}, which the "
-        f"page did not say at {BASE_COMMIT}. FR-15 keeps the strings it has"
+    assert rendered_states <= CA_KEY_STATES, (
+        f"the Key cell renders {sorted(rendered_states - CA_KEY_STATES)}, which this "
+        f"page did not say before this spec. FR-15 keeps the strings it has"
     )
     assert rendered_states, "no Key cell was rendered at all"
+    # Both branches, or the clause above is satisfied by a fixture that only
+    # ever reached one of them and a reworded `else` would sail through.
+    assert rendered_states == CA_KEY_STATES, (
+        f"this fixture renders only {sorted(rendered_states)}, so the comparison "
+        f"above never saw the other branch of `row.exportable`"
+    )
 
     bundle = client.get("/transfer/trust-bundle")
     assert bundle.status_code == 200
@@ -1458,34 +1467,44 @@ def _hover(tmp_path: Path, pages: dict[str, str]) -> dict[str, Any]:
 
 
 # ==========================================================================
-# AC-18: not one existing sentence changed
+# AC-18: not one existing sentence changed -- retired, and what replaces it
 # ==========================================================================
+#
+# `test_no_sentence_changed_on_the_remaining_pages` lived here. For each of
+# the thirteen templates it compared the sentences the file carries now with
+# the sentences it carried at spec 0030's base commit `964a208`, read out of
+# `git show`, and required every loss to be `Transfer` on `layout.html` and
+# every addition to be in FR-19's table.
+#
+# It is retired, and the argument is spec 0028's when it retired
+# `test_only_layout_html_changed`: what it asserted is **a property of one
+# commit, not of the codebase**. "The diff from 964a208 to the 0030 merge
+# reworded nothing" was true when it was written and stays true; no later
+# commit can falsify it, so there is no regression left for it to catch. The
+# diff is the evidence, and it is better evidence than a test, because it
+# cannot be edited into agreeing with the templates.
+#
+# It also could not have survived as written. `964a208` is a commit on
+# `feat/0.2.0`; the runner's checkout is shallow, so this failed on CI while
+# passing locally, and PR #17 may squash, which would delete the object the
+# test resolves. Deepening the checkout buys one merge.
+#
+# What was standing rather than one-shot is kept, immediately below.
+# `test_the_refusal_page_carries_only_the_copy_fr_19_names` is the second
+# half of the retired test, unchanged and never dependent on git: the page
+# FR-5 adds is new, so "every sentence on it is one FR-19 names" is a claim
+# about the file as it stands and stays checkable forever. The four
+# sentences' *behaviour* -- which refusal renders which -- is AC-6's pair of
+# tests above, which read them off real 403 responses.
 
-#: FR-1's thirteen templates plus the one it adds. `layout.html` is here
-#: because it is rendered inside every one of the others.
-TOUCHED_TEMPLATES = (
-    "layout.html",
-    "dashboard.html",
-    "certs_list.html",
-    "users.html",
-    "tokens.html",
-    "acme.html",
-    "audit.html",
-    "settings.html",
-    "transfer_trust_bundle.html",
-    "transfer_ca_key.html",
-    "transfer_inventory.html",
-    "login.html",
-    "setup.html",
-)
 
 #: FR-19's tables: the one string that changes, and the six new ones.
 #:
-#: `stale` is deliberately **not** here. FR-19's table listed it as new
-#: copy on the dashboard's CRL cards and it is not new -- `dashboard.html`
-#: already renders `<span class="tag tag-bad">stale</span>` -- so it is one
-#: of the strings this spec relocates without editing, and leaving it in
-#: the allow-list would license adding it somewhere it never was.
+#: `stale` is deliberately **not** here. FR-19's table listed it as new copy
+#: on the dashboard's CRL cards and it is not new -- `dashboard.html` already
+#: renders `<span class="tag tag-bad">stale</span>` -- so it is one of the
+#: strings this spec relocates without editing, and leaving it in the
+#: allow-list would license adding it somewhere it never was.
 RENAMED = {"Transfer": "Export"}
 NEW_COPY = (
     NOT_PERMITTED_TITLE,
@@ -1519,56 +1538,20 @@ def _sentences(template_text: str) -> list[str]:
     return out
 
 
-def test_no_sentence_changed_on_the_remaining_pages() -> None:
-    """AC-18/FR-19, measured on the templates rather than on rendered pages.
+def test_the_refusal_page_carries_only_the_copy_fr_19_names() -> None:
+    """FR-5/FR-19: the new page says the four things and no fifth.
 
-    The criterion is measured on the templates, which is FR-19's own
-    sentence: "every sentence, label, heading, help line and hint that
-    exists on the thirteen templates today is byte-identical afterwards."
-    AC-18 first asked for each page rendered through the base commit's
-    templates "on one instance with one database", and that instrument
-    cannot be built -- FR-8 removes `ca_certs` from the dashboard's context
-    and `StrictUndefined` (web/__init__.py) makes the old template against
-    the new context a hard error rather than a comparison.
-
-    What is compared is the strings each template carries at
-    :data:`BASE_COMMIT` against the strings it carries now. It sees a
-    reworded heading, a dropped help line and a silently added sentence,
-    and it does not depend on a fixture reaching every branch.
+    An enumerated allow-list is what keeps "new copy" from later meaning "an
+    edit to something that was already there". This is the clause of AC-18
+    that is about a file rather than about a diff: `not_permitted.html` did
+    not exist before this spec, so there is no baseline it could be compared
+    against and none it needs -- every sentence on it is new by construction,
+    and FR-19's table is the list of the ones that may be.
     """
-    lost: dict[str, list[str]] = {}
-    gained: dict[str, list[str]] = {}
-    for name in TOUCHED_TEMPLATES:
-        before = _sentences(_git_show(f"src/cabin/web/templates/{name}"))
-        after = _sentences((TEMPLATES / name).read_text())
-        missing = [line for line in before if line not in after]
-        added = [line for line in after if line not in before]
-        if missing:
-            lost[name] = missing
-        if added:
-            gained[name] = added
-
-    permitted_loss = {"layout.html": ["Transfer"]}
-    assert lost == permitted_loss, (
-        f"a sentence that exists today is gone. FR-19 permits exactly one removal on "
-        f"exactly one page -- `Transfer` from the rail, which `Export` replaces -- "
-        f"and several hundred assertions depend on the rest:\n{json.dumps(lost, indent=2)}"
-    )
-
-    allowed = {*RENAMED.values(), *NEW_COPY}
-    unnamed = {
-        name: [line for line in lines if line not in allowed] for name, lines in gained.items()
-    }
-    unnamed = {name: lines for name, lines in unnamed.items() if lines}
-    assert unnamed == {}, (
-        f"new copy that FR-19's table does not name. Every addition is enumerated "
-        f"there so that 'new copy' cannot later mean 'an edit to something that was "
-        f"already there':\n{json.dumps(unnamed, indent=2)}"
-    )
-
     new_page = TEMPLATES / "not_permitted.html"
     assert new_page.exists(), "src/cabin/web/templates/not_permitted.html does not exist (FR-5)"
     written = _sentences(new_page.read_text())
+    allowed = {*RENAMED.values(), *NEW_COPY}
     assert set(written) <= allowed, (
         f"the refusal page carries copy FR-19 does not name: {sorted(set(written) - allowed)}"
     )
@@ -1679,8 +1662,8 @@ def _any_cert(cfg: Config) -> int:
 # AC-20: everything that was not this spec's subject still behaves the same
 # ==========================================================================
 
-#: The route inventory recorded at :data:`BASE_COMMIT`. Regenerated only by
-#: a deliberate act: `no route is added and no route is removed` is the
+#: The route inventory recorded at spec 0030's base commit. Regenerated only
+#: by a deliberate act: `no route is added and no route is removed` is the
 #: Interface Contract's own first sentence, so a diff here is a decision.
 ROUTE_BASELINE = Path(__file__).resolve().parent / "data" / "0030_routes.json"
 

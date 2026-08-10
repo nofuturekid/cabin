@@ -1667,6 +1667,20 @@ days and one expiring outside it, and a base URL set.
      highlights everything and a build that highlights nothing must
      each fail.
 
+  > **Correction (test-authoring): the base commit's multiset is
+  > recorded, not resolved.** Clause 1 read the two `Key` sentences out
+  > of `transfer_ca_key.html` with `git show` at the base commit. That
+  > commit is on `feat/0.2.0`: CI checks out shallow and does not have
+  > the object, and a squash merge of PR #17 deletes it — so the
+  > comparison failed on the runner while passing locally, and
+  > deepening the checkout would only have moved the failure to the
+  > merge. The two sentences are frozen in `CA_KEY_STATES` instead,
+  > because what FR-15 claims is not "these match a commit" but "the
+  > page keeps the strings it has", and that is a claim about the
+  > strings. The clause is also **strengthened**: the fixture must
+  > render *both* branches of `row.exportable`, or a subset check
+  > against a one-branch render would pass a reworded `else`.
+
 - AC-16: **The column templates are the design's where the design has
   one.** In Chrome at 1440, for each of the eleven `cols-*` classes of
   FR-17, `getComputedStyle(tr).gridTemplateColumns` resolves to widths
@@ -1798,6 +1812,37 @@ days and one expiring outside it, and a base URL set.
   rewritten, which fails both halves at once. This is the change that
   costs several hundred text assertions and that no other criterion
   here would see.
+
+  > **Correction (test-authoring), third: the first two clauses are
+  > retired and the third is kept.** They cannot be measured after this
+  > branch merges. The base commit is on `feat/0.2.0`; CI's checkout is
+  > shallow and does not have the object, so this failed on the runner
+  > while passing locally, and a squash merge of PR #17 would delete it
+  > outright. Deepening the checkout buys exactly one merge.
+  >
+  > That is what forced the question, not what answers it. The answer
+  > is that clauses 1 and 2 assert **a property of one diff, not of the
+  > codebase** — "the diff from the base commit to the 0030 merge
+  > reworded nothing" was true when it was written, stays true, and no
+  > later commit can falsify it, so there is no regression left to
+  > catch. Its evidence is the diff, which is better evidence than a
+  > test because it cannot be edited into agreeing with the templates.
+  > This is spec 0028's own argument for retiring
+  > `test_only_layout_html_changed`, applied to the same shape.
+  >
+  > Clause 3 is different and is **kept, as its own test**
+  > (`test_the_refusal_page_carries_only_the_copy_fr_19_names`).
+  > `not_permitted.html` did not exist before this spec, so every
+  > sentence on it is new by construction: there is no baseline it
+  > could be compared against and none it needs, and "the page carries
+  > nothing but strings FR-19 names, and all four of its own" stays
+  > checkable against the file forever.
+  >
+  > What the retired clauses were also buying is not lost. The four
+  > sentences' *behaviour* — which refusal renders which — is AC-6,
+  > read off real 403 responses; `Transfer` → `Export` is AC-7, read
+  > off the rendered rail; and the flash carrying no copy of its own is
+  > AC-3.
 
 - AC-19: **Nothing scrolls sideways, everything is readable, and the
   flash is inside the viewport.** The overflow probe, the contrast
@@ -1932,7 +1977,9 @@ columns came out as, and a template declared but never applied — a row
 that is not `display: grid` — satisfies the first and draws nothing),
 test_the_flash_panel_animates_in_the_browser (AC-4's rendered half and
 AC-19's geometry clause, headless Chrome, same file),
-test_no_sentence_changed_on_the_remaining_pages (AC-18),
+test_the_refusal_page_carries_only_the_copy_fr_19_names (AC-18
+clause 3; clauses 1 and 2 are retired — see the criterion, and the
+retirement note at the end of this list),
 test_the_remaining_pages_do_not_scroll_sideways (AC-19, headless Chrome),
 test_the_unchanged_routes_are_unchanged (AC-20)
 
@@ -1943,9 +1990,14 @@ spec's criteria are anchored to elements and to where they sit ("inside
 inside one `.seg`", "zero `<form>` elements inside `<tbody>`") and none
 of that can be measured with a substring search; six more one-off
 `HTMLParser` subclasses would be six things to repair, which is the
-argument `tests/probes.py` already makes one level up. And
-**`tests/data/0030_routes.json`**, the route and OpenAPI inventory
-recorded at this spec's base commit, which AC-20 compares against.
+argument `tests/probes.py` already makes one level up. And two
+recorded baselines: **`tests/data/0030_routes.json`**, the route and
+OpenAPI inventory at
+this spec's base commit, which AC-20 compares against, and
+**`tests/data/0030_grouped_list_selectors.json`**, the selectors that
+named spec 0028's grouped-list classes there, which AC-8 clause 4
+compares against. Both are regenerated only by a deliberate act, and a
+diff in either is a decision.
 
 **Three of these criteria are green at the base commit and it is worth
 saying so.** AC-10 is entirely "must not change" — the lead sentence is
@@ -2087,6 +2139,14 @@ protects.
   own username rather than typed as a letter. AC-18's own instrument sees
   neither, because it compares template *files*, where the avatar is a
   Jinja expression and not a literal.
+
+  > **Superseded (test-authoring): both are retired.** The re-pointing
+  > above was done and was correct at the time; it is recorded because
+  > it is what this spec did before CI showed that neither test can
+  > survive the merge. See the retirement note at the end of this list
+  > — and note that each re-pointing here is itself the argument: a
+  > test that has to be taught about every later spec's diff is no
+  > longer measuring the diff it was written for.
 - **`tests/test_cross_signing.py`'s `test_migration_chain_still_ends_at_0010`**
   and **`tests/test_name_constraints.py`'s
   `test_no_constraint_column_exists_in_the_migrated_schema`** protect
@@ -2227,6 +2287,50 @@ protects.
   > see the correction under the users-page entry above for why a spec
   > naming a test it has not opened is worth recording rather than
   > quietly fixing.
+
+**Retired — three, with their argument written where each test was.**
+
+All three compared the pages or the templates against a *commit*, and
+all three failed on CI for the same mechanical reason: the commits are
+on `feat/0.2.0`, the runner checks out shallow, and PR #17 may squash.
+Deepening the checkout was the obvious repair and is the wrong one — it
+would buy one merge and then pin the suite to a history that by
+definition changes.
+
+The argument for retiring rather than re-pointing is spec 0028's, from
+when it retired `test_only_layout_html_changed`: each asserts **a
+property of one diff, not of the codebase**. "This spec removed no
+sentence from these pages" was true when it was written, is true now,
+and nothing a later commit can do makes it false, so there is no
+regression left for it to catch. The diff is the evidence, and it is
+better evidence than a test, because it cannot be edited into agreeing
+with the code.
+
+- **`tests/test_ca_issuer_pages.py`, `test_no_sentence_changed_on_the_five_pages`**
+  (spec 0028 AC-16). It had also stopped being about spec 0028: 0029
+  had to teach it that `ca_detail` is three URLs, 0030 had to teach it
+  `Transfer` → `Export` and the rail avatar. An exception list that
+  grows once per spec is a test being kept green.
+- **`tests/test_web_form_previews.py`, `test_no_sentence_changed_on_the_form_pages`**
+  (spec 0029 AC-14). Its "every addition is named" half is asserted
+  positively and by name on the rendered page by 0029's own AC-3,
+  AC-9, AC-10 and AC-11; only the "nothing is lost" half needed the
+  baseline, and that half is the claim about the diff.
+- **`tests/test_web_flash_and_refusal.py`, `test_no_sentence_changed_on_the_remaining_pages`**
+  (this spec's AC-18, clauses 1 and 2). Clause 3 survives as its own
+  test; see the correction under the criterion.
+
+**Converted — three, which kept their assertion and lost the lookup.**
+A standing invariant expressed against an old commit is still a
+standing invariant. `test_the_ca_key_page_groups_and_the_bundle_does_not_click`
+(AC-15) and `test_the_dashboard_authorities_block_is_the_grouped_list`
+(AC-8 clause 4) now read frozen baselines — one a constant, one
+`tests/data/0030_grouped_list_selectors.json`. Spec 0029's
+`test_the_disclosure_is_url_state` (AC-12) needed no baseline at all:
+the fields the opened form must carry are read off
+`ca_create_intermediate` and `verify_csrf`, which is stronger in both
+directions than the commit it used to read — a field the handler gains
+and the form never offers now fails too.
 
 **Deleted: none.**
 

@@ -47,17 +47,19 @@ make fragment-aware; for the `hx-get` targets the *stronger* statement of
 clause 2 is asserted instead: the two responses are byte-identical.
 
 **Every helper that parses HTML is imported, not re-typed.**
-`test_ca_issuer_pages` already owns the tag-nesting scoper, the id walker,
-the text-node counter and the baseline-template loader; a second copy of any
-of them would be a second thing to repair. Only the client/config/CSRF
-plumbing is duplicated, which is what every web test file in this project
-already does (there is no conftest.py).
+`test_ca_issuer_pages` already owns the tag-nesting scoper and the id walker;
+a second copy of either would be a second thing to repair. Only the
+client/config/CSRF plumbing is duplicated, which is what every web test file
+in this project already does (there is no conftest.py).
+
+**AC-14 is retired**, with its argument where the test was. It compared these
+pages against spec 0029's base commit, which is a claim about one diff and
+not about the codebase; the section marked `AC-14` below says so at length.
 """
 
 import inspect
 import ipaddress
 import re
-from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -77,11 +79,8 @@ from grant_fixtures import grant_user
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from test_ca_issuer_pages import (
-    _baseline_templates,
     _form_actions,
-    _rendering_from,
     _row,
-    _text_nodes,
     _text_of,
 )
 from test_web_design_shell import css_rules, declarations
@@ -105,12 +104,6 @@ from cabin.web import audit_ui, certs_ui
 REPO = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = REPO / "src/cabin/web/templates"
 STATIC_DIR = REPO / "src/cabin/web/static"
-
-#: The commit spec 0029 starts from. AC-14 renders each of the six pages
-#: twice -- once through the templates as they stand and once through the
-#: templates as they stood here -- against one database, so that every text
-#: node that differs differs because of markup and not because of data.
-BASELINE = "b1f5631"
 
 #: FR-3's table. The key is the preview URL, the value the mutation it
 #: previews and the page it belongs to -- the three are asserted against each
@@ -557,28 +550,26 @@ def _marks(html: str) -> list[tuple[bool, str]]:
     return parser.marks
 
 
-def _baseline_hint() -> str:
-    """`ca_new.html:45`'s path-length hint, read out of the template as it
-    stood at `BASELINE`.
-
-    Read from git rather than written out here, because FR-9 moves this
-    sentence into the panel column and FR-14 says moving a sentence is not
-    editing it. A copy typed into a test is a second original, and the two
-    would drift apart the first time somebody fixed a typo in one of them.
-    """
-    import subprocess
-
-    blob = subprocess.run(
-        ["git", "-C", str(REPO), "show", f"{BASELINE}:src/cabin/web/templates/ca_new.html"],
-        capture_output=True,
-        text=True,
-    )
-    assert blob.returncode == 0, blob.stderr
-    found = re.search(r'<span class="hint">(.*?)</span>', blob.stdout, re.S)
-    assert found is not None, f"{BASELINE}'s ca_new.html carries no .hint span"
-    text = " ".join(unescape(found.group(1)).split())
-    assert text.startswith("How many further intermediates"), text
-    return text
+#: `ca_new.html:45`'s path-length hint, as that template carried it before
+#: FR-9 moved it into the panel column.
+#:
+#: Frozen here rather than read out of git at the base commit, which is what
+#: it used to be. The commit is on this branch and a squash merge takes it
+#: with it, so a test resolving it would break permanently on `main` -- but
+#: the deeper reason is that FR-14's claim is not about a commit. It is
+#: *this sentence, in the panel column, unedited*, and a sentence is a thing
+#: a test can hold.
+#:
+#: A frozen copy can be edited into agreeing with the template, which the git
+#: read could not. What replaces that guarantee is visibility: this constant
+#: and `ca_new.html` are two files in one diff, and "moving a sentence is not
+#: editing it" is a claim a reviewer can check by reading it. A silent edit
+#: to the template alone still fails.
+PATH_LENGTH_HINT = (
+    "How many further intermediates may sign under the root. Cannot be changed later. "
+    "A root that may ever need to cross-sign an older one needs at least 2 -- planned "
+    "one root generation ahead, since this cannot be widened afterwards."
+)
 
 
 def _error_box(html: str) -> str | None:
@@ -1701,7 +1692,7 @@ def test_the_create_panel_flips_tone_with_path_length(client: TestClient, cfg: C
     tone always would otherwise pass."""
     _setup_superadmin(client)
     _seed(cfg)
-    hint = _baseline_hint()
+    hint = PATH_LENGTH_HINT
 
     for path_length, expect_warning in ((2, False), (1, True)):
         form = _create_form(cfg, client, path_length=path_length)
@@ -1723,9 +1714,9 @@ def test_the_create_panel_flips_tone_with_path_length(client: TestClient, cfg: C
         )
         assert "callout" in tokens, f"the note is not a .callout: {tokens}"
         assert " ".join(_texts(note)) == hint, (
-            f"the sentence in the note is not the sentence ca_new.html:45 carried at "
-            f"{BASELINE}. FR-14: moving a sentence is not editing it.\n  before: "
-            f"{hint!r}\n  after:  {' '.join(_texts(note))!r}"
+            f"the sentence in the note is not the sentence ca_new.html:45 carried "
+            f"before FR-9 moved it. FR-14: moving a sentence is not editing it.\n"
+            f"  before: {hint!r}\n  after:  {' '.join(_texts(note))!r}"
         )
 
         panel = _panel(resp.text, "What gets created")
@@ -1738,183 +1729,42 @@ def test_the_create_panel_flips_tone_with_path_length(client: TestClient, cfg: C
         )
 
 
-# --- AC-14 -----------------------------------------------------------------
-
-
-#: What spec 0030 changes in the shell, and therefore on every page this
-#: instrument renders -- it renders whole pages through a template directory,
-#: the baseline layout for the `before` pass and today's for the `after`, so
-#: `layout.html`'s two changes show up on all six pages here.
-#:
-#: * `Transfer` -> `Export` on the rail's fourth group is FR-19's one changed
-#:   string, and FR-19's table is where spec 0030 wrote it down.
-#: * the rail footer's avatar is FR-11's, and is deliberately **not** in that
-#:   table: it renders the logged-in username's first character, a string that
-#:   is already on the page, rather than the `@login` line the design stacks
-#:   under it. Spec 0030's own AC-18 check compares template *files*, where
-#:   that character is a Jinja expression and not a literal, which is why only
-#:   this rendered copy sees it. Derived from the fixture's own username, so
-#:   that it stays the avatar's rule and not a letter someone typed.
-#:
-#: Named rather than filtered out of the comparison: this test's whole job is
-#: that a string which moved has to be written down somewhere.
-#:
-#: Spec 0030 AC-18 rebuilt its own version of this check against the template
-#: files for a different reason -- one instance cannot render both generations
-#: of `dashboard.html`, since FR-8 drops a context key and the environment is
-#: `StrictUndefined`. None of the six pages below is the dashboard, so this
-#: copy still renders both generations and still means what it did.
-_SHELL_REMOVED = {"Transfer"}
-_SHELL_ADDED = {"Export", _SUPERADMIN[0].upper()}
-
-
-def test_no_sentence_changed_on_the_form_pages(
-    client: TestClient, cfg: Config, tmp_path: Path
-) -> None:
-    """AC-14: nothing is lost, and every addition is named.
-
-    Rendered twice against **one** database through two sets of templates, so
-    that every difference is a difference of markup. A heading "improved"
-    while the markup around it is rewritten fails both halves at once: the
-    old wording disappears and the new wording is in nobody's list.
-
-    **`ca_detail` is compared against all three of its states at once, and
-    AC-14 as written cannot be satisfied any other way.** FR-13 is a
-    disclosure: on `/ca/{id}` with no `add=` the intermediate form's five
-    labels, its two hints and its button are deliberately not rendered, so
-    "every text node present before is present after, with no permitted
-    removals" is false for that one URL by construction. What FR-14 actually
-    protects -- that no sentence on this page was edited or dropped -- is
-    true of the page *as a whole*, and the page as a whole is now three URLs.
-    So the multiset the closed page is compared against is the union of the
-    closed, the `?add=intermediate` and the `?add=cross-sign` renders, taking
-    the larger multiplicity of each (`Counter.__or__`), and a sentence that
-    exists in none of the three still fails.
-    """
-    _setup_superadmin(client)
-    fix = _seed(cfg)
-
-    paths = {
-        "certs_new": "/certs/new",
-        "certs_sign": "/certs/sign",
-        "ca_new": "/ca/new",
-        "transfer_ca_import": "/transfer/ca-import",
-        "transfer_cross_import": "/transfer/cross-import",
-        "ca_detail": f"/ca/{fix.alpha_root}",
-    }
-    #: The URLs whose text nodes are pooled before the comparison, per page.
-    #: Only the disclosure needs one; every other page is one URL.
-    states = {
-        "ca_detail": (
-            f"/ca/{fix.alpha_root}",
-            f"/ca/{fix.alpha_root}?add=intermediate",
-            f"/ca/{fix.alpha_root}?add=cross-sign",
-        )
-    }
-
-    def render() -> dict[str, str]:
-        pages = {}
-        for name, path in paths.items():
-            resp = client.get(path)
-            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-            pages[name] = resp.text
-        return pages
-
-    def pooled(name: str) -> Counter[str]:
-        found: Counter[str] = Counter()
-        for path in states.get(name, (paths[name],)):
-            resp = client.get(path)
-            assert resp.status_code == 200, f"{path} -> {resp.status_code}"
-            found |= _text_nodes(resp.text)
-        return found
-
-    after = render()
-    after_pooled = {name: pooled(name) for name in paths}
-    with _rendering_from(_baseline_templates(tmp_path, BASELINE)):
-        before = render()
-        before_pooled = {name: _text_nodes(before[name]) for name in paths}
-
-    assert any(before[name] != after[name] for name in paths), (
-        f"the six pages render byte-identically through the templates of {BASELINE} "
-        f"and through today's -- either this spec has not been implemented, or the "
-        f"template loader was not actually swapped and this test compares every "
-        f"page with itself"
-    )
-
-    dashes = {"—", "✓", "✕"}
-    check = {"Check"}
-    issue_panel = {
-        "Name constraints — checked before signing",
-        "Result",
-        "Expires",
-        "Chain",
-        "Key held by",
-        "cabin, encrypted at rest",
-        VERDICT_PERMITTED,
-        VERDICT_UNCONSTRAINED,
-        PERMITTED_DNS,
-        PERMITTED_NET,
-        EXCLUDED_DNS,
-        f"DNS:{PERMITTED_DNS}",
-        f"IP:{PERMITTED_NET}",
-        f"DNS:{EXCLUDED_DNS}",
-        fix.alpha_int_name,
-        fix.beta_int_name,
-    }
-    additions = {
-        "certs_new": check | dashes | issue_panel,
-        "certs_sign": check | dashes | {"Parsed request", "Subject", "SANs", "Key"},
-        "ca_new": check
-        | dashes
-        | {
-            "What gets created",
-            "Root",
-            "Expires",
-            "Issuers",
-            "Key",
-            str(datetime.now(UTC).year + 20),
-        },
-        "transfer_ca_import": check | dashes | {"Parsed", "Subject", "Parent", "Key"},
-        # FR-16: the split's width and nothing else.
-        "transfer_cross_import": set(),
-        # FR-13: the closed state's trigger anchors, whose text FR-14 takes
-        # from the existing empty-state link and the existing <h2>.
-        "ca_detail": {"Add an intermediate", "Cross-sign with another root"},
-    }
-
-    # The pooling actually pooled something, or the union is one render under
-    # another name and the correction below is measuring nothing.
-    assert after_pooled["ca_detail"] != _text_nodes(after["ca_detail"]), (
-        "the three ca_detail URLs pool to exactly the closed render, so either "
-        "`?add=` renders nothing extra or the states above were not fetched"
-    )
-
-    for name in paths:
-        old, new = before_pooled[name], after_pooled[name]
-        assert sum(old.values()) >= 20, f"{name}: the baseline page has {sum(old.values())} texts"
-        # A disclosure can reduce how often a sentence appears on one URL; it
-        # may never remove one from the page. `Add intermediate` and
-        # `Cross-sign with another root` both carried a `Validity (years)`
-        # label at the base commit and can never be open at once again, so no
-        # number of pooled URLs prints it twice -- multiplicity is not
-        # comparable across states and the claim for that page is the set.
-        # Stated as a rule rather than as that one label, because whether the
-        # second form renders at all depends on the fixture's cross-sign
-        # candidates, and a hard-coded exception would pass or fail on that
-        # rather than on the markup.
-        lost = (set(old) - set(new)) if name in states else set(old - new)
-        assert lost <= _SHELL_REMOVED, (
-            f"{name}: text that was on this page before this spec is gone from it. "
-            f"FR-14 permits no removal: {sorted(lost - _SHELL_REMOVED)}"
-        )
-        # Symmetrical with `lost` above, for the same reason.
-        gained_all = (set(new) - set(old)) if name in states else set(new - old)
-        gained = gained_all - additions[name] - _SHELL_ADDED
-        assert gained == set(), (
-            f"{name}: text this spec did not name appears on the page. Every "
-            f"addition is in FR-14's table or it is a wording change: "
-            f"{sorted(gained)}"
-        )
+# --- AC-14: nothing was lost, and the test that said so is retired ---------
+#
+# `test_no_sentence_changed_on_the_form_pages` lived here. It rendered the six
+# form pages twice against one database -- once through the templates as they
+# stand and once through the templates as they stood at spec 0029's base
+# commit, `b1f5631` -- and asserted that no text node had disappeared and that
+# every new one was named in FR-14's table.
+#
+# It is retired, for the reason spec 0028 retired
+# `test_only_layout_html_changed`: what it asserted is **a property of one
+# commit, not of the codebase**. "The diff from b1f5631 to the 0029 merge
+# removed no sentence from these six pages" was true when it was written, is
+# true now, and nothing a later commit does can make it false, so there is no
+# regression left for it to catch. Its evidence is the diff, and a diff is
+# better evidence than a test here, because it cannot be edited into agreeing
+# with the code.
+#
+# CI is what forced the question rather than what decided it. `b1f5631` is a
+# commit on `feat/0.2.0`, the runner's checkout is shallow, and PR #17 may
+# squash -- so this failed on the runner while passing locally, and deepening
+# the checkout would only have moved the failure to the day the branch merged.
+#
+# The two halves it asserted do not retire together, and only one of them
+# needed a baseline at all.
+#
+# * *Every addition is named* is asserted positively and by name, on the
+#   rendered page, by the criteria above: AC-3's constraint-panel test and
+#   the AC-9/AC-10/AC-11 panel tests read each preview panel's heading, its
+#   rows and its dashes off the page. A string this spec added that stops
+#   being rendered fails there, which is where a reader would look for it.
+# * *Nothing is lost* is the half that needed the base commit, and it is the
+#   half that is a claim about the diff. It goes with the commit.
+#
+# Retired, not deleted: what it verified about today's pages is still
+# verified, and the criterion it answered is answered by the record of the
+# change.
 
 
 # --- AC-15 -----------------------------------------------------------------

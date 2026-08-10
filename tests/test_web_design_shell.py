@@ -19,11 +19,15 @@ rather than describing it.
 the brief is hard-coded as an expected result; the WCAG 2.x formula is
 implemented here and applied to whatever the stylesheet actually declares.
 
-**The light scheme cannot be forced by a browser flag.** Headless Chrome
-reports `prefers-color-scheme: dark` and no switch changes it, so the light
-runs are served a copy of `cabin.css` with the media wrapper stripped
-(`probes.light_stylesheet`). That is only faithful while the light block
-holds one `:root` rule and nothing else, which
+**Neither scheme can be forced by a browser flag, so both are forced in the
+file.** `prefers-color-scheme` under `--headless` is whatever the machine
+underneath reports -- dark on a desktop with a dark system theme, light on a
+CI runner with no desktop -- so every run is served its own copy of
+`cabin.css` with the light media wrapper either promoted to unconditional or
+deleted (`probes.scheme_stylesheet`). Leaving the dark run to the default was
+what made this file measure the light scheme twice on CI while looking green:
+"nothing is below threshold" is true of the wrong page too. That is only
+faithful while the light block holds one `:root` rule and nothing else, which
 `test_light_block_holds_nothing_but_token_overrides` in `test_web_layout.py`
 asserts.
 """
@@ -1627,7 +1631,12 @@ DECORATION_CENSUS = {"ca": 1, "dashboard": 1, "transfer_ca_key": 1}
 #: A span the contrast probe would report: `--accent-deep` (#5d5294) is
 #: 2.60:1 on the page ground, which is what the design draws the tree glyph
 #: in and what spec 0027's Out of Scope left open.
-PLANTED_DECORATION = '<span %s style="color:#5d5294">planted decoration</span>'
+#:
+#: It carries a class so that the probe's own label for it (`tagName` plus
+#: `className`) names it in the output. "Something was reported" is a weaker
+#: claim than "this was reported", and the counter-check below wants the
+#: second one.
+PLANTED_DECORATION = '<span class="planted" %s style="color:#5d5294">planted decoration</span>'
 
 
 @needs_chrome
@@ -1722,10 +1731,26 @@ def test_the_tree_glyph_is_the_only_decoration(rendered: dict[str, str], tmp_pat
     reported = one_page(tmp_path, "planted-visible", visible, probes.CONTRAST_PROBE)
     assert isinstance(clean, dict) and isinstance(reported, dict)
     assert clean["bad"] == [], f"this page was already failing contrast: {clean}"
-    assert reported["bad"] != [], (
-        f"the planted span is #5d5294 on the page ground -- 2.60:1 -- and the "
-        f"contrast probe did not report it, so nothing below is measuring an "
-        f"exemption: {reported}"
+
+    # `examined` first, and separately from `bad`. A counter-check that stops
+    # firing turns the exemption below it into decoration, and the only way to
+    # tell "the probe looked at the span and it passed" from "the probe never
+    # saw the span" is the count -- which is precisely the two failures this
+    # split tells apart. It ceased to fire on CI for the first reason: the
+    # staged "dark" page was rendered light there, because
+    # `prefers-color-scheme` under `--headless` follows the machine underneath
+    # and a runner has no desktop, and #5d5294 clears 4.5:1 on a light ground.
+    # `probes.scheme_stylesheet` forces both schemes in the file now, and this
+    # assertion is what would have said which of the two had happened.
+    assert reported["examined"] == clean["examined"] + 1, (
+        f"the planted span is not in the set the contrast probe examined -- "
+        f"{clean['examined']} elements without it, {reported['examined']} with it. "
+        f"Nothing below is measuring an exemption from a check that never ran"
+    )
+    assert [entry for entry in reported["bad"] if entry.startswith("span.planted")], (
+        f"the planted span is #5d5294 on the page ground -- 2.60:1 in the dark "
+        f"scheme -- and the contrast probe examined it and passed it, so the page "
+        f"that was measured is not the page this counter-check describes: {reported}"
     )
 
     silenced = one_page(tmp_path, "planted-hidden", hidden, probes.CONTRAST_PROBE)
@@ -1733,6 +1758,14 @@ def test_the_tree_glyph_is_the_only_decoration(rendered: dict[str, str], tmp_pat
     assert silenced["bad"] == [], (
         f"aria-hidden did not silence the planted span, so the skip clause spec 0028 "
         f"added to CONTRAST_PROBE is not in effect: {silenced}"
+    )
+    # The same count, from the other side: the attribute has to take the span
+    # out of the examined set. A `bad` that is empty because the span was never
+    # planted would satisfy the clause above and nothing else.
+    assert silenced["examined"] == clean["examined"], (
+        f"aria-hidden left {silenced['examined']} elements examined against "
+        f"{clean['examined']} on the bare page -- the attribute is not what removed "
+        f"the planted span from the probe's set"
     )
 
     guarded = one_page(tmp_path, "planted-guard", hidden, ARIA_PROBE)

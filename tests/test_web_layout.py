@@ -247,11 +247,12 @@ def test_css_defines_dark_counterpart_for_every_token() -> None:
 def test_light_block_holds_nothing_but_token_overrides() -> None:
     """FR-8/AC-9: the shape FR-14's scheme-forcing depends on.
 
-    ``probes.light_stylesheet`` makes the light scheme unconditional by
-    deleting the media wrapper. That is only faithful if the block holds one
+    ``probes.scheme_stylesheet`` selects a scheme by deleting the media
+    wrapper: the light run keeps the block's contents unconditionally, the
+    dark run drops them. That is only faithful if the block holds one
     ``:root`` rule and nothing else; anything else in it would be promoted to
-    unconditional too, and the light contrast run would be measuring a page
-    the browser never draws.
+    unconditional in the light copy and lost from the dark one, and both
+    contrast runs would be measuring a page the browser never draws.
     """
     text = CSS.read_text()
     at = text.find(_LIGHT_MEDIA)

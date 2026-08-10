@@ -52,8 +52,10 @@ from typing import Any
 
 CHROME = "/opt/google/chrome/chrome"
 
-#: The forced-light copy of the stylesheet, served beside the real one.
-LIGHT_CSS = "cabin-light.css"
+#: The forced copies of the stylesheet, one per scheme, served beside the
+#: real one. **Both** schemes are forced in the file; see
+#: :func:`scheme_stylesheet` for why neither may be left to the browser.
+SCHEME_CSS = {"dark": "cabin-dark.css", "light": "cabin-light.css"}
 
 #: Reports every element drawn past the viewport or past its own container,
 #: together with how many it examined and how many it excused (FR-3, FR-4).
@@ -391,16 +393,29 @@ def overflow(url: str, width: int, height: int) -> dict[str, object]:
     return found
 
 
-def light_stylesheet(text: str) -> str:
-    """``cabin.css`` with the light scheme's media wrapper removed (FR-14).
+def scheme_stylesheet(text: str, scheme: str) -> str:
+    """``cabin.css`` with the light scheme's media wrapper resolved (FR-14).
 
-    Headless Chrome reports ``prefers-color-scheme: dark`` and no flag
-    changes that, so the light scheme is forced by making its ``:root`` block
-    -- which comes after the default one and has equal specificity --
-    unconditional. The transformation is only faithful because FR-8 requires
-    that block to hold exactly one ``:root`` rule and nothing else; AC-9
-    asserts that shape, so this cannot silently stop being valid.
+    **Neither scheme is left to the browser.** ``prefers-color-scheme`` under
+    ``--headless`` is whatever the machine underneath reports: dark on a
+    developer's desktop with a dark system theme, light on a CI runner that
+    has no desktop at all. A "dark" run that relies on that default therefore
+    renders the *light* stylesheet on the runner -- and stays green, because
+    every assertion over it is "nothing here is below threshold", which the
+    light scheme also satisfies. The only thing that noticed was
+    ``test_the_tree_glyph_is_the_only_decoration``'s counter-check, which
+    plants a span that fails on the dark ground and clears 4.5:1 on the light
+    one, and it noticed by silently ceasing to fire.
+
+    So both schemes are forced in the file. The light block comes after the
+    default ``:root`` and has equal specificity, so making it unconditional
+    selects the light scheme and deleting it selects the dark one. The
+    transformation is only faithful because FR-8 requires that block to hold
+    exactly one ``:root`` rule and nothing else; AC-9
+    (``test_light_block_holds_nothing_but_token_overrides``) asserts that
+    shape, so this cannot silently stop being valid.
     """
+    assert scheme in SCHEME_CSS, scheme
     start = text.find(_LIGHT_MEDIA)
     assert start != -1, f"cabin.css has no {_LIGHT_MEDIA} block (spec 0027 FR-8)"
     assert text.find(_LIGHT_MEDIA, start + 1) == -1, "more than one light media block (FR-8)"
@@ -412,7 +427,7 @@ def light_stylesheet(text: str) -> str:
         elif text[i] == "}":
             depth -= 1
             if depth == 0:
-                inner = text[open_brace + 1 : i]
+                inner = text[open_brace + 1 : i] if scheme == "light" else ""
                 return text[:start] + inner + text[i + 1 :]
     raise AssertionError("the light media block is never closed")
 
@@ -427,17 +442,19 @@ def stage(
     """Write every rendered page into ``root`` with ``probe`` appended and the
     real stylesheet beside it, in one of the two schemes.
 
-    The dark scheme is what headless Chrome reports by default and needs
-    nothing; the light one is served the stripped copy ``light_stylesheet``
-    produces. Both runs therefore use the real values from the real file.
+    Each scheme is served its own copy, produced by ``scheme_stylesheet`` from
+    the real file, and every page is relinked to it. Both runs therefore use
+    the real values from the real file, and neither asks the browser which
+    scheme it prefers -- the answer to that differs between a desktop and a CI
+    runner, which is a difference in *what page was measured* and not one any
+    assertion downstream can see.
     """
-    assert scheme in {"dark", "light"}, scheme
+    assert scheme in SCHEME_CSS, scheme
     shutil.copytree(static, root / "static", dirs_exist_ok=True)
-    if scheme == "light":
-        css = light_stylesheet((static / "cabin.css").read_text())
-        (root / "static" / LIGHT_CSS).write_text(css)
+    stylesheet = SCHEME_CSS[scheme]
+    css = scheme_stylesheet((static / "cabin.css").read_text(), scheme)
+    (root / "static" / stylesheet).write_text(css)
     for name, html in pages.items():
         body = html.replace("</body>", probe + "</body>")
-        if scheme == "light":
-            body = body.replace("/static/cabin.css", f"/static/{LIGHT_CSS}")
+        body = body.replace("/static/cabin.css", f"/static/{stylesheet}")
         (root / f"{name}.html").write_text(body)
